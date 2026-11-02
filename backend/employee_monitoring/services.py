@@ -16,6 +16,22 @@ from .models import MonitoringAudit
 
 _SIGNER_SALT = "employee_monitoring.recording.playback"
 
+# Reserved so only the signed-in handset can create these rows. PBX ingest cannot use it.
+ANDROID_CALL_SOURCE = "android_call_log"
+HANDSET_CATEGORY = "android_call_history"
+
+# Audio recordings the phone's own dialer made, uploaded by the signed-in handset (no PBX).
+# A separate, more invasive opt-in than call-history metadata.
+ANDROID_CALL_RECORDING_SOURCE = "android_call_recording"
+CALL_RECORDING_CATEGORY = "android_call_recording"
+
+# Sources/categories for the handset usage + screen features (signed-in device only).
+APP_USAGE_SOURCE = "android_app_usage"
+APP_USAGE_CATEGORY = "app_usage"
+SCREEN_SOURCE = "mobile_screen"
+IN_APP_SCREEN_CATEGORY = "in_app_screens"
+SCREEN_SHARE_CATEGORY = "screen_share"
+
 
 def feature_enabled() -> bool:
     return str(getattr(settings, "EMPLOYEE_MONITORING_ENABLED", "")).lower() in ("true", "1", "yes")
@@ -30,6 +46,59 @@ def retention_days() -> int:
         return int(getattr(settings, "MONITORING_RETENTION_DAYS", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def policy_allows_category(policy, key: str) -> bool:
+    """True only when the published policy explicitly collects the given category."""
+    if not policy:
+        return False
+    for category in policy.categories or []:
+        if not isinstance(category, dict):
+            continue
+        if category.get("key") == key and category.get("collected", True):
+            return True
+    return False
+
+
+def policy_allows_handset_calls(policy) -> bool:
+    """True only when the published policy explicitly collects Android call history."""
+    return policy_allows_category(policy, HANDSET_CATEGORY)
+
+
+def latest_consent(user):
+    """The current consent row for a user (latest wins), or None."""
+    from .models import MonitoringConsent
+
+    return MonitoringConsent.objects.filter(user=user).select_related("policy").first()
+
+
+def category_consented(consent, policy, key: str) -> bool:
+    """Per-category opt-in gate used for BYOD features.
+
+    True only when the user's latest consent is an acknowledgment of THIS active policy and
+    that acknowledgment explicitly disclosed the given category. Withdrawing, acknowledging a
+    different policy, or acknowledging without this category in ``disclosed_categories`` all
+    revoke collection for the category independently of the others.
+    """
+    from .models import MonitoringConsent
+
+    if not consent or not policy:
+        return False
+    if consent.status != MonitoringConsent.ACKNOWLEDGED or consent.policy_id != policy.id:
+        return False
+    return key in (consent.disclosed_categories or [])
+
+
+def normalize_number(raw: str | None) -> str:
+    """Keep a leading plus and digits. Drop contact names and other non-number text."""
+    if not raw:
+        return ""
+    text = raw.strip()
+    plus = text.startswith("+")
+    digits = re.sub(r"\D", "", text)[:20]
+    if not digits:
+        return ""
+    return f"+{digits}" if plus else digits
 
 
 def mask_number(raw: str | None) -> str:

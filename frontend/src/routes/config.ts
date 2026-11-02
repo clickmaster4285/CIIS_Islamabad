@@ -196,6 +196,7 @@ export const ROUTES = {
   EMPLOYEES: "/employees",
   ADD_STAFF: "/employees/add",
   MOBILE_ALERTS: "/employees/mobile-alerts",
+  PHONE_ACTIVITY: "/employees/phone-activity",
   EMPLOYEE_DEVICE: "/employees/:id/device",
   RECRUITMENT: "/recruitment",
   VISITOR_EDIT: "/visitors/:id/edit",
@@ -622,6 +623,7 @@ const ALL_NAV_ITEMS: (NavItem | NavGroup)[] = [
     children: [
       { label: "Employees", href: ROUTES.EMPLOYEES },
       { label: "Mobile Alerts", href: ROUTES.MOBILE_ALERTS },
+      { label: "Phone Activity", href: ROUTES.PHONE_ACTIVITY },
       { label: "Face Enrollment", href: ROUTES.FACE_ENROLLMENT },
       { label: "Attendance Monitor", href: ROUTES.ATTENDANCE_MONITOR },
       { label: "Attendance Dashboard", href: ROUTES.ATTENDANCE_DASHBOARD },

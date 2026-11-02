@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from .models import EmployeeCallRecord, EmployeeCallRecording, MonitoringPolicy
+from .models import (
+    EmployeeAppUsage,
+    EmployeeCallRecord,
+    EmployeeCallRecording,
+    EmployeeScreenCapture,
+    MonitoringPolicy,
+)
 
 
 def policy_payload(policy: MonitoringPolicy) -> dict:
@@ -17,9 +23,17 @@ def policy_payload(policy: MonitoringPolicy) -> dict:
     }
 
 
-def call_payload(call: EmployeeCallRecord) -> dict:
+def call_payload(call: EmployeeCallRecord, *, include_number: bool = False) -> dict:
+    """``include_number`` adds the decrypted full number; callers must restrict and audit it."""
+    user = call.user
+    recording = call.recordings.first()
+    name = ""
+    if user:
+        name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
     return {
         "id": str(call.id),
+        "username": user.get_username() if user else None,
+        "name": name or None,
         "direction": call.direction,
         "masked_number": call.masked_number or None,
         "started_at": call.started_at.isoformat() if call.started_at else None,
@@ -27,8 +41,10 @@ def call_payload(call: EmployeeCallRecord) -> dict:
         "duration_seconds": call.duration_seconds,
         "source": call.source,
         "source_label": call.source_label,
+        "sim_slot": call.sim_slot or None,
         "recording_status": call.recording_status,
-        "recording_id": str(call.recordings.first().id) if call.recordings.exists() else None,
+        "recording_id": str(recording.id) if recording else None,
+        **({"number": call.number or None} if include_number else {}),
     }
 
 
@@ -72,6 +88,25 @@ class CallMetadataBatchSerializer(serializers.Serializer):
     events = CallMetadataEventSerializer(many=True)
 
 
+class DeviceCallEventSerializer(serializers.Serializer):
+    source_event_id = serializers.RegexField(r"^[A-Za-z0-9._:-]{1,40}$")
+    direction = serializers.ChoiceField(choices=[c[0] for c in EmployeeCallRecord.DIRECTION_CHOICES])
+    number = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    started_at = serializers.DateTimeField()
+    duration_seconds = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=24 * 60 * 60)
+    sim_slot = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+
+
+class DeviceCallSyncSerializer(serializers.Serializer):
+    device_uuid = serializers.RegexField(r"^[A-Za-z0-9._:-]{8,64}$")
+    events = DeviceCallEventSerializer(many=True)
+
+    def validate_events(self, value):
+        if len(value) > 100:
+            raise serializers.ValidationError("At most 100 calls per sync.")
+        return value
+
+
 class RecordingUploadRequestSerializer(serializers.Serializer):
     source = serializers.CharField(max_length=60)
     source_recording_id = serializers.CharField(max_length=120)
@@ -81,3 +116,96 @@ class RecordingUploadRequestSerializer(serializers.Serializer):
     size_bytes = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     checksum_sha256 = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
     duration_seconds = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+
+
+class DeviceRecordingUploadSerializer(serializers.Serializer):
+    """Multipart upload of one call recording the phone's own dialer produced.
+
+    ``file`` carries the audio bytes. ``recorded_at`` is when the call happened (used to reject
+    recordings from before consent). ``source_call_event_id`` optionally links it to a call-history
+    row already synced from the same device.
+    """
+
+    source_recording_id = serializers.RegexField(r"^[A-Za-z0-9._:-]{1,120}$")
+    source_call_event_id = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+    device_uuid = serializers.RegexField(r"^[A-Za-z0-9._:-]{8,64}$")
+    recorded_at = serializers.DateTimeField()
+    duration_seconds = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=24 * 60 * 60)
+    content_type = serializers.CharField(max_length=60, required=False, allow_blank=True, default="audio/mpeg")
+    file = serializers.FileField()
+
+
+# --- app usage (Android handset, signed-in user) -------------------------------------------
+
+class AppUsageEventSerializer(serializers.Serializer):
+    source_event_id = serializers.RegexField(r"^[A-Za-z0-9._:-]{1,120}$")
+    package_name = serializers.CharField(max_length=160)
+    app_label = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    foreground_seconds = serializers.IntegerField(min_value=0, max_value=36 * 60 * 60)
+    launch_count = serializers.IntegerField(required=False, min_value=0, max_value=100000, default=0)
+    window_start = serializers.DateTimeField()
+    window_end = serializers.DateTimeField()
+    last_used_at = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class AppUsageSyncSerializer(serializers.Serializer):
+    device_uuid = serializers.RegexField(r"^[A-Za-z0-9._:-]{8,64}$")
+    events = AppUsageEventSerializer(many=True)
+
+    def validate_events(self, value):
+        if len(value) > 500:
+            raise serializers.ValidationError("At most 500 usage rows per sync.")
+        return value
+
+
+def app_usage_payload(row: EmployeeAppUsage) -> dict:
+    user = row.user
+    name = ""
+    if user:
+        name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
+    return {
+        "id": str(row.id),
+        "username": user.get_username() if user else None,
+        "name": name or None,
+        "package_name": row.package_name,
+        "app_label": row.app_label or row.package_name,
+        "foreground_seconds": row.foreground_seconds,
+        "launch_count": row.launch_count,
+        "window_start": row.window_start.isoformat() if row.window_start else None,
+        "window_end": row.window_end.isoformat() if row.window_end else None,
+        "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
+    }
+
+
+# --- screen captures (in-app screenshots + consented screen share) --------------------------
+
+class ScreenUploadSerializer(serializers.Serializer):
+    """Multipart upload from the signed-in device. ``file`` carries the image/video bytes."""
+
+    kind = serializers.ChoiceField(choices=[c[0] for c in EmployeeScreenCapture.KIND_CHOICES])
+    source_capture_id = serializers.RegexField(r"^[A-Za-z0-9._:-]{1,120}$")
+    session_id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    route = serializers.CharField(max_length=160, required=False, allow_blank=True, default="")
+    captured_at = serializers.DateTimeField(required=False, allow_null=True)
+    content_type = serializers.CharField(max_length=60, required=False, allow_blank=True, default="image/jpeg")
+    checksum_sha256 = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    file = serializers.FileField()
+
+
+def screen_capture_payload(cap: EmployeeScreenCapture, *, can_view: bool) -> dict:
+    user = cap.user
+    name = ""
+    if user:
+        name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
+    return {
+        "id": str(cap.id),
+        "username": user.get_username() if user else None,
+        "name": name or None,
+        "kind": cap.kind,
+        "route": cap.route or None,
+        "content_type": cap.content_type,
+        "size_bytes": cap.size_bytes,
+        "captured_at": cap.captured_at.isoformat() if cap.captured_at else None,
+        "status": cap.status,
+        "can_view": bool(can_view and cap.status == EmployeeScreenCapture.AVAILABLE),
+    }

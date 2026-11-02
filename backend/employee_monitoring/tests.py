@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
+from datetime import timedelta
+
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -14,7 +16,7 @@ from .models import (
     MonitoringConsent,
     MonitoringPolicy,
 )
-from .services import mask_number
+from .services import mask_number, normalize_number
 
 BASE = "/api/v1/employee-monitor"
 
@@ -47,6 +49,10 @@ class MaskNumberTests(TestCase):
         self.assertEqual(mask_number("+923001234567"), "+92********67")
         self.assertEqual(mask_number("12"), "***")
         self.assertEqual(mask_number(""), "")
+
+    def test_normalize_drops_names(self):
+        self.assertEqual(normalize_number("+92 300-1234567"), "+923001234567")
+        self.assertEqual(normalize_number("Ali Khan"), "")
 
 
 @override_settings(EMPLOYEE_MONITORING_ENABLED=True, TEKEYE_DEPLOYMENT_ID="ciis-test")
@@ -150,3 +156,119 @@ class RecordingTests(TestCase):
         EmployeeCallRecording.objects.filter(id=rid).update(status=EmployeeCallRecording.AVAILABLE)
         self.assertEqual(_client(other).get(f"{BASE}/recordings/{rid}/playback/").status_code, 403)
         self.assertEqual(_client(owner).get(f"{BASE}/recordings/{rid}/playback/").status_code, 200)
+
+    def test_handset_source_cannot_upload_audio(self):
+        admin = _user("a5", role="ADMIN")
+        r = _client(admin).post(f"{BASE}/recordings/uploads/", {
+            "source": "android_call_log", "source_recording_id": "r3", "username": "a5",
+        }, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(EmployeeCallRecording.objects.filter(source="android_call_log").exists())
+
+
+def _handset_policy():
+    return MonitoringPolicy.objects.create(
+        version="handset",
+        is_active=True,
+        effective_at=timezone.now(),
+        categories=[{"key": "android_call_history", "label": "Android call history", "collected": True}],
+    )
+
+
+@override_settings(EMPLOYEE_MONITORING_ENABLED=True)
+class DeviceCallSyncTests(TestCase):
+    def _sync(self, client, event_id="42", started=None, number="+923001234567"):
+        return client.post(
+            f"{BASE}/calls/device-sync/",
+            {
+                "device_uuid": "11111111-1111-4111-8111-111111111111",
+                "events": [{
+                    "source_event_id": event_id,
+                    "direction": "inbound",
+                    "number": number,
+                    "started_at": (started or timezone.now()).isoformat(),
+                    "duration_seconds": 30,
+                    "sim_slot": "0",
+                }],
+            },
+            format="json",
+        )
+
+    def test_blocked_until_policy_includes_handset_history(self):
+        p = _policy()
+        user = _user("d1")
+        c = _client(user)
+        c.post(f"{BASE}/consents/", {"policy_id": str(p.id), "action": "acknowledge"}, format="json")
+        self.assertEqual(self._sync(c).status_code, 403)
+        self.assertFalse(EmployeeCallRecord.objects.exists())
+
+    def test_blocked_without_consent(self):
+        _handset_policy()
+        self.assertEqual(self._sync(_client(_user("d2"))).status_code, 403)
+
+    def test_sync_masks_dedupes_and_hides_full_number(self):
+        policy = _handset_policy()
+        user = _user("d3")
+        c = _client(user)
+        c.post(
+            f"{BASE}/consents/",
+            {"policy_id": str(policy.id), "action": "acknowledge", "disclosed_categories": ["android_call_history"]},
+            format="json",
+        )
+        first = self._sync(c, "42")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.json()["accepted"], ["42"])
+        self.assertEqual(self._sync(c, "42").json()["duplicates"], ["42"])
+        rec = EmployeeCallRecord.objects.get()
+        self.assertEqual(rec.user_id, user.id)
+        self.assertEqual(rec.source, "android_call_log")
+        self.assertEqual(rec.recording_status, "unavailable")
+        self.assertEqual(rec.number, "+923001234567")
+        body = c.get(f"{BASE}/calls/").json()
+        dumped = str(body)
+        self.assertNotIn("3001234567", dumped)
+        self.assertNotIn("number", body["results"][0])
+        self.assertEqual(body["results"][0]["username"], "d3")
+        self.assertEqual(body["total_duration_seconds"], 30)
+        self.assertTrue(MonitoringAudit.objects.filter(action="android_call_log_sync").exists())
+
+    def test_blocked_when_consent_omits_call_history(self):
+        # Opting into other categories (e.g. from Settings) must not authorize call uploads.
+        policy = _handset_policy()
+        c = _client(_user("d5"))
+        c.post(
+            f"{BASE}/consents/",
+            {"policy_id": str(policy.id), "action": "acknowledge", "disclosed_categories": ["app_usage"]},
+            format="json",
+        )
+        self.assertEqual(self._sync(c).status_code, 403)
+        self.assertEqual(c.get(f"{BASE}/consents/current/").json()["disclosed_categories"], ["app_usage"])
+        self.assertFalse(EmployeeCallRecord.objects.exists())
+
+    def test_calls_before_consent_are_rejected(self):
+        policy = _handset_policy()
+        user = _user("d4")
+        c = _client(user)
+        c.post(
+            f"{BASE}/consents/",
+            {"policy_id": str(policy.id), "action": "acknowledge", "disclosed_categories": ["android_call_history"]},
+            format="json",
+        )
+        old = timezone.now() - timedelta(days=2)
+        r = self._sync(c, "old", started=old)
+        self.assertEqual(r.json()["rejected"][0]["reason"], "before_consent")
+        self.assertFalse(EmployeeCallRecord.objects.exists())
+
+    def test_admin_batch_cannot_impersonate_handset_source(self):
+        admin = _user("d5", role="ADMIN")
+        r = _client(admin).post(
+            f"{BASE}/calls/metadata/batch/",
+            {"source": "android_call_log", "events": [{
+                "source_event_id": "x", "direction": "outbound", "number": "+923001234567",
+                "username": "d5", "started_at": "2026-10-22T09:00:00Z", "duration_seconds": 10,
+                "recording_status": "unavailable",
+            }]},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(EmployeeCallRecord.objects.exists())

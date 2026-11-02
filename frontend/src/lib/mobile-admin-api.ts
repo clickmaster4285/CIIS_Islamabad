@@ -122,3 +122,110 @@ export async function disableMobileAccess(id: number): Promise<void> {
   })
   if (!res.ok) throw new Error(await readError(res, "Failed to disable mobile access"))
 }
+
+export type PhoneCallRecord = {
+  id: string
+  username: string | null
+  name: string | null
+  direction: string
+  masked_number: string | null
+  /** Full number; only sent to overview roles (each view is audited server-side). */
+  number?: string | null
+  started_at: string | null
+  ended_at: string | null
+  duration_seconds: number | null
+  source: string
+  source_label: string
+  sim_slot: string | null
+  recording_status: string
+  recording_id: string | null
+}
+
+export type AppUsageRecord = {
+  id: string
+  username: string | null
+  name: string | null
+  package_name: string
+  app_label: string
+  foreground_seconds: number
+  launch_count: number
+  window_start: string | null
+  window_end: string | null
+  last_used_at: string | null
+}
+
+export type PhoneActivityFilters = { date?: string; username?: string }
+
+async function readMonitorError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json()
+    if (typeof data?.error?.message === "string") return data.error.message
+    if (typeof data?.detail === "string") return data.detail
+  } catch {
+    /* ignore */
+  }
+  return fallback
+}
+
+function monitorQuery(filters: PhoneActivityFilters): string {
+  const sp = new URLSearchParams()
+  if (filters.date) sp.set("date", filters.date)
+  if (filters.username) sp.set("username", filters.username.trim())
+  return sp.toString() ? `?${sp}` : ""
+}
+
+export async function fetchPhoneCalls(filters: PhoneActivityFilters = {}): Promise<PhoneCallRecord[]> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/calls/${monitorQuery(filters)}`, {
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load call logs"))
+  const data = await res.json()
+  return Array.isArray(data?.results) ? data.results : []
+}
+
+export async function fetchAppUsage(filters: PhoneActivityFilters = {}): Promise<AppUsageRecord[]> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/app-usage/${monitorQuery(filters)}`, {
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load app usage"))
+  const data = await res.json()
+  return Array.isArray(data?.results) ? data.results : []
+}
+
+export type CallRecordingRecord = {
+  id: string
+  call_id: string | null
+  source: string
+  source_label: string
+  recorded_at: string | null
+  duration_seconds: number | null
+  status: string
+  can_play: boolean
+}
+
+export async function fetchRecordings(filters: PhoneActivityFilters = {}): Promise<CallRecordingRecord[]> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/recordings/${monitorQuery(filters)}`, {
+    headers: getAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load recordings"))
+  const data = await res.json()
+  return Array.isArray(data?.results) ? data.results : []
+}
+
+/**
+ * Resolve a recording to a playable blob URL. Two audited server hops: first an
+ * authorized short-lived signed stream URL, then the stream itself (fetched with the
+ * auth header, since a bare <audio src> cannot carry the bearer token). The caller
+ * owns the returned object URL and must revoke it when done.
+ */
+export async function fetchRecordingAudioUrl(id: string): Promise<string> {
+  const auth = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/recordings/${id}/playback/`, {
+    headers: getAuthHeaders(),
+  })
+  if (!auth.ok) throw new Error(await readMonitorError(auth, "Could not authorize playback"))
+  const { url } = await auth.json()
+  if (typeof url !== "string" || !url) throw new Error("Playback URL missing from server response")
+  const stream = await fetch(url, { headers: getAuthHeaders() })
+  if (!stream.ok) throw new Error(await readMonitorError(stream, "Could not stream recording"))
+  return URL.createObjectURL(await stream.blob())
+}

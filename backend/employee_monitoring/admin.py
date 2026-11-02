@@ -1,12 +1,20 @@
+import os
+
 from django.contrib import admin
+from django.http import FileResponse, Http404
+from django.urls import path, reverse
+from django.utils.html import format_html
 
 from .models import (
+    EmployeeAppUsage,
     EmployeeCallRecord,
     EmployeeCallRecording,
+    EmployeeScreenCapture,
     MonitoringAudit,
     MonitoringConsent,
     MonitoringPolicy,
 )
+from .services import record_audit, storage_path
 
 
 @admin.register(MonitoringPolicy)
@@ -38,6 +46,75 @@ class EmployeeCallRecordingAdmin(admin.ModelAdmin):
     list_display = ("source_recording_id", "user", "status", "source", "recorded_at", "retention_deadline")
     list_filter = ("status", "source")
     search_fields = ("source_recording_id", "user__username")
+
+
+class DeviceDataAdmin(admin.ModelAdmin):
+    """Rows arrive from consented devices; admins can inspect and delete, never add or edit."""
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(EmployeeAppUsage)
+class EmployeeAppUsageAdmin(DeviceDataAdmin):
+    list_display = ("app_name", "user", "foreground_minutes", "launch_count", "window_start", "window_end", "device_uuid")
+    list_filter = ("source", "window_start")
+    search_fields = ("package_name", "app_label", "user__username", "device_uuid")
+    date_hierarchy = "window_start"
+    list_select_related = ("user",)
+
+    @admin.display(description="App", ordering="app_label")
+    def app_name(self, obj):
+        return obj.app_label or obj.package_name
+
+    @admin.display(description="Minutes", ordering="foreground_seconds")
+    def foreground_minutes(self, obj):
+        return round(obj.foreground_seconds / 60, 1)
+
+
+@admin.register(EmployeeScreenCapture)
+class EmployeeScreenCaptureAdmin(DeviceDataAdmin):
+    list_display = ("captured_at", "user", "kind", "route", "status", "size_bytes", "image_link")
+    list_filter = ("kind", "status", "captured_at")
+    search_fields = ("route", "user__username", "device_uuid", "source_capture_id")
+    date_hierarchy = "captured_at"
+    list_select_related = ("user",)
+    readonly_fields = ("preview",)
+
+    def get_urls(self):
+        view = self.admin_site.admin_view(self.image_view)
+        return [path("<uuid:capture_id>/image/", view, name="employee_monitoring_screen_image")] + super().get_urls()
+
+    def image_view(self, request, capture_id):
+        # Same audit trail as the API stream: every admin view of a capture is recorded.
+        cap = EmployeeScreenCapture.objects.filter(id=capture_id).first()
+        if not cap or cap.status != EmployeeScreenCapture.AVAILABLE or not self.has_view_permission(request, cap):
+            raise Http404
+        file_path = storage_path(cap.storage_key) if cap.storage_key else ""
+        if not file_path or not os.path.exists(file_path):
+            raise Http404
+        record_audit(request, action="screen_streamed", target_type="screen", target_id=cap.id, via="admin")
+        return FileResponse(open(file_path, "rb"), content_type=cap.content_type or "image/jpeg")
+
+    def _image_url(self, obj):
+        if obj.status != EmployeeScreenCapture.AVAILABLE:
+            return ""
+        return reverse("admin:employee_monitoring_screen_image", args=[obj.id])
+
+    @admin.display(description="Image")
+    def image_link(self, obj):
+        url = self._image_url(obj)
+        return format_html('<a href="{}" target="_blank">Open</a>', url) if url else "—"
+
+    @admin.display(description="Preview")
+    def preview(self, obj):
+        url = self._image_url(obj)
+        if not url:
+            return f"Not available ({obj.get_status_display()})"
+        return format_html('<a href="{0}" target="_blank"><img src="{0}" style="max-height:480px;border:1px solid #ccc"></a>', url)
 
 
 @admin.register(MonitoringAudit)
