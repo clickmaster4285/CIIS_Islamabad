@@ -1,11 +1,14 @@
 from django.urls import path
 
 from .views import (
+    AppIconSyncView,
+    AppSessionView,
     AppUsageView,
     CallMetadataBatchView,
     CallsView,
     ConsentView,
     DataCategoriesView,
+    DeviceAppSessionSyncView,
     DeviceAppUsageSyncView,
     DeviceCallRecordingUploadView,
     DeviceCallSyncView,
@@ -42,6 +45,9 @@ urlpatterns = [
     # App usage (Android handset, signed-in user).
     path("app-usage/", AppUsageView.as_view(), name="monitor-app-usage"),
     path("app-usage/device-sync/", DeviceAppUsageSyncView.as_view(), name="monitor-app-usage-device-sync"),
+    path("app-usage/icons/", AppIconSyncView.as_view(), name="monitor-app-usage-icons"),
+    path("app-usage/sessions/", AppSessionView.as_view(), name="monitor-app-sessions"),
+    path("app-usage/sessions/device-sync/", DeviceAppSessionSyncView.as_view(), name="monitor-app-sessions-device-sync"),
     # Screen captures: in-app screenshots + consented, visible screen share.
     path("screens/", ScreensView.as_view(), name="monitor-screens"),
     path("screens/upload/", ScreenUploadView.as_view(), name="monitor-screen-upload"),

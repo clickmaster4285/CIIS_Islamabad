@@ -24,14 +24,18 @@ from rest_framework.views import APIView
 from users.permissions import can_view_all_staff
 
 from .models import (
+    EmployeeAppSession,
     EmployeeAppUsage,
     EmployeeCallRecord,
     EmployeeCallRecording,
     EmployeeScreenCapture,
+    MonitoredAppIcon,
     MonitoringConsent,
     MonitoringPolicy,
 )
 from .serializers import (
+    AppIconSyncSerializer,
+    AppSessionSyncSerializer,
     AppUsageSyncSerializer,
     CallMetadataBatchSerializer,
     ConsentInSerializer,
@@ -39,6 +43,7 @@ from .serializers import (
     DeviceRecordingUploadSerializer,
     RecordingUploadRequestSerializer,
     ScreenUploadSerializer,
+    app_session_payload,
     app_usage_payload,
     call_payload,
     policy_payload,
@@ -589,20 +594,26 @@ class DeviceAppUsageSyncView(MonitorView):
                 continue
             try:
                 with transaction.atomic():
-                    EmployeeAppUsage.objects.create(
-                        user=request.user,
-                        package_name=ev["package_name"][:160],
-                        app_label=(ev.get("app_label") or "")[:200],
-                        foreground_seconds=ev["foreground_seconds"],
-                        launch_count=ev.get("launch_count", 0),
-                        window_start=ev["window_start"],
-                        window_end=ev["window_end"],
-                        last_used_at=ev.get("last_used_at"),
+                    # Upsert on (source, source_event_id). The event id is derived from a fixed
+                    # per-day window, so a day re-synced later (today's total keeps growing until
+                    # midnight) UPDATES the same row rather than appending a duplicate. Appending
+                    # was the cause of per-app totals ballooning on every sync.
+                    _, created = EmployeeAppUsage.objects.update_or_create(
                         source=APP_USAGE_SOURCE,
                         source_event_id=f"{device_uuid}:{client_id}"[:160],
-                        device_uuid=device_uuid,
+                        defaults=dict(
+                            user=request.user,
+                            package_name=ev["package_name"][:160],
+                            app_label=(ev.get("app_label") or "")[:200],
+                            foreground_seconds=ev["foreground_seconds"],
+                            launch_count=ev.get("launch_count", 0),
+                            window_start=ev["window_start"],
+                            window_end=ev["window_end"],
+                            last_used_at=ev.get("last_used_at"),
+                            device_uuid=device_uuid,
+                        ),
                     )
-                accepted.append(client_id)
+                (accepted if created else duplicates).append(client_id)
             except IntegrityError:
                 duplicates.append(client_id)
         record_audit(
@@ -627,10 +638,122 @@ class AppUsageView(MonitorView):
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
         rows = list(qs.select_related("user")[:500])
+        packages = {r.package_name for r in rows}
+        icons = dict(
+            MonitoredAppIcon.objects.filter(package_name__in=packages, icon_base64__gt="")
+            .values_list("package_name", "icon_base64")
+        )
         return Response({
-            "results": [app_usage_payload(r) for r in rows],
+            "results": [app_usage_payload(r, icons) for r in rows],
             "count": len(rows),
             "total_foreground_seconds": sum(r.foreground_seconds or 0 for r in rows),
+        })
+
+
+class AppIconSyncView(MonitorView):
+    """Store launcher icons for app packages so the dashboard can show real icons. Gated like
+    app-usage: active policy includes app_usage and the user has consented to it. Icons carry
+    no personal content; they are deduplicated per package across the whole deployment."""
+
+    def post(self, request):
+        policy = MonitoringPolicy.objects.filter(is_active=True).order_by("-effective_at").first()
+        if policy is None or not policy_allows_category(policy, APP_USAGE_CATEGORY):
+            return Response(
+                {"error": {"code": "POLICY_SCOPE", "message": "The active monitoring policy does not include app usage."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        consent = latest_consent(request.user)
+        if not category_consented(consent, policy, APP_USAGE_CATEGORY):
+            return Response(
+                {"error": {"code": "CONSENT_REQUIRED", "message": "Opt in to app-usage collection first."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        ser = AppIconSyncSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        stored = []
+        for ic in ser.validated_data["icons"]:
+            MonitoredAppIcon.objects.update_or_create(
+                package_name=ic["package_name"][:160],
+                defaults={"app_label": (ic.get("app_label") or "")[:200], "icon_base64": ic["icon_base64"]},
+            )
+            stored.append(ic["package_name"])
+        return Response({"stored": stored}, status=status.HTTP_200_OK)
+
+
+class DeviceAppSessionSyncView(MonitorView):
+    """Foreground-session timeline from the signed-in Android phone. Same consent/policy gate
+    as app-usage totals, and only sessions starting at/after the acknowledgment are kept. Usage
+    metadata only (which app, when, how long) — never what was shown or done inside the app."""
+
+    def post(self, request):
+        policy = MonitoringPolicy.objects.filter(is_active=True).order_by("-effective_at").first()
+        if policy is None or not policy_allows_category(policy, APP_USAGE_CATEGORY):
+            return Response(
+                {"error": {"code": "POLICY_SCOPE", "message": "The active monitoring policy does not include app usage."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        consent = latest_consent(request.user)
+        if not category_consented(consent, policy, APP_USAGE_CATEGORY):
+            return Response(
+                {"error": {"code": "CONSENT_REQUIRED", "message": "Opt in to app-usage collection first."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        ser = AppSessionSyncSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        device_uuid = ser.validated_data["device_uuid"]
+        cutoff = consent.created_at - timedelta(minutes=5)
+        accepted, duplicates, rejected = [], [], []
+        for ev in ser.validated_data["events"]:
+            client_id = ev["source_event_id"]
+            if ev["started_at"] < cutoff:
+                rejected.append({"source_event_id": client_id, "reason": "before_consent"})
+                continue
+            try:
+                with transaction.atomic():
+                    _, created = EmployeeAppSession.objects.update_or_create(
+                        source=APP_USAGE_SOURCE,
+                        source_event_id=f"{device_uuid}:{client_id}"[:160],
+                        defaults=dict(
+                            user=request.user,
+                            package_name=ev["package_name"][:160],
+                            app_label=(ev.get("app_label") or "")[:200],
+                            started_at=ev["started_at"],
+                            ended_at=ev["ended_at"],
+                            duration_seconds=ev["duration_seconds"],
+                            device_uuid=device_uuid,
+                        ),
+                    )
+                (accepted if created else duplicates).append(client_id)
+            except IntegrityError:
+                duplicates.append(client_id)
+        record_audit(
+            request, action="app_session_sync", target_type="app_session_batch", reason=APP_USAGE_SOURCE,
+            accepted=len(accepted), duplicates=len(duplicates), rejected=len(rejected),
+        )
+        return Response(
+            {"accepted": accepted, "duplicates": duplicates, "rejected": rejected},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AppSessionView(MonitorView):
+    """List foreground sessions: own for ordinary staff, location-scoped for overview roles."""
+
+    def get(self, request):
+        qs = scope_queryset(EmployeeAppSession.objects.all(), request.user)
+        date = (request.query_params.get("date") or "").strip()
+        if date:
+            qs = qs.filter(started_at__date=date)
+        username = (request.query_params.get("username") or "").strip()
+        if username and can_view_all_staff(request.user):
+            qs = qs.filter(user__username=username)
+        package = (request.query_params.get("package") or "").strip()
+        if package:
+            qs = qs.filter(package_name=package)
+        rows = list(qs.select_related("user")[:1000])
+        return Response({
+            "results": [app_session_payload(r) for r in rows],
+            "count": len(rows),
         })
 
 

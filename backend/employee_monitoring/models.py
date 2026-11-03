@@ -257,3 +257,56 @@ class EmployeeScreenCapture(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind} {self.source_capture_id} ({self.status})"
+
+
+class MonitoredAppIcon(models.Model):
+    """Launcher icon for an app package, uploaded by a monitored phone so the dashboard can
+    show it. Admins view from a different device that may not have the app installed, so the
+    icon bytes must travel with the data. A small PNG, stored base64; no content, just the icon.
+    """
+
+    package_name = models.CharField(max_length=160, unique=True)
+    app_label = models.CharField(max_length=200, blank=True, default="")
+    icon_base64 = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["package_name"]
+
+    def __str__(self) -> str:
+        return self.package_name
+
+
+class EmployeeAppSession(models.Model):
+    """One foreground session: an app was in front from started_at to ended_at. This is usage
+    metadata (which app, when, how long) only — never what was shown or done inside the app.
+    Accepted on the same consent/policy gate as app-usage totals.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="monitoring_app_sessions",
+    )
+    package_name = models.CharField(max_length=160)
+    app_label = models.CharField(max_length=200, blank=True, default="")
+    started_at = models.DateTimeField()
+    ended_at = models.DateTimeField()
+    duration_seconds = models.PositiveIntegerField(default=0)
+    source = models.CharField(max_length=60, default="android_app_usage")
+    source_event_id = models.CharField(max_length=160)
+    device_uuid = models.CharField(max_length=64, blank=True, default="")
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["source", "source_event_id"], name="uniq_app_session_source_event"),
+        ]
+        indexes = [
+            models.Index(fields=["user", "-started_at"]),
+            models.Index(fields=["-started_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.package_name} {self.duration_seconds}s @ {self.started_at:%Y-%m-%d %H:%M}"

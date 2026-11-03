@@ -3,10 +3,12 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from .models import (
+    EmployeeAppSession,
     EmployeeAppUsage,
     EmployeeCallRecord,
     EmployeeCallRecording,
     EmployeeScreenCapture,
+    MonitoredAppIcon,
     MonitoringPolicy,
 )
 
@@ -158,11 +160,12 @@ class AppUsageSyncSerializer(serializers.Serializer):
         return value
 
 
-def app_usage_payload(row: EmployeeAppUsage) -> dict:
+def app_usage_payload(row: EmployeeAppUsage, icons: dict[str, str] | None = None) -> dict:
     user = row.user
     name = ""
     if user:
         name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
+    icon = (icons or {}).get(row.package_name) or ""
     return {
         "id": str(row.id),
         "username": user.get_username() if user else None,
@@ -174,6 +177,64 @@ def app_usage_payload(row: EmployeeAppUsage) -> dict:
         "window_start": row.window_start.isoformat() if row.window_start else None,
         "window_end": row.window_end.isoformat() if row.window_end else None,
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
+        # data: URI ready for an <Image>, or "" when the phone has not uploaded this icon yet.
+        "icon": f"data:image/png;base64,{icon}" if icon else "",
+    }
+
+
+# --- app icons (uploaded once per package so the dashboard can show real icons) -------------
+
+class AppIconSerializer(serializers.Serializer):
+    package_name = serializers.CharField(max_length=160)
+    app_label = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    # Raw base64 of a small PNG (no data: prefix). ~a few KB each; cap generously.
+    icon_base64 = serializers.CharField(max_length=200_000)
+
+
+class AppIconSyncSerializer(serializers.Serializer):
+    icons = AppIconSerializer(many=True)
+
+    def validate_icons(self, value):
+        if len(value) > 300:
+            raise serializers.ValidationError("At most 300 icons per sync.")
+        return value
+
+
+# --- app sessions (foreground usage timeline) ----------------------------------------------
+
+class AppSessionEventSerializer(serializers.Serializer):
+    source_event_id = serializers.RegexField(r"^[A-Za-z0-9._:-]{1,120}$")
+    package_name = serializers.CharField(max_length=160)
+    app_label = serializers.CharField(max_length=200, required=False, allow_blank=True, default="")
+    started_at = serializers.DateTimeField()
+    ended_at = serializers.DateTimeField()
+    duration_seconds = serializers.IntegerField(min_value=0, max_value=36 * 60 * 60)
+
+
+class AppSessionSyncSerializer(serializers.Serializer):
+    device_uuid = serializers.RegexField(r"^[A-Za-z0-9._:-]{8,64}$")
+    events = AppSessionEventSerializer(many=True)
+
+    def validate_events(self, value):
+        if len(value) > 1000:
+            raise serializers.ValidationError("At most 1000 sessions per sync.")
+        return value
+
+
+def app_session_payload(row: EmployeeAppSession) -> dict:
+    user = row.user
+    name = ""
+    if user:
+        name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
+    return {
+        "id": str(row.id),
+        "username": user.get_username() if user else None,
+        "name": name or None,
+        "package_name": row.package_name,
+        "app_label": row.app_label or row.package_name,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "ended_at": row.ended_at.isoformat() if row.ended_at else None,
+        "duration_seconds": row.duration_seconds,
     }
 
 
