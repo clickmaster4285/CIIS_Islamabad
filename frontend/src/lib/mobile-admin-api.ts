@@ -152,6 +152,8 @@ export type AppUsageRecord = {
   window_start: string | null
   window_end: string | null
   last_used_at: string | null
+  /** data:image/png;base64 URI for the app icon, or "" if the phone hasn't uploaded it yet. */
+  icon?: string
 }
 
 export type PhoneActivityFilters = { date?: string; username?: string }

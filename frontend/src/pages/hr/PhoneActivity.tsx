@@ -44,6 +44,19 @@ function staffLabel(row: { name: string | null; username: string | null }) {
   return row.name || row.username || "Unknown"
 }
 
+/** App launcher icon uploaded from the phone, with a colored first-letter tile as fallback. */
+function AppIcon({ icon, label }: { icon?: string; label: string }) {
+  if (icon) {
+    return <img src={icon} alt="" className="h-7 w-7 rounded-md object-cover shrink-0" />
+  }
+  const letter = (label || "?").trim().charAt(0).toUpperCase()
+  return (
+    <div className="h-7 w-7 rounded-md bg-slate-600 text-white flex items-center justify-center text-xs font-bold shrink-0">
+      {letter}
+    </div>
+  )
+}
+
 function recordingTone(status: string) {
   if (status === "available") return "bg-emerald-600"
   if (status === "pending") return "bg-amber-500"
@@ -272,8 +285,13 @@ export default function PhoneActivityPage() {
                           ) : null}
                         </TableCell>
                         <TableCell>
-                          <div className="font-medium">{r.app_label}</div>
-                          <div className="text-xs text-muted-foreground font-mono">{r.package_name}</div>
+                          <div className="flex items-center gap-2">
+                            <AppIcon icon={r.icon} label={r.app_label} />
+                            <div>
+                              <div className="font-medium">{r.app_label}</div>
+                              <div className="text-xs text-muted-foreground font-mono">{r.package_name}</div>
+                            </div>
+                          </div>
                         </TableCell>
                         <TableCell>{formatDuration(r.foreground_seconds)}</TableCell>
                         <TableCell>{r.launch_count}</TableCell>
