@@ -403,6 +403,8 @@ export default function PhoneActivityPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead>Staff</TableHead>
+                      <TableHead>Call</TableHead>
                       <TableHead>Recorded</TableHead>
                       <TableHead>Source</TableHead>
                       <TableHead>Duration</TableHead>
@@ -413,6 +415,26 @@ export default function PhoneActivityPage() {
                   <TableBody>
                     {recordingRows.map((r) => (
                       <TableRow key={r.id}>
+                        <TableCell>
+                          <div className="font-medium">{staffLabel(r)}</div>
+                          {r.name && r.username ? (
+                            <div className="text-xs text-muted-foreground">{r.username}</div>
+                          ) : null}
+                        </TableCell>
+                        <TableCell>
+                          {r.direction || r.number || r.masked_number ? (
+                            <>
+                              {r.direction ? (
+                                <Badge className={directionTone(r.direction)}>{r.direction}</Badge>
+                              ) : null}
+                              <div className="font-mono text-xs mt-1">
+                                {r.number || r.masked_number || "—"}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Not linked to a call</span>
+                          )}
+                        </TableCell>
                         <TableCell>{formatTime(r.recorded_at)}</TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {r.source_label || r.source}

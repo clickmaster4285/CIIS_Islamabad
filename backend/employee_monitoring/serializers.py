@@ -50,16 +50,31 @@ def call_payload(call: EmployeeCallRecord, *, include_number: bool = False) -> d
     }
 
 
-def recording_payload(rec: EmployeeCallRecording, *, can_play: bool) -> dict:
+def recording_payload(rec: EmployeeCallRecording, *, can_play: bool, include_number: bool = False) -> dict:
+    """``include_number`` adds the linked call's decrypted full number; callers must restrict
+    and audit it, exactly as call_payload does."""
+    user = rec.user
+    name = ""
+    if user:
+        name = (getattr(user, "full_name", "") or "").strip() or user.get_username()
+    call = rec.call
     return {
         "id": str(rec.id),
         "call_id": str(rec.call_id) if rec.call_id else None,
+        # Whose call this recording belongs to.
+        "username": user.get_username() if user else None,
+        "name": name or None,
+        # The linked call's details (null when the recording isn't tied to a call row).
+        "direction": call.direction if call else None,
+        "masked_number": (call.masked_number or None) if call else None,
+        "call_started_at": (call.started_at.isoformat() if call.started_at else None) if call else None,
         "source": rec.source,
         "source_label": rec.source_label,
         "recorded_at": rec.recorded_at.isoformat() if rec.recorded_at else None,
         "duration_seconds": rec.duration_seconds,
         "status": rec.status,
         "can_play": bool(can_play and rec.status == EmployeeCallRecording.AVAILABLE),
+        **({"number": (call.number or None) if call else None} if include_number else {}),
     }
 
 

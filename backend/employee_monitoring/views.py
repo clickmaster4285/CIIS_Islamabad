@@ -486,9 +486,20 @@ class RecordingsView(MonitorView):
         username = (request.query_params.get("username") or "").strip()
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
+        # select_related so per-row user/call details don't each hit the DB.
+        qs = qs.select_related("user", "call")
         rows, meta = paginate(request, qs)
         overview = can_view_all_staff(request.user)
-        results = [recording_payload(r, can_play=overview or r.user_id == request.user.id) for r in rows]
+        # Full numbers only for overview roles, and the disclosure is audited (as on CallsView).
+        if overview and rows:
+            record_audit(
+                request, action="recording_numbers_viewed", target_type="recordings",
+                target_id=date or "all", count=len(rows), username=username or "",
+            )
+        results = [
+            recording_payload(r, can_play=overview or r.user_id == request.user.id, include_number=overview)
+            for r in rows
+        ]
         return Response({"results": results, **meta, "next_cursor": None})
 
 

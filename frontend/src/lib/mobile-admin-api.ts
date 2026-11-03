@@ -236,6 +236,14 @@ export async function fetchAppUsage(
 export type CallRecordingRecord = {
   id: string
   call_id: string | null
+  /** Whose call this recording is. */
+  username: string | null
+  name: string | null
+  /** Linked call details (null when the recording isn't tied to a call row). */
+  direction: string | null
+  masked_number: string | null
+  number?: string | null
+  call_started_at: string | null
   source: string
   source_label: string
   recorded_at: string | null
