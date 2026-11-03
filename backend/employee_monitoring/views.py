@@ -29,6 +29,7 @@ from .models import (
     EmployeeCallRecord,
     EmployeeCallRecording,
     EmployeeScreenCapture,
+    MobileVisibility,
     MonitoredAppIcon,
     MonitoringConsent,
     MonitoringPolicy,
@@ -648,6 +649,29 @@ class AppUsageView(MonitorView):
             "count": len(rows),
             "total_foreground_seconds": sum(r.foreground_seconds or 0 for r in rows),
         })
+
+
+class MobileVisibilityView(MonitorView):
+    """What ordinary staff may see in the mobile app. Any signed-in user may read it (the app
+    needs it to build its tab bar); only overview roles may change it. Admins are never
+    restricted by these flags — they always see Calls and Logs."""
+
+    def get(self, request):
+        v = MobileVisibility.load()
+        return Response({"staff_see_calls": v.staff_see_calls, "staff_see_logs": v.staff_see_logs})
+
+    def patch(self, request):
+        if not can_view_all_staff(request.user):
+            return Response(
+                {"error": {"code": "FORBIDDEN", "message": "Only supervisors can change staff visibility."}},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        v = MobileVisibility.load()
+        for field in ("staff_see_calls", "staff_see_logs"):
+            if field in request.data:
+                setattr(v, field, bool(request.data[field]))
+        v.save()
+        return Response({"staff_see_calls": v.staff_see_calls, "staff_see_logs": v.staff_see_logs})
 
 
 class AppIconSyncView(MonitorView):

@@ -13,6 +13,7 @@ from .views import (
     DeviceCallRecordingUploadView,
     DeviceCallSyncView,
     MeView,
+    MobileVisibilityView,
     PolicyCurrentView,
     RecordingPlaybackView,
     RecordingStreamView,
@@ -28,6 +29,7 @@ from .views import (
 # Mounted under /api/v1/employee-monitor/
 urlpatterns = [
     path("me/", MeView.as_view(), name="monitor-me"),
+    path("mobile-visibility/", MobileVisibilityView.as_view(), name="monitor-mobile-visibility"),
     path("policy/current/", PolicyCurrentView.as_view(), name="monitor-policy-current"),
     path("consents/", ConsentView.as_view(), name="monitor-consents"),
     path("consents/current/", ConsentView.as_view(), name="monitor-consents-current"),

@@ -310,3 +310,29 @@ class EmployeeAppSession(models.Model):
 
     def __str__(self) -> str:
         return f"{self.package_name} {self.duration_seconds}s @ {self.started_at:%Y-%m-%d %H:%M}"
+
+
+class MobileVisibility(models.Model):
+    """Deployment-wide switches for what ordinary staff may see in the mobile app. Admins
+    (overview roles) always see everything; these flags only ever restrict non-admin staff.
+    Singleton row (id=1)."""
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1)
+    staff_see_calls = models.BooleanField(default=False)
+    staff_see_logs = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "Mobile visibility"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls) -> "MobileVisibility":
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self) -> str:
+        return f"calls={self.staff_see_calls} logs={self.staff_see_logs}"
