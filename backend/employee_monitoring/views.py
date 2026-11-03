@@ -107,6 +107,30 @@ PAGE_SIZE_DEFAULT = 50
 PAGE_SIZE_MAX = 100
 
 
+def match_call_for_recording(user, recorded_at, duration_seconds):
+    """Best-effort link a handset recording to one of the user's calls by time. The recording's
+    modified time (recorded_at) lands near the call: usually at the call's end, i.e. about
+    started_at + duration. Pick the call whose start is closest to the recording, within 15 min.
+    Returns None when no call is near (the recording then shows unlinked, which is honest)."""
+    if not recorded_at:
+        return None
+    est_start = recorded_at - timedelta(seconds=duration_seconds or 0)
+    tol = timedelta(minutes=15)
+    lo = min(recorded_at, est_start) - tol
+    hi = max(recorded_at, est_start) + tol
+    best, best_delta = None, None
+    for c in EmployeeCallRecord.objects.filter(user=user, started_at__gte=lo, started_at__lte=hi):
+        if not c.started_at:
+            continue
+        delta = min(
+            abs((c.started_at - recorded_at).total_seconds()),
+            abs((c.started_at - est_start).total_seconds()),
+        )
+        if best_delta is None or delta < best_delta:
+            best, best_delta = c, delta
+    return best
+
+
 def paginate(request, qs):
     """Slice `qs` to one page using ?page & ?page_size. Returns (rows, meta). Caller must have
     applied any select_related/prefetch_related to `qs` before passing it in."""
@@ -432,6 +456,10 @@ class DeviceCallRecordingUploadView(MonitorView):
                 source_event_id=f"{device_uuid}:{data['source_call_event_id']}",
                 user=request.user,
             ).first()
+        # Otherwise match by time: a dialer writes the recording when the call ends, so its
+        # modified time sits near the call. Attach the closest call for this user.
+        if call is None:
+            call = match_call_for_recording(request.user, data["recorded_at"], data.get("duration_seconds"))
 
         ext = (data.get("content_type") or "audio/mpeg").split("/")[-1][:8] or "mp3"
         storage_key = f"{ANDROID_CALL_RECORDING_SOURCE}/{request.user.id}/{uuid.uuid4().hex}.{ext}"
