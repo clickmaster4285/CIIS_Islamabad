@@ -71,7 +71,9 @@ def recording_payload(rec: EmployeeCallRecording, *, can_play: bool, include_num
         "source": rec.source,
         "source_label": rec.source_label,
         "recorded_at": rec.recorded_at.isoformat() if rec.recorded_at else None,
-        "duration_seconds": rec.duration_seconds,
+        # The dialer file's own length isn't read on upload, so fall back to the linked call's
+        # duration (they match) rather than showing 0s.
+        "duration_seconds": rec.duration_seconds or (call.duration_seconds if call else None),
         "status": rec.status,
         "can_play": bool(can_play and rec.status == EmployeeCallRecording.AVAILABLE),
         **({"number": (call.number or None) if call else None} if include_number else {}),
