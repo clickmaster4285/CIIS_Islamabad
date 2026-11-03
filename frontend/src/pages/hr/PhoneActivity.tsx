@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, keepPreviousData } from "@tanstack/react-query"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -53,6 +53,52 @@ function AppIcon({ icon, label }: { icon?: string; label: string }) {
   return (
     <div className="h-7 w-7 rounded-md bg-slate-600 text-white flex items-center justify-center text-xs font-bold shrink-0">
       {letter}
+    </div>
+  )
+}
+
+/** Prev/Next pager driven by server-side pagination meta. Hidden when there's only one page. */
+function Pager({
+  data,
+  page,
+  onPage,
+  busy,
+}: {
+  data?: { count: number; page_size: number; has_next: boolean; has_prev: boolean }
+  page: number
+  onPage: (p: number) => void
+  busy?: boolean
+}) {
+  if (!data || data.count === 0) return null
+  const totalPages = Math.max(1, Math.ceil(data.count / data.page_size))
+  if (totalPages <= 1) return null
+  const from = (page - 1) * data.page_size + 1
+  const to = Math.min(page * data.page_size, data.count)
+  return (
+    <div className="mt-4 flex items-center justify-between gap-4">
+      <span className="text-xs text-muted-foreground">
+        Showing {from}–{to} of {data.count} · page {page} / {totalPages}
+      </span>
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!data.has_prev || busy}
+          onClick={() => onPage(Math.max(1, page - 1))}
+        >
+          Previous
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!data.has_next || busy}
+          onClick={() => onPage(page + 1)}
+        >
+          Next
+        </Button>
+      </div>
     </div>
   )
 }
@@ -112,34 +158,56 @@ function RecordingPlayer({ rec }: { rec: CallRecordingRecord }) {
   )
 }
 
+const PAGE_SIZE = 50
+
 export default function PhoneActivityPage() {
   const [date, setDate] = useState("")
   const [username, setUsername] = useState("")
   const [filters, setFilters] = useState<PhoneActivityFilters>({})
+  // One 1-based page per table. Reset to 1 whenever the filters change.
+  const [callsPage, setCallsPage] = useState(1)
+  const [usagePage, setUsagePage] = useState(1)
+  const [recPage, setRecPage] = useState(1)
+
+  // Shared query options: keep the previous page visible during a fetch (no flicker), and a
+  // short staleTime so paging back and forth doesn't re-hit the server each time.
+  const shared = { placeholderData: keepPreviousData, staleTime: 30_000 } as const
 
   const calls = useQuery({
-    queryKey: ["phone-calls", filters],
-    queryFn: () => fetchPhoneCalls(filters),
+    queryKey: ["phone-calls", filters, callsPage],
+    queryFn: ({ signal }) => fetchPhoneCalls(filters, { page: callsPage, pageSize: PAGE_SIZE, signal }),
+    ...shared,
   })
   const usage = useQuery({
-    queryKey: ["app-usage", filters],
-    queryFn: () => fetchAppUsage(filters),
+    queryKey: ["app-usage", filters, usagePage],
+    queryFn: ({ signal }) => fetchAppUsage(filters, { page: usagePage, pageSize: PAGE_SIZE, signal }),
+    ...shared,
   })
   const recordings = useQuery({
-    queryKey: ["recordings", filters],
-    queryFn: () => fetchRecordings(filters),
+    queryKey: ["recordings", filters, recPage],
+    queryFn: ({ signal }) => fetchRecordings(filters, { page: recPage, pageSize: PAGE_SIZE, signal }),
+    ...shared,
   })
 
-  const callRows = calls.data ?? []
-  const usageRows = usage.data ?? []
-  const recordingRows = recordings.data ?? []
-  const totalCallSeconds = callRows.reduce((sum, c) => sum + (c.duration_seconds || 0), 0)
-  const totalUsageSeconds = usageRows.reduce((sum, r) => sum + (r.foreground_seconds || 0), 0)
+  const callRows = calls.data?.results ?? []
+  const usageRows = usage.data?.results ?? []
+  const recordingRows = recordings.data?.results ?? []
+  // True totals across all pages come from the server (cheap DB aggregate), not the visible page.
+  const totalCallSeconds = calls.data?.total_duration_seconds ?? 0
+  const totalUsageSeconds = usage.data?.total_foreground_seconds ?? 0
 
-  const apply = () => setFilters({ date: date || undefined, username: username.trim() || undefined })
+  const apply = () => {
+    setCallsPage(1)
+    setUsagePage(1)
+    setRecPage(1)
+    setFilters({ date: date || undefined, username: username.trim() || undefined })
+  }
   const clear = () => {
     setDate("")
     setUsername("")
+    setCallsPage(1)
+    setUsagePage(1)
+    setRecPage(1)
     setFilters({})
   }
 
@@ -192,9 +260,9 @@ export default function PhoneActivityPage() {
 
       <Tabs defaultValue="calls">
         <TabsList>
-          <TabsTrigger value="calls">Call logs ({callRows.length})</TabsTrigger>
-          <TabsTrigger value="usage">App usage ({usageRows.length})</TabsTrigger>
-          <TabsTrigger value="recordings">Recordings ({recordingRows.length})</TabsTrigger>
+          <TabsTrigger value="calls">Call logs ({calls.data?.count ?? callRows.length})</TabsTrigger>
+          <TabsTrigger value="usage">App usage ({usage.data?.count ?? usageRows.length})</TabsTrigger>
+          <TabsTrigger value="recordings">Recordings ({recordings.data?.count ?? recordingRows.length})</TabsTrigger>
         </TabsList>
 
         <TabsContent value="calls">
@@ -246,6 +314,7 @@ export default function PhoneActivityPage() {
                   </TableBody>
                 </Table>
               )}
+              <Pager data={calls.data} page={callsPage} onPage={setCallsPage} busy={calls.isFetching} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -304,6 +373,7 @@ export default function PhoneActivityPage() {
                   </TableBody>
                 </Table>
               )}
+              <Pager data={usage.data} page={usagePage} onPage={setUsagePage} busy={usage.isFetching} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -359,6 +429,7 @@ export default function PhoneActivityPage() {
                   </TableBody>
                 </Table>
               )}
+              <Pager data={recordings.data} page={recPage} onPage={setRecPage} busy={recordings.isFetching} />
             </CardContent>
           </Card>
         </TabsContent>

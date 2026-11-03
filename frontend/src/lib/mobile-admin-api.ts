@@ -158,6 +158,22 @@ export type AppUsageRecord = {
 
 export type PhoneActivityFilters = { date?: string; username?: string }
 
+/** One page of results. `count` is the total across all pages (server-side). */
+export type Paged<T> = {
+  results: T[]
+  count: number
+  page: number
+  page_size: number
+  has_next: boolean
+  has_prev: boolean
+}
+
+/** Page request: 1-based page and a page size the server clamps (<=100). `signal` lets React
+ *  Query abort an in-flight request when filters/page change, so stale requests never land. */
+export type PageParams = { page?: number; pageSize?: number; signal?: AbortSignal }
+
+const DEFAULT_PAGE_SIZE = 50
+
 async function readMonitorError(res: Response, fallback: string): Promise<string> {
   try {
     const data = await res.json()
@@ -169,29 +185,52 @@ async function readMonitorError(res: Response, fallback: string): Promise<string
   return fallback
 }
 
-function monitorQuery(filters: PhoneActivityFilters): string {
+function monitorQuery(filters: PhoneActivityFilters, params: PageParams = {}): string {
   const sp = new URLSearchParams()
   if (filters.date) sp.set("date", filters.date)
   if (filters.username) sp.set("username", filters.username.trim())
-  return sp.toString() ? `?${sp}` : ""
+  sp.set("page", String(Math.max(1, params.page ?? 1)))
+  sp.set("page_size", String(params.pageSize ?? DEFAULT_PAGE_SIZE))
+  return `?${sp}`
 }
 
-export async function fetchPhoneCalls(filters: PhoneActivityFilters = {}): Promise<PhoneCallRecord[]> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/calls/${monitorQuery(filters)}`, {
+function pageMeta<T>(data: any, results: T[], params: PageParams): Paged<T> {
+  return {
+    results,
+    count: typeof data?.count === "number" ? data.count : results.length,
+    page: typeof data?.page === "number" ? data.page : params.page ?? 1,
+    page_size: typeof data?.page_size === "number" ? data.page_size : params.pageSize ?? DEFAULT_PAGE_SIZE,
+    has_next: !!data?.has_next,
+    has_prev: !!data?.has_prev,
+  }
+}
+
+export async function fetchPhoneCalls(
+  filters: PhoneActivityFilters = {},
+  params: PageParams = {},
+): Promise<Paged<PhoneCallRecord> & { total_duration_seconds?: number }> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/calls/${monitorQuery(filters, params)}`, {
     headers: getAuthHeaders(),
+    signal: params.signal,
   })
   if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load call logs"))
   const data = await res.json()
-  return Array.isArray(data?.results) ? data.results : []
+  const results = Array.isArray(data?.results) ? data.results : []
+  return { ...pageMeta(data, results, params), total_duration_seconds: data?.total_duration_seconds }
 }
 
-export async function fetchAppUsage(filters: PhoneActivityFilters = {}): Promise<AppUsageRecord[]> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/app-usage/${monitorQuery(filters)}`, {
+export async function fetchAppUsage(
+  filters: PhoneActivityFilters = {},
+  params: PageParams = {},
+): Promise<Paged<AppUsageRecord> & { total_foreground_seconds?: number }> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/app-usage/${monitorQuery(filters, params)}`, {
     headers: getAuthHeaders(),
+    signal: params.signal,
   })
   if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load app usage"))
   const data = await res.json()
-  return Array.isArray(data?.results) ? data.results : []
+  const results = Array.isArray(data?.results) ? data.results : []
+  return { ...pageMeta(data, results, params), total_foreground_seconds: data?.total_foreground_seconds }
 }
 
 export type CallRecordingRecord = {
@@ -205,13 +244,18 @@ export type CallRecordingRecord = {
   can_play: boolean
 }
 
-export async function fetchRecordings(filters: PhoneActivityFilters = {}): Promise<CallRecordingRecord[]> {
-  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/recordings/${monitorQuery(filters)}`, {
+export async function fetchRecordings(
+  filters: PhoneActivityFilters = {},
+  params: PageParams = {},
+): Promise<Paged<CallRecordingRecord>> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/employee-monitor/recordings/${monitorQuery(filters, params)}`, {
     headers: getAuthHeaders(),
+    signal: params.signal,
   })
   if (!res.ok) throw new Error(await readMonitorError(res, "Failed to load recordings"))
   const data = await res.json()
-  return Array.isArray(data?.results) ? data.results : []
+  const results = Array.isArray(data?.results) ? data.results : []
+  return pageMeta(data, results, params)
 }
 
 /**

@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
+from django.db.models import Sum
 from django.http import FileResponse, Http404
 from rest_framework import permissions, status
 from rest_framework.exceptions import APIException
@@ -97,6 +98,37 @@ class MonitorView(APIView):
         # Deployment-wide switch; raising here keeps DRF's renderer/exception handling intact.
         if not feature_enabled():
             raise FeatureDisabled()
+
+
+# Page sizing keeps each request small so the list endpoints never load the server with a huge
+# scan + serialize. page_size is clamped; totals are computed with a cheap DB aggregate so a
+# page stays correct without fetching every row.
+PAGE_SIZE_DEFAULT = 50
+PAGE_SIZE_MAX = 100
+
+
+def paginate(request, qs):
+    """Slice `qs` to one page using ?page & ?page_size. Returns (rows, meta). Caller must have
+    applied any select_related/prefetch_related to `qs` before passing it in."""
+    try:
+        page = max(1, int(request.query_params.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get("page_size", PAGE_SIZE_DEFAULT))
+    except (TypeError, ValueError):
+        page_size = PAGE_SIZE_DEFAULT
+    page_size = max(1, min(page_size, PAGE_SIZE_MAX))
+    total = qs.count()
+    start = (page - 1) * page_size
+    rows = list(qs[start:start + page_size])
+    return rows, {
+        "count": total,
+        "page": page,
+        "page_size": page_size,
+        "has_next": start + page_size < total,
+        "has_prev": page > 1,
+    }
 
 
 class IngestView(MonitorView):
@@ -210,7 +242,8 @@ class CallsView(MonitorView):
         username = (request.query_params.get("username") or "").strip()
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
-        rows = list(qs.select_related("user").prefetch_related("recordings")[:200])
+        qs = qs.select_related("user").prefetch_related("recordings")
+        rows, meta = paginate(request, qs)
         # Full numbers only for overview roles, and every such disclosure is audited.
         full_numbers = can_view_all_staff(request.user)
         if full_numbers and rows:
@@ -224,8 +257,9 @@ class CallsView(MonitorView):
             )
         return Response({
             "results": [call_payload(c, include_number=full_numbers) for c in rows],
-            "count": len(rows),
-            "total_duration_seconds": sum(c.duration_seconds or 0 for c in rows),
+            **meta,
+            # True total across all matching rows (cheap DB aggregate, not just this page).
+            "total_duration_seconds": qs.aggregate(s=Sum("duration_seconds"))["s"] or 0,
             "next_cursor": None,
         })
 
@@ -452,10 +486,10 @@ class RecordingsView(MonitorView):
         username = (request.query_params.get("username") or "").strip()
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
-        qs = list(qs[:200])
+        rows, meta = paginate(request, qs)
         overview = can_view_all_staff(request.user)
-        results = [recording_payload(r, can_play=overview or r.user_id == request.user.id) for r in qs]
-        return Response({"results": results, "count": len(results), "next_cursor": None})
+        results = [recording_payload(r, can_play=overview or r.user_id == request.user.id) for r in rows]
+        return Response({"results": results, **meta, "next_cursor": None})
 
 
 class RecordingUploadRequestView(IngestView):
@@ -638,7 +672,8 @@ class AppUsageView(MonitorView):
         username = (request.query_params.get("username") or "").strip()
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
-        rows = list(qs.select_related("user")[:500])
+        qs = qs.select_related("user")
+        rows, meta = paginate(request, qs)
         packages = {r.package_name for r in rows}
         icons = dict(
             MonitoredAppIcon.objects.filter(package_name__in=packages, icon_base64__gt="")
@@ -646,8 +681,9 @@ class AppUsageView(MonitorView):
         )
         return Response({
             "results": [app_usage_payload(r, icons) for r in rows],
-            "count": len(rows),
-            "total_foreground_seconds": sum(r.foreground_seconds or 0 for r in rows),
+            **meta,
+            # True total across all matching rows (cheap DB aggregate, not just this page).
+            "total_foreground_seconds": qs.aggregate(s=Sum("foreground_seconds"))["s"] or 0,
         })
 
 
