@@ -158,6 +158,27 @@ def storage_path(storage_key: str) -> str:
     return os.path.join(recording_root(), safe)
 
 
+def probe_audio_duration(path: str) -> int | None:
+    """Exact audio length in whole seconds, read from the file itself with ffprobe. Returns None
+    if ffprobe is missing or the file can't be read, so callers keep their fallbacks."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        secs = float((out.stdout or "").strip())
+        return int(round(secs)) if secs > 0 else None
+    except Exception:
+        return None
+
+
 def sign_playback(recording_id: str) -> str:
     return TimestampSigner(salt=_SIGNER_SALT).sign(str(recording_id))
 

@@ -73,6 +73,7 @@ from .services import (
     policy_allows_handset_calls,
     record_audit,
     retention_days,
+    probe_audio_duration,
     scope_queryset,
     sign_playback,
     storage_path,
@@ -460,8 +461,6 @@ class DeviceCallRecordingUploadView(MonitorView):
         # modified time sits near the call. Attach the closest call for this user.
         if call is None:
             call = match_call_for_recording(request.user, data["recorded_at"], data.get("duration_seconds"))
-        # The dialer file's length isn't read on the device, so take the matched call's duration.
-        duration_seconds = data.get("duration_seconds") or (call.duration_seconds if call else None)
 
         ext = (data.get("content_type") or "audio/mpeg").split("/")[-1][:8] or "mp3"
         storage_key = f"{ANDROID_CALL_RECORDING_SOURCE}/{request.user.id}/{uuid.uuid4().hex}.{ext}"
@@ -474,6 +473,14 @@ class DeviceCallRecordingUploadView(MonitorView):
                 digest.update(chunk)
                 size += len(chunk)
                 fh.write(chunk)
+
+        # Exact length read from the stored audio itself wins; then the device's value, then the
+        # linked call's connected time. (Call connected time differs from the recording length.)
+        duration_seconds = (
+            probe_audio_duration(path)
+            or data.get("duration_seconds")
+            or (call.duration_seconds if call else None)
+        )
 
         try:
             with transaction.atomic():
