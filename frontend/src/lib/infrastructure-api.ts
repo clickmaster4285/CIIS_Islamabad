@@ -262,6 +262,45 @@ export async function fetchInfraReport(): Promise<InfraReport> {
   return apiJson("/infra/reports/")
 }
 
+/** Download the NVR + connected cameras Excel report (one NVR via `device`, or filtered list). */
+export async function downloadNvrReport(opts?: {
+  device?: number
+  site?: number | string
+  search?: string
+}): Promise<void> {
+  const params = new URLSearchParams()
+  if (opts?.device) params.set("device", String(opts.device))
+  if (opts?.site) params.set("site", String(opts.site))
+  if (opts?.search?.trim()) params.set("search", opts.search.trim())
+  const q = params.toString()
+  const res = await fetch(`${BASE}/infra/reports/nvr-export/${q ? `?${q}` : ""}`, {
+    headers: getAuthHeaders(),
+    cache: "no-store",
+  })
+  if (!res.ok) {
+    let detail = `Export failed (${res.status})`
+    try {
+      const body = await res.json()
+      if (typeof body?.detail === "string") detail = body.detail
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail)
+  }
+  const disposition = res.headers.get("Content-Disposition") || ""
+  const match = /filename="?([^";]+)"?/i.exec(disposition)
+  const filename = match?.[1] || "nvr-report.xlsx"
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export async function fetchInfraSites(): Promise<InfraSite[]> {
   return parseList(await apiJson("/infra/sites/"))
 }

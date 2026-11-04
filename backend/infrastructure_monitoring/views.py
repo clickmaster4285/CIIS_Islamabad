@@ -1,4 +1,7 @@
+import re
+
 from django.db.models import Count, Q
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status, viewsets
@@ -664,3 +667,73 @@ class InfraReportView(APIView):
                 ).count(),
             }
         )
+
+
+class InfraNvrExportView(APIView):
+    """GET → Excel report of NVRs and the cameras connected to each NVR.
+
+    Query params (all optional):
+      device  — one NVR (InfraDevice id); used by the NVR detail page
+      site    — InfraSite id
+      search  — matches name / IP / serial / model
+      include_inactive=1 — also include disabled NVRs
+    """
+
+    permission_classes = [IsInfraAdmin]
+
+    def get(self, request):
+        from .nvr_export import build_nvr_export
+
+        qs = InfraDevice.objects.select_related("site").filter(device_type=DeviceType.NVR)
+        params = request.query_params
+        device_id = (params.get("device") or "").strip()
+        if device_id:
+            if not re.fullmatch(r"[0-9]{1,12}", device_id):
+                return Response({"detail": "Invalid device id"}, status=status.HTTP_400_BAD_REQUEST)
+            qs = qs.filter(pk=int(device_id))
+        else:
+            if params.get("include_inactive") not in ("1", "true", "yes"):
+                qs = qs.filter(is_active=True)
+            site_id = (params.get("site") or "").strip()
+            if site_id:
+                if not re.fullmatch(r"[0-9]{1,12}", site_id):
+                    return Response({"detail": "Invalid site id"}, status=status.HTTP_400_BAD_REQUEST)
+                qs = qs.filter(site_id=int(site_id))
+            search = (params.get("search") or "").strip()
+            if search:
+                qs = qs.filter(
+                    Q(name__icontains=search)
+                    | Q(ip_address__icontains=search)
+                    | Q(serial_number__icontains=search)
+                    | Q(model_number__icontains=search)
+                    | Q(install_location__icontains=search)
+                )
+        devices = list(qs.order_by("site__name", "name"))
+        if device_id and not devices:
+            return Response({"detail": "NVR not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        content = build_nvr_export(devices)
+        stamp = timezone.localtime().strftime("%Y%m%d-%H%M")
+        if device_id:
+            # ASCII only, so the Content-Disposition header stays plain and parseable
+            safe = re.sub(r"[^A-Za-z0-9_-]+", "_", devices[0].name).strip("_")[:40]
+            safe = safe or f"nvr-{devices[0].pk}"
+            filename = f"nvr-report-{safe}-{stamp}.xlsx"
+        else:
+            filename = f"nvr-report-{stamp}.xlsx"
+
+        _log_event(
+            device=devices[0] if device_id else None,
+            event_type="report_export",
+            title="NVR report exported",
+            message=f"{len(devices)} NVR(s)",
+            actor=_actor_name(request),
+        )
+
+        response = HttpResponse(
+            content,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["Access-Control-Expose-Headers"] = "Content-Disposition"
+        return response

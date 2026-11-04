@@ -6,6 +6,7 @@ from .views import (
     InfraAlertViewSet,
     InfraDeviceViewSet,
     InfraEventViewSet,
+    InfraNvrExportView,
     InfraOverviewView,
     InfraRefreshView,
     InfraReportView,
@@ -22,6 +23,7 @@ router.register(r"infra/events", InfraEventViewSet, basename="infra-event")
 urlpatterns = [
     path("infra/overview/", InfraOverviewView.as_view(), name="infra-overview"),
     path("infra/reports/", InfraReportView.as_view(), name="infra-reports"),
+    path("infra/reports/nvr-export/", InfraNvrExportView.as_view(), name="infra-nvr-export"),
     path("infra/refresh/", InfraRefreshView.as_view(), name="infra-refresh"),
     path("", include(router.urls)),
 ]

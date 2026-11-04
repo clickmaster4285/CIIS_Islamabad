@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
-import { AlertCircle, Loader2, RefreshCw } from "lucide-react"
+import { AlertCircle, FileSpreadsheet, Loader2, RefreshCw } from "lucide-react"
 import { NvrCommandCenter } from "@/components/infrastructure/nvr-command/NvrCommandCenter"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -10,6 +10,7 @@ import { ROUTES } from "@/routes/config"
 import {
   fetchNvrDetail,
   deleteNvrLogs,
+  downloadNvrReport,
   refreshNvrLogs,
   type NvrDetailPayload,
 } from "@/lib/infrastructure-api"
@@ -22,10 +23,14 @@ export default function NvrDetailPage() {
   const navigate = useNavigate()
   const { toast } = useToast()
   const nvrId = Number(id)
-  const isAdmin = normalizeRole(getStoredUser()?.role) === "ADMIN"
+  const role = normalizeRole(getStoredUser()?.role)
+  const isAdmin = role === "ADMIN"
+  // Same roles the export endpoint allows (IsInfraAdmin: Super Admin / IT Super Admin)
+  const canExport = role === "ADMIN" || role === "IT_SUPERADMIN"
   const [data, setData] = useState<NvrDetailPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [probing, setProbing] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(
@@ -53,6 +58,22 @@ export default function NvrDetailPage() {
     },
     [nvrId, toast],
   )
+
+  const exportReport = useCallback(async () => {
+    setExporting(true)
+    try {
+      await downloadNvrReport({ device: nvrId })
+      toast({ title: "Report exported", description: "NVR and camera details downloaded as Excel" })
+    } catch (e) {
+      toast({
+        title: "Export failed",
+        description: e instanceof Error ? e.message : "Could not export report",
+        variant: "destructive",
+      })
+    } finally {
+      setExporting(false)
+    }
+  }, [nvrId, toast])
 
   useEffect(() => {
     void load(false)
@@ -86,6 +107,16 @@ export default function NvrDetailPage() {
           <Button variant="outline" size="sm" onClick={() => navigate(ROUTES.INFRASTRUCTURE_NVRS)}>
             Back to NVR List
           </Button>
+          {canExport ? (
+            <Button variant="outline" size="sm" onClick={() => void exportReport()} disabled={exporting}>
+              {exporting ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="mr-1.5 h-4 w-4" />
+              )}
+              Export Report
+            </Button>
+          ) : null}
           <Button size="sm" className="bg-sky-600 hover:bg-sky-700" onClick={() => void load(true)} disabled={probing || loading}>
             {probing ? (
               <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
