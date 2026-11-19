@@ -212,7 +212,7 @@ export function VoiceAgentWidget() {
             <div className="flex min-w-0 items-center gap-2">
               <GripVertical className="h-4 w-4 shrink-0 text-slate-400" aria-hidden />
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-slate-900">TekEye Voice Agent</p>
+                <p className="text-sm font-semibold text-slate-900">CIIS Voice Agent</p>
                 <p className="text-xs text-slate-500">{PHASE_LABEL[agent.phase]}</p>
               </div>
             </div>

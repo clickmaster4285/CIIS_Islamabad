@@ -95,7 +95,7 @@ export default function NvrDetailPage() {
   return (
     <ModulePageLayout
       title={data?.name || "NVR Command Center"}
-      description="Monitor, control, configure, troubleshoot, and audit this NVR from TekeEye."
+      description="Monitor, control, configure, troubleshoot, and audit this NVR from CIIS."
       breadcrumbs={[
         { label: "Infrastructure Monitoring", href: ROUTES.INFRASTRUCTURE_OVERVIEW },
         { label: "NVR Management", href: ROUTES.INFRASTRUCTURE_NVRS },

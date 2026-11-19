@@ -16,6 +16,7 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 from city_sync.identity import is_hq, local_rows_q, location_code
+from ops_central.server_vitals import row_health
 
 PEOPLE = {"person", "crowd"}
 VEHICLES = {"car", "truck", "motorcycle", "bus", "microbus", "bicycle", "vehicle", "van", "rickshaw"}
@@ -242,10 +243,11 @@ def synced_city_rows(*, with_detail: bool = True) -> list[dict[str, Any]]:
         is_hq_row = site is None
         st = statuses.get(code)
         raw = (st.raw if st else None) or {}
+        heartbeat_age = 0
         if is_hq_row:
             state, seen = "ONLINE", now
         else:
-            state = city_health_state(st, now)[0] if st else "UNKNOWN"
+            state, heartbeat_age = city_health_state(st, now) if st else ("UNKNOWN", None)
             seen = st.last_heartbeat_at if st else None
         status, connectivity = STATE.get(state, ("Offline", "No Signal"))
         if site is not None and site.is_paused:
@@ -272,6 +274,9 @@ def synced_city_rows(*, with_detail: bool = True) -> list[dict[str, Any]]:
             "sync_errors": (st.dead_outbox + st.failed_media) if st and not is_hq_row else 0,
             **_city_numbers(code, hq, now),
         }
+        row["health"] = row_health(
+            is_hq_row=is_hq_row, state=row["sync_state"], raw=raw, heartbeat_age=heartbeat_age, now=now
+        )
         if with_detail:
             row["detail"] = _city_detail(code, hq, now)
         rows.append(row)

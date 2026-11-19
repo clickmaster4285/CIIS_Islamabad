@@ -6,11 +6,11 @@ from config.field_crypto import EncryptedCharField
 
 class ConnectionMode(models.TextChoices):
     ML = "ml", "ML service only"
-    DJANGO = "django", "Full Tekeye (Django + ML)"
+    DJANGO = "django", "Full CIIS (Django + ML)"
 
 
 class RemoteServer(models.Model):
-    """Remote location for Central Ops — ML node or full Tekeye Django."""
+    """Remote location for Central Ops — ML node or full CIIS Django."""
 
     name = models.CharField(max_length=150, help_text="Display name e.g. DI Khan ML")
     location_code = models.CharField(

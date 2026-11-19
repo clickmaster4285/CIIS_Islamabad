@@ -22,7 +22,7 @@ COORD_DECIMALS = 4
 CACHE_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
 CACHE_PREFIX = "gps:revgeo:v2:"
 MAX_POINTS_PER_REQUEST = 80
-USER_AGENT = "TekEye-Peshawar-GPS/1.0 (customs enforcement; contact=ops)"
+USER_AGENT = "CIIS-Peshawar-GPS/1.0 (customs enforcement; contact=ops)"
 
 
 def coord_key(lat: float, lng: float) -> str:

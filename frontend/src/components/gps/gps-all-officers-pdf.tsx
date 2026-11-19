@@ -136,7 +136,7 @@ export function GpsAllOfficersPdfReport({
                   textTransform: "uppercase",
                 }}
               >
-                Customs · TekEye
+                Customs · CIIS
               </p>
               <h1
                 style={{

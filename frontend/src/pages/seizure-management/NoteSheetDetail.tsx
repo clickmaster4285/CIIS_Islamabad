@@ -1,10 +1,29 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
-import { ArrowLeft, CheckCircle, ChevronDown, FileOutput, Pencil, Printer, Send, Trash2, XCircle } from "lucide-react"
+import {
+  ArrowLeft,
+  CheckCircle,
+  ChevronDown,
+  ClipboardList,
+  Clock,
+  FileOutput,
+  FileText,
+  History,
+  MapPin,
+  Package,
+  Paperclip,
+  Pencil,
+  Printer,
+  Scale,
+  Send,
+  Stamp,
+  Trash2,
+  User,
+  Users,
+  XCircle,
+} from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -59,18 +78,99 @@ function getQrCodeUrl(data: string, size = 120) {
   return `https://api.qrserver.com/v1/create-qr-code/?size=${responsiveSize}x${responsiveSize}&data=${encodeURIComponent(data)}`
 }
 
-function statusBadge(status: NoteSheetStatus) {
-  if (status === "Approved") return <Badge>Approved</Badge>
-  if (status === "Submitted") return <Badge variant="secondary">Submitted</Badge>
-  if (status === "Rejected") return <Badge variant="destructive">Rejected</Badge>
-  return <Badge variant="outline">Draft</Badge>
+function statusChipClass(status: NoteSheetStatus) {
+  if (status === "Approved") return "bg-[#D9F5E8] text-[#0E7A45]"
+  if (status === "Rejected") return "bg-[#FFDDE4] text-[#B4234A]"
+  if (status === "Submitted") return "bg-[#FFE8C2] text-[#9A5B00]"
+  return "bg-[#D7EBFF] text-[#0B5CAD]"
 }
 
-function Field({ label, value, className }: { label: string; value?: string | null; className?: string }) {
+type SectionTone = "blue" | "teal" | "amber" | "violet" | "rose"
+
+const SECTION_TONE: Record<SectionTone, { chip: string; head: string; border: string; rule: string }> = {
+  blue: {
+    chip: "bg-[#D7EBFF] text-[#0B5CAD]",
+    head: "bg-gradient-to-r from-[#E7F2FF] to-[#F8FBFF]",
+    border: "border-[#C5DDF7]",
+    rule: "border-[#D5E7FA]",
+  },
+  teal: {
+    chip: "bg-[#D5F4EE] text-[#0C7A68]",
+    head: "bg-gradient-to-r from-[#E5F8F4] to-[#F7FDFB]",
+    border: "border-[#BFE8DF]",
+    rule: "border-[#D3F0E9]",
+  },
+  amber: {
+    chip: "bg-[#FFE8C7] text-[#A15C00]",
+    head: "bg-gradient-to-r from-[#FFF3E0] to-[#FFFBF5]",
+    border: "border-[#F5D7A8]",
+    rule: "border-[#F8E4C4]",
+  },
+  violet: {
+    chip: "bg-[#E6E0FF] text-[#5340B0]",
+    head: "bg-gradient-to-r from-[#F1EDFF] to-[#FBFAFF]",
+    border: "border-[#D9D0F7]",
+    rule: "border-[#E6E0F8]",
+  },
+  rose: {
+    chip: "bg-[#FFDDE4] text-[#B4234A]",
+    head: "bg-gradient-to-r from-[#FFF0F3] to-[#FFF9FA]",
+    border: "border-[#F6C9D3]",
+    rule: "border-[#F8D7DF]",
+  },
+}
+
+function FieldTile({ label, value }: { label: string; value?: string | null }) {
+  const text = (value ?? "").trim()
   return (
-    <div className={className}>
-      <dt className="text-muted-foreground text-sm">{label}</dt>
-      <dd className="font-medium text-sm whitespace-pre-wrap">{value?.trim() ? value : "—"}</dd>
+    <div className="min-w-0 rounded-lg border border-[#D7E6F6] bg-gradient-to-br from-white to-[#F4F9FF] px-3.5 py-2.5 shadow-[inset_3px_0_0_#3B8FE8]">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#1D6BB5]">{label}</p>
+      <p className="mt-1 break-words text-[13px] font-semibold leading-snug text-[#102C55] [overflow-wrap:anywhere]">
+        {text || "—"}
+      </p>
+    </div>
+  )
+}
+
+function FieldGrid({ children }: { children: ReactNode }) {
+  return <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{children}</div>
+}
+
+function Section({
+  icon,
+  title,
+  tone = "blue",
+  children,
+  flush,
+}: {
+  icon: ReactNode
+  title: string
+  tone?: SectionTone
+  children: ReactNode
+  flush?: boolean
+}) {
+  const paint = SECTION_TONE[tone]
+  return (
+    <section className={cn("min-w-0 overflow-hidden rounded-xl border bg-white shadow-sm", paint.border)}>
+      <div className={cn("flex items-center gap-2.5 border-b px-4 py-3", paint.head, paint.rule)}>
+        <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-lg", paint.chip)}>{icon}</span>
+        <h3 className="min-w-0 truncate text-[13px] font-semibold text-[#102C55]">{title}</h3>
+      </div>
+      <div className={flush ? "" : "bg-white p-4"}>{children}</div>
+    </section>
+  )
+}
+
+function NoteBlock({ children, tone = "blue" }: { children: ReactNode; tone?: "blue" | "rose" | "amber" }) {
+  const paint =
+    tone === "rose"
+      ? "border-[#F6C9D3] bg-[#FFF5F7] text-[#8E2340]"
+      : tone === "amber"
+        ? "border-[#F5D7A8] bg-[#FFF8EE] text-[#5C3B12]"
+        : "border-[#C5DDF7] bg-[#F3F8FF] text-[#102C55]"
+  return (
+    <div className={cn("whitespace-pre-wrap break-words rounded-lg border px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere]", paint)}>
+      {children}
     </div>
   )
 }
@@ -267,20 +367,18 @@ export default function NoteSheetDetailPage() {
         { label: row.noteSheetNo || row.referenceNumber || "Detail" },
       ]}
     >
-      <div className="mb-4 flex flex-wrap gap-2 items-center justify-between">
-        <div className="flex flex-wrap gap-2 items-center">
-        <Button variant="ghost" size="sm" asChild>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+        <Button variant="ghost" size="sm" className="text-[#102C55]" asChild>
           <Link to={ROUTES.SEIZURE_MGMT_NOTE_SHEET}>
-            <ArrowLeft className="h-4 w-4 mr-2" />
+            <ArrowLeft className="mr-2 h-4 w-4" />
             Back
           </Link>
         </Button>
-        {statusBadge(row.status)}
-        {row.priority === "Urgent" && <Badge variant="destructive">Urgent</Badge>}
         {canEdit && (
-          <Button variant="outline" size="sm" asChild>
+          <Button variant="outline" size="sm" className="border-[#C5DDF7] text-[#102C55]" asChild>
             <Link to={getSeizureMgmtNoteSheetEditPath(row.id)}>
-              <Pencil className="h-4 w-4 mr-2" />
+              <Pencil className="mr-2 h-4 w-4" />
               Edit
             </Link>
           </Button>
@@ -289,21 +387,21 @@ export default function NoteSheetDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            className="text-destructive hover:text-destructive"
+            className="border-[#F6C9D3] text-[#B4234A] hover:bg-[#FFF5F7] hover:text-[#B4234A]"
             disabled={acting}
             onClick={() => void handleDelete()}
           >
-            <Trash2 className="h-4 w-4 mr-2" />
+            <Trash2 className="mr-2 h-4 w-4" />
             Delete
           </Button>
         )}
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm">
-              <Printer className="h-4 w-4 mr-2" />
+            <Button size="sm" className="bg-[#102C55] text-white hover:bg-[#0C2748]">
+              <Printer className="mr-2 h-4 w-4" />
               Print
-              <ChevronDown className="h-4 w-4 ml-1" />
+              <ChevronDown className="ml-1 h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-0 w-max">
@@ -323,19 +421,41 @@ export default function NoteSheetDetailPage() {
         </DropdownMenu>
       </div>
 
+      <div className="mb-4 overflow-hidden rounded-xl bg-[#102C55] px-5 py-4 text-white shadow-md">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#D6EBFF]">
+          Seizure management · Note sheet
+        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+          <span className={cn("inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold", statusChipClass(row.status))}>
+            {row.status}
+          </span>
+          {row.priority === "Urgent" ? (
+            <span className="inline-flex items-center rounded-full bg-[#FFDDE4] px-2.5 py-0.5 text-[11px] font-semibold text-[#B4234A]">
+              Urgent
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+              {row.priority || "Normal"}
+            </span>
+          )}
+        </div>
+        <p className="mt-1 max-w-3xl text-sm text-[#D6EBFF]">{row.subject?.trim() || "Note sheet record"}</p>
+      </div>
+
       {row.status === "Submitted" && canApprove && (
-        <div className="mb-4 rounded-[10px] border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
-          Prepared by <span className="font-medium">{row.preparedBy || row.createdBy || "—"}</span>
+        <div className="mb-4 rounded-xl border border-[#C5DDF7] bg-[#EAF3FF] px-4 py-3 text-sm text-[#102C55]">
+          Prepared by <span className="font-semibold">{row.preparedBy || row.createdBy || "—"}</span>
           {" · "}
           Pending approval by Assistant Collector, Deputy Collector, Location Admin, or Super Admin.
           You can approve or reject as{" "}
-          <span className="font-medium">{currentUser?.full_name || currentUser?.username || "you"}</span>.
+          <span className="font-semibold">{currentUser?.full_name || currentUser?.username || "you"}</span>.
         </div>
       )}
 
       {row.status === "Submitted" && !canApprove && (
-        <div className="mb-4 rounded-[10px] border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
-          Prepared by <span className="font-medium">{row.preparedBy || row.createdBy || "—"}</span>
+        <div className="mb-4 rounded-xl border border-[#F5D7A8] bg-[#FFF8EE] px-4 py-3 text-sm text-[#5C3B12]">
+          Prepared by <span className="font-semibold">{row.preparedBy || row.createdBy || "—"}</span>
           {" · "}
           Waiting for approval from Assistant Collector, Deputy Collector, Location Admin, or Super
           Admin.
@@ -343,117 +463,91 @@ export default function NoteSheetDetailPage() {
       )}
 
       <div className="space-y-4 max-w-[1600px]">
-        {/* 13. Timeline */}
         {row.timeline?.length > 0 && (
-          <Card className="rounded-[10px] border-gray-200">
-            <CardHeader>
-              <CardTitle className="text-base">13. Timeline</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ol className="relative border-l border-muted-foreground/30 ml-2 space-y-4">
-                {row.timeline.map((step) => (
-                  <li key={step.key} className="ml-4">
-                    <span
-                      className={`absolute -left-1.5 mt-1.5 h-3 w-3 rounded-full border ${step.done ? "bg-primary border-primary" : "bg-background border-muted-foreground/40"
-                        }`}
-                    />
-                    <p className={`text-sm font-medium ${step.done ? "" : "text-muted-foreground"}`}>
-                      {step.label}
-                    </p>
-                    <p className="text-xs text-muted-foreground">{step.at || "—"}</p>
-                  </li>
-                ))}
-              </ol>
-            </CardContent>
-          </Card>
+          <Section icon={<Clock className="h-4 w-4" />} title="Timeline" tone="amber">
+            <ol className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {row.timeline.map((step) => (
+                <li
+                  key={step.key}
+                  className={cn(
+                    "min-w-0 rounded-lg border px-3 py-2.5",
+                    step.done ? "border-[#BFE8DF] bg-[#F3FBFA]" : "border-[#E4EEF8] bg-[#F8FBFF]"
+                  )}
+                >
+                  <p className={cn("text-sm font-semibold", step.done ? "text-[#0C7A68]" : "text-[#607DA5]")}>
+                    {step.label}
+                  </p>
+                  <p className="mt-0.5 text-xs text-[#607DA5]">{step.at || "—"}</p>
+                </li>
+              ))}
+            </ol>
+          </Section>
         )}
 
-        {/* 1. Basic Information */}
-        <div className="grid gap-4 sm:gap-6 md:grid-cols-[1fr_200px]">
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">1. Basic Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Note Sheet Number" value={row.noteSheetNo || row.referenceNumber} />
-              <Field label="Date & Time" value={row.dateTime} />
-              <Field label="Office / Region" value={row.office} />
-              <Field label="Investigation / Case Number" value={row.caseNo} />
-              <Field label="Priority" value={row.priority} />
-              <Field label="Status" value={row.status} />
-              <Field label="Subject" value={row.subject} className="sm:col-span-2" />
-            </dl>
-          </CardContent>
-        </Card>
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">QR Code</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col items-center gap-2 pt-0">
-            <img
-              src={getQrCodeUrl(
-                `${typeof window !== "undefined" ? window.location.origin : ""}${getSeizureMgmtNoteSheetDetailPath(row.id)}`,
-                160
-              )}
-              alt="Note sheet QR code"
-              className="rounded-lg border bg-white p-2"
-            />
-            <p className="text-center font-mono text-[10px] text-muted-foreground break-all">
-              {row.noteSheetNo || row.referenceNumber || row.id}
-            </p>
-          </CardContent>
-        </Card>
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_240px]">
+          <Section icon={<FileText className="h-4 w-4" />} title="1. Basic information" tone="blue">
+            <FieldGrid>
+              <FieldTile label="Note sheet number" value={row.noteSheetNo || row.referenceNumber} />
+              <FieldTile label="Date & time" value={row.dateTime} />
+              <FieldTile label="Office / region" value={row.office} />
+              <FieldTile label="Investigation / case number" value={row.caseNo} />
+              <FieldTile label="Priority" value={row.priority} />
+              <FieldTile label="Status" value={row.status} />
+              <div className="sm:col-span-2">
+                <FieldTile label="Subject" value={row.subject} />
+              </div>
+            </FieldGrid>
+          </Section>
+          <Section icon={<Stamp className="h-4 w-4" />} title="QR code" tone="violet">
+            <div className="flex flex-col items-center gap-2">
+              <img
+                src={getQrCodeUrl(
+                  `${typeof window !== "undefined" ? window.location.origin : ""}${getSeizureMgmtNoteSheetDetailPath(row.id)}`,
+                  160
+                )}
+                alt="Note sheet QR code"
+                className="rounded-lg border border-[#D9D0F7] bg-white p-2"
+              />
+              <p className="break-all text-center font-mono text-[10px] text-[#607DA5]">
+                {row.noteSheetNo || row.referenceNumber || row.id}
+              </p>
+            </div>
+          </Section>
         </div>
 
-        {/* 2. Officer Information */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">2. Preparing Officer Information</CardTitle>
-            <p className="text-sm text-muted-foreground font-normal">
-              Officer who created this note sheet (not the current login).
-            </p>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Preparing Officer" value={row.preparedBy} />
-              <Field label="Badge / Employee ID" value={row.badgeId} />
-              <Field label="Designation" value={row.designation} />
-              <Field label="Department" value={row.department} />
-              <Field label="Contact Number" value={row.officerContact} className="sm:col-span-2" />
-            </dl>
-          </CardContent>
-        </Card>
+        <Section icon={<User className="h-4 w-4" />} title="2. Preparing officer" tone="teal">
+          <p className="mb-3 text-xs text-[#607DA5]">Officer who created this note sheet, not the current login.</p>
+          <FieldGrid>
+            <FieldTile label="Preparing officer" value={row.preparedBy} />
+            <FieldTile label="Badge / employee ID" value={row.badgeId} />
+            <FieldTile label="Designation" value={row.designation} />
+            <FieldTile label="Department" value={row.department} />
+            <div className="sm:col-span-2">
+              <FieldTile label="Contact number" value={row.officerContact} />
+            </div>
+          </FieldGrid>
+        </Section>
 
-        {/* 3. Suspect / Accused */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">3. Suspect / Accused Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Name" value={row.accusedName} />
-              <Field label="Father Name" value={row.accusedFatherName} />
-              <Field label="CNIC / Passport" value={row.accusedCnic} />
-              <Field label="Mobile Number" value={row.accusedMobile} />
-              <Field label="Address" value={row.accusedAddress} className="sm:col-span-2" />
-              <Field label="Business Name" value={row.businessName} />
-              <Field label="NTN / STRN" value={row.ntnStrn} />
-            </dl>
-          </CardContent>
-        </Card>
+        <Section icon={<Users className="h-4 w-4" />} title="3. Suspect / accused" tone="violet">
+          <FieldGrid>
+            <FieldTile label="Name" value={row.accusedName} />
+            <FieldTile label="Father name" value={row.accusedFatherName} />
+            <FieldTile label="CNIC / passport" value={row.accusedCnic} />
+            <FieldTile label="Mobile number" value={row.accusedMobile} />
+            <div className="sm:col-span-2">
+              <FieldTile label="Address" value={row.accusedAddress} />
+            </div>
+            <FieldTile label="Business name" value={row.businessName} />
+            <FieldTile label="NTN / STRN" value={row.ntnStrn} />
+          </FieldGrid>
+        </Section>
 
-        {/* 4. Goods */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">4. Goods Information</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <Section icon={<Package className="h-4 w-4" />} title="4. Goods information" tone="teal" flush>
             {row.items?.length ? (
-              <div className="max-w-full overflow-x-auto rounded-md border border-border/70">
-                <Table className="w-max min-w-full text-sm">
+              <div className="max-w-full overflow-x-auto">
+                <Table className="w-max min-w-full text-sm" containerClassName="overflow-visible">
                   <TableHeader>
-                    <TableRow className="border-b bg-muted/40 hover:bg-muted/40">
+                    <TableRow className="border-b border-[#D3F0E9] bg-[#E7F4F1] hover:bg-[#E7F4F1]">
                       <TableHead className={goodsHeadClass}>QR Code</TableHead>
                       <TableHead className={goodsHeadClass}>Description</TableHead>
                       <TableHead className={goodsHeadClass}>Located Camera</TableHead>
@@ -526,199 +620,140 @@ export default function NoteSheetDetailPage() {
                 <ViewLocatedCameraDialog target={viewCamera} onClose={() => setViewCamera(null)} />
               </div>
             ) : (
-              <p className="text-sm text-muted-foreground">No goods recorded.</p>
+              <p className="p-4 text-sm text-[#607DA5]">No goods recorded.</p>
             )}
-          </CardContent>
-        </Card>
+        </Section>
 
-        {/* 5. Location */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">5. Location Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Place of Inspection" value={row.placeOfInspection} />
-              <Field label="Warehouse / Shop" value={row.warehouseShop} />
-              <Field label="GPS Location" value={row.gpsLocation} />
-              <Field label="Inspection Date & Time" value={row.inspectionDate} />
-            </dl>
-          </CardContent>
-        </Card>
+        <Section icon={<MapPin className="h-4 w-4" />} title="5. Location" tone="blue">
+          <FieldGrid>
+            <FieldTile label="Place of inspection" value={row.placeOfInspection} />
+            <FieldTile label="Warehouse / shop" value={row.warehouseShop} />
+            <FieldTile label="GPS location" value={row.gpsLocation} />
+            <FieldTile label="Inspection date & time" value={row.inspectionDate} />
+          </FieldGrid>
+        </Section>
 
-        {/* 6–10 */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">6. Grounds of Suspicion</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm whitespace-pre-wrap">{row.groundsOfSuspicion || "—"}</p>
-          </CardContent>
-        </Card>
+        <Section icon={<ClipboardList className="h-4 w-4" />} title="6. Grounds of suspicion" tone="amber">
+          <NoteBlock tone="amber">{row.groundsOfSuspicion || "—"}</NoteBlock>
+        </Section>
 
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">7. Evidence Collected</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <Section icon={<Paperclip className="h-4 w-4" />} title="7. Evidence collected" tone="teal">
             {row.evidenceCollected?.length ? (
-              <ul className="list-disc list-inside text-sm space-y-1">
+              <ul className="space-y-1.5 text-sm text-[#102C55]">
                 {row.evidenceCollected.map((e) => (
-                  <li key={e}>{e}</li>
+                  <li key={e} className="rounded-lg border border-[#D3F0E9] bg-[#F7FDFB] px-3 py-2">{e}</li>
                 ))}
               </ul>
             ) : (
-              <p className="text-sm text-muted-foreground">None recorded.</p>
+              <p className="text-sm text-[#607DA5]">None recorded.</p>
             )}
-          </CardContent>
-        </Card>
+        </Section>
 
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">8. Documents Attached</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <Section icon={<Paperclip className="h-4 w-4" />} title="8. Documents attached" tone="rose">
             {row.attachments?.length ? (
               <ul className="space-y-2 text-sm">
                 {row.attachments.map((att) => (
-                  <li key={att.id}>
+                  <li key={att.id} className="rounded-lg border border-[#F8D7DF] bg-[#FFF9FA] px-3 py-2">
                     <a
                       href={att.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-primary hover:underline"
+                      className="font-medium text-[#0B5CAD] hover:underline"
                     >
                       {att.originalFilename || att.fileType}
                     </a>
-                    <span className="text-muted-foreground ml-2 text-xs">({att.fileType})</span>
+                    <span className="ml-2 text-xs text-[#607DA5]">({att.fileType})</span>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="text-sm text-muted-foreground">No attachments.</p>
+              <p className="text-sm text-[#607DA5]">No attachments.</p>
             )}
-          </CardContent>
-        </Card>
+        </Section>
 
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">9. Preliminary Findings</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm whitespace-pre-wrap">{row.preliminaryFindings || row.content || "—"}</p>
-          </CardContent>
-        </Card>
+        <Section icon={<Scale className="h-4 w-4" />} title="9. Preliminary findings" tone="blue">
+          <NoteBlock>{row.preliminaryFindings || row.content || "—"}</NoteBlock>
+        </Section>
 
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">10. Recommendation</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm font-medium">{row.recommendation || "—"}</p>
-          </CardContent>
-        </Card>
+        <Section icon={<Stamp className="h-4 w-4" />} title="10. Recommendation" tone="violet">
+          <NoteBlock>{row.recommendation || "—"}</NoteBlock>
+        </Section>
 
-        {/* 11. Approval Workflow */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">11. Approval Workflow</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-6">
+        <Section icon={<CheckCircle className="h-4 w-4" />} title="11. Approval workflow" tone="blue">
+          <div className="space-y-4">
             <div>
-              <p className="text-sm font-medium mb-3">Prepared By</p>
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Officer Name" value={row.preparedBy} />
-                <Field label="Signature" value={row.preparedSignature} />
-                <Field label="Date" value={row.preparedDate} />
-              </dl>
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#1D6BB5]">Prepared by</p>
+              <FieldGrid>
+                <FieldTile label="Officer name" value={row.preparedBy} />
+                <FieldTile label="Signature" value={row.preparedSignature} />
+                <FieldTile label="Date" value={row.preparedDate} />
+              </FieldGrid>
             </div>
             <div>
-              <p className="text-sm font-medium mb-3">Forward To</p>
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field
-                  label="Approving Officials"
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#1D6BB5]">Forward to</p>
+              <FieldGrid>
+                <FieldTile
+                  label="Approving officials"
                   value={
                     row.forwardTo?.trim() ||
                     "Assistant Collector, Deputy Collector, Location Admin, Super Admin"
                   }
                 />
-                <Field label="Status" value={approvalStatusLabel} />
-                <Field label="Approval Date" value={row.approvedAt} />
-                <Field label="Approving Officer (decision)" value={row.approvedBy} />
-              </dl>
+                <FieldTile label="Status" value={approvalStatusLabel} />
+                <FieldTile label="Approval date" value={row.approvedAt} />
+                <FieldTile label="Approving officer" value={row.approvedBy} />
+              </FieldGrid>
             </div>
             {row.detentionMemoId && (
-              <div>
-                <dt className="text-muted-foreground text-sm">Detention Memo</dt>
-                <dd>
-                  <Link
-                    to={getDetentionMemoDetailPath(row.detentionMemoId)}
-                    className="text-primary hover:underline text-sm"
-                  >
-                    Open linked detention memo
-                  </Link>
-                </dd>
-              </div>
+              <Link
+                to={getDetentionMemoDetailPath(row.detentionMemoId)}
+                className="inline-flex rounded-lg border border-[#C5DDF7] bg-[#EAF3FF] px-3 py-2 text-sm font-semibold text-[#0B5CAD] hover:bg-[#D7EBFF]"
+              >
+                Open linked detention memo
+              </Link>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </Section>
 
-        {/* 12. Approval Remarks */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">12. Approval Remarks</CardTitle>
-          </CardHeader>
-          <CardContent>
+        <Section icon={<ClipboardList className="h-4 w-4" />} title="12. Approval remarks" tone={row.status === "Rejected" ? "rose" : "amber"}>
             {row.status === "Rejected" && row.rejectionReason ? (
-              <p className="text-sm text-destructive whitespace-pre-wrap">{row.rejectionReason}</p>
+              <NoteBlock tone="rose">{row.rejectionReason}</NoteBlock>
             ) : (
-              <p className="text-sm whitespace-pre-wrap">{row.approvalRemarks || "—"}</p>
+              <NoteBlock tone="amber">{row.approvalRemarks || "—"}</NoteBlock>
             )}
-          </CardContent>
-        </Card>
+        </Section>
 
-        {/* 14. Audit Log */}
-        <Card className="rounded-[10px] border-gray-200">
-          <CardHeader>
-            <CardTitle className="text-base">14. Audit Log</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Field label="Created By" value={row.createdBy} />
-              <Field label="Created On" value={row.createdAt} />
-              <Field label="Updated By" value={row.updatedBy} />
-              <Field label="Updated On" value={row.updatedAt} />
-              <Field label="Approved By" value={row.approvedBy} />
-              <Field label="Approval Time" value={row.approvedAt} />
-            </dl>
-          </CardContent>
-        </Card>
+        <Section icon={<History className="h-4 w-4" />} title="14. Audit log" tone="amber">
+          <FieldGrid>
+            <FieldTile label="Created by" value={row.createdBy} />
+            <FieldTile label="Created on" value={row.createdAt} />
+            <FieldTile label="Updated by" value={row.updatedBy} />
+            <FieldTile label="Updated on" value={row.updatedAt} />
+            <FieldTile label="Approved by" value={row.approvedBy} />
+            <FieldTile label="Approval time" value={row.approvedAt} />
+          </FieldGrid>
+        </Section>
 
         {(row.status === "Draft" || row.status === "Rejected") && (
-          <Card className="rounded-[10px]">
-            <CardContent className="p-6 flex flex-wrap gap-2">
+          <div className="sticky bottom-3 z-20 flex flex-wrap gap-2 rounded-xl border border-[#C5DDF7] bg-white/95 px-4 py-3 shadow-md backdrop-blur">
               {canEdit && (
-                <Button variant="outline" asChild>
+                <Button variant="outline" className="border-[#C5DDF7] text-[#102C55]" asChild>
                   <Link to={getSeizureMgmtNoteSheetEditPath(row.id)}>
-                    <Pencil className="h-4 w-4 mr-2" />
+                    <Pencil className="mr-2 h-4 w-4" />
                     Edit
                   </Link>
                 </Button>
               )}
-              <Button disabled={acting} onClick={() => void runApproval("submit")}>
-                <Send className="h-4 w-4 mr-2" />
+              <Button className="bg-[#102C55] text-white hover:bg-[#0C2748]" disabled={acting} onClick={() => void runApproval("submit")}>
+                <Send className="mr-2 h-4 w-4" />
                 Send for Approval
               </Button>
-            </CardContent>
-          </Card>
+          </div>
         )}
 
         {row.status === "Submitted" && canApprove && (
-          <Card className="rounded-[10px]">
-            <CardHeader>
-              <CardTitle className="text-base">Senior Officer Decision</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+          <Section icon={<CheckCircle className="h-4 w-4" />} title="Senior officer decision" tone="blue">
+            <div className="space-y-4">
               <div className="space-y-2 max-w-sm">
                 <Label htmlFor="ns-approver">Approving Officer (you) <span className="text-red-600">*</span></Label>
                 <Input
@@ -760,8 +795,8 @@ export default function NoteSheetDetailPage() {
                 />
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button disabled={acting} onClick={() => void runApproval("approve")}>
-                  <CheckCircle className="h-4 w-4 mr-2" />
+                <Button className="bg-[#0E9F8A] text-white hover:bg-[#0C7A68]" disabled={acting} onClick={() => void runApproval("approve")}>
+                  <CheckCircle className="mr-2 h-4 w-4" />
                   Approve
                 </Button>
                 <Button
@@ -769,41 +804,35 @@ export default function NoteSheetDetailPage() {
                   disabled={acting}
                   onClick={() => void runApproval("reject")}
                 >
-                  <XCircle className="h-4 w-4 mr-2" />
+                  <XCircle className="mr-2 h-4 w-4" />
                   Reject
                 </Button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </Section>
         )}
 
         {row.status === "Submitted" && !canApprove && (
-          <Card className="rounded-[10px]">
-            <CardContent className="p-6">
-              <p className="text-sm text-muted-foreground">
-                Waiting for approval from{" "}
-                <span className="font-medium text-foreground">
-                  Assistant Collector, Deputy Collector, Location Admin, or Super Admin
-                </span>
-                . Only those officials can approve or reject this note sheet.
-              </p>
-            </CardContent>
-          </Card>
+          <div className="rounded-xl border border-[#F5D7A8] bg-[#FFF8EE] px-4 py-3 text-sm text-[#5C3B12]">
+            Waiting for approval from{" "}
+            <span className="font-semibold">
+              Assistant Collector, Deputy Collector, Location Admin, or Super Admin
+            </span>
+            . Only those officials can approve or reject this note sheet.
+          </div>
         )}
 
         {row.status === "Approved" && !row.detentionMemoId && (
-          <Card className="rounded-[10px] border-green-200 bg-green-50/50">
-            <CardContent className="p-6 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-              <p className="text-sm text-green-900">
-                Note sheet approved. You can now create the detention memo — owner, goods, location, and grounds will be prefilled.
-              </p>
-              <Button asChild>
-                <Link to={`${ROUTES.DETENTION_MEMO_CREATE}?noteSheetId=${encodeURIComponent(row.id)}`}>
-                  Create Detention Memo
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
+          <div className="flex flex-col gap-3 rounded-xl border border-[#BFE8DF] bg-[#F3FBFA] px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-[#0C7A68]">
+              Note sheet approved. You can now create the detention memo. Owner, goods, location, and grounds will be prefilled.
+            </p>
+            <Button className="bg-[#102C55] text-white hover:bg-[#0C2748]" asChild>
+              <Link to={`${ROUTES.DETENTION_MEMO_CREATE}?noteSheetId=${encodeURIComponent(row.id)}`}>
+                Create Detention Memo
+              </Link>
+            </Button>
+          </div>
         )}
       </div>
     </ModulePageLayout>

@@ -9,8 +9,6 @@ import {
   BrainCircuit,
   Camera,
   Car,
-  Download,
-  FileSpreadsheet,
   FileText,
   LayoutDashboard,
   LayoutGrid,
@@ -34,6 +32,13 @@ import {
   YAxis,
 } from "recharts"
 import { CityOverviewMap } from "@/components/city-control/CityOverviewMap"
+import { AiSection } from "@/components/city-control/sections/AiSection"
+import { CamerasSection } from "@/components/city-control/sections/CamerasSection"
+import { ChartsSection } from "@/components/city-control/sections/ChartsSection"
+import { InfraSection } from "@/components/city-control/sections/InfraSection"
+import { ReportButtons } from "@/components/city-control/sections/ReportButtons"
+import { CustomsSection } from "@/components/city-control/sections/CustomsSection"
+import { SeizuresSection } from "@/components/city-control/sections/SeizuresSection"
 import { DetectionThumb } from "@/components/city-control/detection-thumb"
 import {
   CITY_CONTROL_REFRESH_MS,
@@ -410,6 +415,15 @@ export default function CityControlSummaryPage() {
             </div>
           </div>
 
+          {section === "cameras" ? <CamerasSection cityId={city.id} camerasPath={cityCamerasPath(city)} /> : null}
+          {section === "ai" ? <AiSection cityId={city.id} /> : null}
+          {section === "seizures" ? <SeizuresSection cityId={city.id} /> : null}
+          {section === "customs" ? <CustomsSection cityId={city.id} /> : null}
+          {section === "infra" ? <InfraSection cityId={city.id} /> : null}
+          {section === "charts" ? <ChartsSection cityId={city.id} /> : null}
+
+          {section === "overview" ? (
+          <>
           {/* Middle: overview + detections */}
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             <div className="rounded-[10px] border border-[#D9E6F5] bg-white p-4">
@@ -539,39 +553,13 @@ export default function CityControlSummaryPage() {
 
             <div className="rounded-[10px] border border-[#D9E6F5] bg-white p-4">
               <h3 className="text-[14px] font-semibold text-[#102C55]">History & Reports</h3>
-              <ul className="mt-3 space-y-2">
-                {[
-                  { title: "Daily Snapshot (PDF)", icon: FileText },
-                  { title: "Export Data (Excel)", icon: FileSpreadsheet },
-                  { title: "Comparative Report", icon: BarChart3 },
-                ].map((item) => {
-                  const Icon = item.icon
-                  return (
-                    <li key={item.title}>
-                      <button
-                        type="button"
-                        className="flex w-full items-center gap-2.5 rounded-lg border border-[#D9E6F5] px-3 py-2.5 text-left transition hover:border-[#0875E1]/40 hover:bg-[#F7FBFF]"
-                      >
-                        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#EFF6FF]">
-                          <Icon className="h-4 w-4 text-[#0875E1]" />
-                        </div>
-                        <span className="flex-1 text-[12px] font-semibold text-[#102C55]">{item.title}</span>
-                        <Download className="h-3.5 w-3.5 text-[#607DA5]" />
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
+              <div className="mt-3">
+                <ReportButtons cityId={city.id} />
+              </div>
             </div>
           </div>
 
-          {/* Section note for non-overview tabs */}
-          {section !== "overview" ? (
-            <div className="rounded-[10px] border border-[#D9E6F5] bg-[#F7FBFF] px-4 py-3 text-[13px] text-[#607DA5]">
-              Showing <span className="font-semibold text-[#102C55]">{NAV_ITEMS.find((n) => n.id === section)?.label}</span>{" "}
-              context for {city.city}. Full module deep-links stay on the local city system; this HQ view remains
-              read-only analytics.
-            </div>
+          </>
           ) : null}
 
           {/* Footer disclaimer */}

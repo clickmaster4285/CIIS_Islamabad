@@ -764,7 +764,7 @@ def collect_via_ssh(device) -> dict[str, Any]:
     try:
         import paramiko
     except ImportError:
-        return {"server_probe_error": "paramiko not installed on TekEye backend"}
+        return {"server_probe_error": "paramiko not installed on CIIS backend"}
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())

@@ -1,5 +1,5 @@
 """
-On-prem speech-to-text for the TekEye voice agent (faster-whisper).
+On-prem speech-to-text for the CIIS voice agent (faster-whisper).
 
 Audio never leaves the site: the browser sends short VAD-segmented WAV clips to Django,
 which forwards them here. Handles English, Urdu and mixed speech.

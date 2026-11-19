@@ -226,7 +226,7 @@ export function NvrCommandCenter({
       {
         id: "a-poll",
         time: data.last_polled_at ? new Date(data.last_polled_at).toLocaleString() : "—",
-        actor: "TekeEye",
+        actor: "CIIS",
         action: "Polled NVR health from Infrastructure Management",
         ip: data.ip_address || "—",
       },
@@ -742,7 +742,7 @@ export function NvrCommandCenter({
             </div>
           </div>
 
-          <SectionCard title="Quick Actions" description="Common operations without leaving TekeEye" icon={Zap}>
+          <SectionCard title="Quick Actions" description="Common operations without leaving CIIS" icon={Zap}>
             <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
               {(
                 [
@@ -767,7 +767,7 @@ export function NvrCommandCenter({
                     onClick: () =>
                       notify(
                         "Firmware update",
-                        "Upload firmware via the NVR vendor portal or a future TekeEye firmware API.",
+                        "Upload firmware via the NVR vendor portal or a future CIIS firmware API.",
                       ),
                   },
                   {
@@ -956,7 +956,7 @@ export function NvrCommandCenter({
             title="Live View Preview"
             description={
               camerasNvrId
-                ? `Live MJPEG from cameras.Nvr #${camerasNvrId} · Managed from TekeEye`
+                ? `Live MJPEG from cameras.Nvr #${camerasNvrId} · Managed from CIIS`
                 : "Link this Infra NVR to cameras.Nvr (source_key) for live streams"
             }
             icon={Video}
@@ -1665,7 +1665,7 @@ export function NvrCommandCenter({
         <TabsContent value="control" className="space-y-4">
           <SectionCard
             title="Device Command Center"
-            description="Operate and maintain this NVR from TekeEye — no Hikvision UI required for day-to-day work"
+            description="Operate and maintain this NVR from CIIS — no Hikvision UI required for day-to-day work"
             icon={Settings2}
           >
             <div className="mb-3">{managedHint()}</div>
@@ -1707,7 +1707,7 @@ export function NvrCommandCenter({
                     onClick: () =>
                       notify(
                         "Firmware update",
-                        "Firmware push is not enabled yet — use the vendor tool or a future TekeEye firmware API.",
+                        "Firmware push is not enabled yet — use the vendor tool or a future CIIS firmware API.",
                       ),
                   },
                   {
@@ -1722,7 +1722,7 @@ export function NvrCommandCenter({
                     onClick: () =>
                       notify(
                         "Factory reset",
-                        "Factory reset is intentionally not enabled from TekeEye for safety. Use the NVR local UI.",
+                        "Factory reset is intentionally not enabled from CIIS for safety. Use the NVR local UI.",
                         "destructive",
                       ),
                   },
@@ -1744,14 +1744,14 @@ export function NvrCommandCenter({
 
       <p className="text-xs text-muted-foreground">
         Live channels, storage, system, network, and logs are polled from the NVR over HTTP (ISAPI / Dahua).
-        Control actions are wired for TekeEye command APIs — confirmation is required for destructive operations.
+        Control actions are wired for CIIS command APIs — confirmation is required for destructive operations.
       </p>
 
       <Sheet open={networkOpen} onOpenChange={setNetworkOpen}>
         <SheetContent className="sm:max-w-md">
           <SheetHeader>
             <SheetTitle>Network Settings</SheetTitle>
-            <SheetDescription>Configure NVR networking from TekeEye</SheetDescription>
+            <SheetDescription>Configure NVR networking from CIIS</SheetDescription>
           </SheetHeader>
           <div className="mt-6 space-y-3">
             <FieldRow label="IP address" value={data.ip_address} />
@@ -1763,7 +1763,7 @@ export function NvrCommandCenter({
               className="mt-4 w-full bg-sky-600 hover:bg-sky-700"
               onClick={() => {
                 setNetworkOpen(false)
-                notify("Network settings saved", "Change will be applied via TekeEye API")
+                notify("Network settings saved", "Change will be applied via CIIS API")
               }}
             >
               Save changes

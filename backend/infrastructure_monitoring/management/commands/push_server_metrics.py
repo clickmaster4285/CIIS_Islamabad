@@ -3,7 +3,7 @@ Push local host metrics to Infrastructure Monitoring.
 
 Run ON the monitored server (e.g. 192.168.190.137):
 
-  python manage.py push_server_metrics --device-id 10 --api-base http://<tekeye-host>:8000 --token <jwt>
+  python manage.py push_server_metrics --device-id 10 --api-base http://<ciis-host>:8000 --token <jwt>
 
 Or serve a pull endpoint for the poller:
 
@@ -35,7 +35,7 @@ class Command(BaseCommand):
             "--api-base",
             type=str,
             default="",
-            help="TekEye API base, e.g. http://192.168.190.132:8000",
+            help="CIIS API base, e.g. http://192.168.190.132:8000",
         )
         parser.add_argument("--token", type=str, default="", help="JWT / Bearer token")
         parser.add_argument("--loop", type=int, default=0, help="Repeat every N seconds (0 = once)")

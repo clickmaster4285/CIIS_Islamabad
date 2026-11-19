@@ -1,4 +1,4 @@
-"""HTTP client for talking to remote Tekeye servers."""
+"""HTTP client for talking to remote CIIS servers."""
 
 from __future__ import annotations
 
@@ -202,7 +202,7 @@ def fetch_remote_city_ops_stats(
     timeout: float = 8.0,
 ) -> dict[str, Any]:
     """
-    Pull city operational totals from a remote Tekeye Django API
+    Pull city operational totals from a remote CIIS Django API
     (seizures / detentions / AI detections / staff).
     """
     base = (base_url or "").rstrip("/")
@@ -671,7 +671,7 @@ def unregister_ml_camera_remote(ml_base_url: str, stream_key: str) -> dict[str, 
 
 
 def delete_remote_camera(base_url: str, token: str, camera_id: int) -> dict[str, Any]:
-    """Delete a camera on a remote Tekeye Django API."""
+    """Delete a camera on a remote CIIS Django API."""
     base = base_url.rstrip("/")
     if not camera_id:
         return {"ok": False, "error": "camera_id is required."}

@@ -26,3 +26,5 @@ paddleocr>=3.0.0
 
 # TekEye voice agent — on-prem speech-to-text
 faster-whisper>=1.1.0
+# PyAV 16+ dropped metadata_errors from av.open; faster-whisper 1.2 still passes it.
+av>=13,<16

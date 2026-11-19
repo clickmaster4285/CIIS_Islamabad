@@ -211,6 +211,17 @@ export type VideoAnalyzeHit = {
   confidence?: number;
 };
 
+export type VideoAnalyzePlate = {
+  plate_number: string;
+  first_t: number;
+  last_t: number;
+  reads: number;
+  ocr_confidence?: number;
+  confidence?: number;
+  /** Small JPEG data URL of the best plate crop. */
+  image?: string;
+};
+
 export type VideoAnalyzeResult = {
   job_id: string;
   duration_sec: number;
@@ -223,6 +234,9 @@ export type VideoAnalyzeResult = {
   vehicles: number;
   weapons: number;
   fires: number;
+  plate_requested?: boolean;
+  plate_engine_available?: boolean;
+  plates?: VideoAnalyzePlate[];
   hits: VideoAnalyzeHit[];
   output_url: string;
   output_name?: string;
@@ -244,6 +258,7 @@ export async function startVideoAnalyze(
     vehicle: boolean;
     weapon: boolean;
     fire: boolean;
+    plate?: boolean;
     matchStaff: boolean;
     sampleFps?: number;
   }
@@ -258,6 +273,7 @@ export async function startVideoAnalyze(
   form.append("weapon", String(options.weapon));
   form.append("fire", String(options.fire));
   form.append("match_staff", String(options.matchStaff));
+  form.append("plate", String(Boolean(options.plate)));
   form.append("sample_fps", String(options.sampleFps ?? 0.5));
   const response = await fetch(`${API_BASE_URL}/api/ml/analyze-video/`, {
     method: "POST",
@@ -296,6 +312,7 @@ export async function analyzeVideoFile(
     vehicle: boolean;
     weapon: boolean;
     fire: boolean;
+    plate?: boolean;
     matchStaff: boolean;
     sampleFps?: number;
     onProgress?: (job: VideoAnalyzeJob) => void;

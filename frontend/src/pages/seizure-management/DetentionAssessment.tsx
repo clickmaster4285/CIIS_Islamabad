@@ -342,6 +342,67 @@ export default function DetentionAssessmentPage() {
     }
   }
 
+  const renderRowActions = (
+    memo: DetentionMemoApiRecord,
+    assessment: DetentionAssessmentRecord | undefined,
+    isApproved: boolean
+  ) => (
+    <TableActionGroup className="w-max max-w-none flex-nowrap gap-0">
+      <TableActionIcon label="View memo" to={getDetentionMemoDetailPath(memo.id)}>
+        <Eye className="h-4 w-4" />
+      </TableActionIcon>
+      {assessment ? (
+        <>
+          <TableActionIcon
+            label={
+              canUserEditAssessment(assessment, currentUser?.role)
+                ? "Edit assessment"
+                : "View assessment"
+            }
+            onClick={() =>
+              navigate(
+                canUserEditAssessment(assessment, currentUser?.role)
+                  ? getSeizureMgmtAssessmentEditPath(assessment.id)
+                  : getSeizureMgmtAssessmentDetailPath(assessment.id)
+              )
+            }
+          >
+            <ClipboardCheck className="h-4 w-4" />
+          </TableActionIcon>
+          {isApproved && assessment.documentRelevance === "Relevant" && (
+            <TableActionIcon label="Release" to={ROUTES.RELEASE_INVENTORY}>
+              <PackageOpen className="h-4 w-4" />
+            </TableActionIcon>
+          )}
+          {isApproved && assessment.documentRelevance === "Not Relevant" && (
+            <TableActionIcon
+              label="Create recovery memo"
+              to={recoveryMemoCreateHref(assessment.detentionMemoId, assessment.id)}
+            >
+              <Package className="h-4 w-4" />
+            </TableActionIcon>
+          )}
+          {assessment.status !== "Approved" && (
+            <TableActionIcon
+              label="Delete assessment"
+              destructive
+              onClick={() => void handleDelete(assessment.id)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </TableActionIcon>
+          )}
+        </>
+      ) : (
+        <TableActionIcon
+          label="Assess"
+          to={`${ROUTES.SEIZURE_MGMT_ASSESSMENT_CREATE}?detentionMemoId=${encodeURIComponent(memo.id)}`}
+        >
+          <ClipboardCheck className="h-4 w-4" />
+        </TableActionIcon>
+      )}
+    </TableActionGroup>
+  )
+
   return (
     <ModulePageLayout
       title="Detention Assessment"
@@ -377,9 +438,9 @@ export default function DetentionAssessmentPage() {
           ].map((stat) => (
             <div
               key={stat.label}
-              className="rounded-xl border border-border/80 bg-card px-3 py-3 shadow-sm"
+              className="min-w-0 overflow-hidden rounded-xl border border-border/80 bg-card px-3 py-3 shadow-sm"
             >
-              <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <p className="text-[11px] font-medium uppercase leading-snug tracking-wide text-muted-foreground">
                 {stat.label}
               </p>
               <p className={`mt-1 text-2xl font-semibold tabular-nums tracking-tight ${stat.tone}`}>
@@ -391,8 +452,8 @@ export default function DetentionAssessmentPage() {
 
         <Card className="overflow-hidden rounded-xl border-border/80 shadow-sm">
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b bg-slate-50/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="relative w-full sm:max-w-sm">
+            <div className="flex flex-wrap items-center gap-2 border-b bg-slate-50/60 px-4 py-3">
+              <div className="relative min-w-[12rem] flex-1 basis-56">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   className="h-8 bg-white pl-8 text-sm"
@@ -412,57 +473,141 @@ export default function DetentionAssessmentPage() {
                     setPage(1)
                   }}
                   options={locations.options}
-                  className="h-8 w-full bg-white text-sm sm:w-44"
+                  className="h-8 w-full shrink-0 bg-white text-sm sm:w-44"
                 />
               )}
-              <p className="text-xs text-muted-foreground tabular-nums">
+              <p className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                 {filtered.length} of {memos.length} shown
               </p>
             </div>
 
-            <div className="w-full max-w-full overflow-x-auto">
-              <Table className="min-w-[920px] table-fixed">
+            <div className="space-y-2 p-3 lg:hidden">
+              {loading ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+                  Loading detention memos…
+                </p>
+              ) : pageRows.length === 0 ? (
+                <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+                  No detention memos found. Create a detention memo first.
+                </div>
+              ) : (
+                pageRows.map((memo, index) => {
+                  const assessment = assessmentByMemoId.get(memo.id)
+                  const isApproved = assessment?.status === "Approved"
+                  return (
+                    <div key={memo.id} className="rounded-xl border bg-card p-3 shadow-sm">
+                      <div className="mb-2 flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                            Sr. {pageSerial(index)}
+                          </p>
+                          <button
+                            type="button"
+                            className="block max-w-full truncate text-left font-mono text-sm font-semibold text-black hover:underline"
+                            title={memo.caseNo || ""}
+                            onClick={() => navigate(getDetentionMemoDetailPath(memo.id))}
+                          >
+                            {memo.caseNo || "—"}
+                          </button>
+                          <p className="truncate font-mono text-[11px] text-muted-foreground">
+                            {memo.referenceNumber || "—"}
+                          </p>
+                        </div>
+                        <div className="shrink-0">{assessmentStatusBadge(assessment)}</div>
+                      </div>
+                      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                        {locations.enabled && (
+                          <div className="min-w-0">
+                            <dt className="text-[10px] text-muted-foreground">Location</dt>
+                            <dd className="truncate">{locations.labelFor(memo.locationCode)}</dd>
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Date</dt>
+                          <dd className="tabular-nums">{memo.dateTimeDetention?.slice(0, 10) || "—"}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Place</dt>
+                          <dd className="truncate" title={memo.placeOfDetention || ""}>
+                            {shortPlace(memo.placeOfDetention)}
+                          </dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Type</dt>
+                          <dd className="truncate">{memo.detentionType || "—"}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Owner</dt>
+                          <dd className="truncate" title={memo.owner?.name || ""}>
+                            {memo.owner?.name || "—"}
+                          </dd>
+                        </div>
+                        <div className="col-span-2 min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Goods</dt>
+                          <dd className="line-clamp-2 break-words">{goodsSummary(memo)}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Value</dt>
+                          <dd className="tabular-nums">{goodsValue(memo)}</dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-[10px] text-muted-foreground">Verify</dt>
+                          <dd className="truncate">{memo.verificationStatus || "—"}</dd>
+                        </div>
+                      </dl>
+                      <div className="mt-2 flex flex-wrap justify-end gap-0.5 border-t pt-2">
+                        {renderRowActions(memo, assessment, isApproved)}
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            <div className="hidden lg:block">
+              <Table containerClassName="max-w-full" className="w-max min-w-full">
                 <TableHeader>
-                  <TableRow className="border-b bg-slate-50/90 hover:bg-slate-50/90">
-                    <TableHead className="w-12 px-1.5 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <TableRow className="border-b bg-slate-50 hover:bg-slate-50">
+                    <TableHead className="w-14 px-2 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Sr. No
                     </TableHead>
-                    <TableHead className="w-[8.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[9rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Case No
                     </TableHead>
                     {locations.enabled && (
-                      <TableHead className="w-[7rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      <TableHead className="min-w-[7.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                         Location
                       </TableHead>
                     )}
-                    <TableHead className="w-[7.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[8rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Memo No
                     </TableHead>
-                    <TableHead className="w-[6rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[6.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Date
                     </TableHead>
-                    <TableHead className="w-[6.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[8rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Place
                     </TableHead>
-                    <TableHead className="w-[4.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[5.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Type
                     </TableHead>
-                    <TableHead className="w-[5.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[7rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Owner
                     </TableHead>
-                    <TableHead className="w-[11rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[12rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Goods
                     </TableHead>
-                    <TableHead className="w-[5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[6.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Value
                     </TableHead>
-                    <TableHead className="w-[5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[5.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Verify
                     </TableHead>
-                    <TableHead className="w-[6rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[7.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Assessment
                     </TableHead>
-                    <TableHead className="sticky right-0 z-20 w-[6.5rem] bg-slate-50/95 px-1.5 text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="sticky right-0 z-20 min-w-[8.5rem] bg-slate-50 px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500 shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.18)]">
                       Actions
                     </TableHead>
                   </TableRow>
@@ -497,13 +642,13 @@ export default function DetentionAssessmentPage() {
                           key={memo.id}
                           className="group border-b border-slate-100 transition-colors hover:bg-sky-50/40"
                         >
-                          <TableCell className="px-1.5 py-2 text-center text-xs font-medium tabular-nums text-foreground">
+                          <TableCell className="px-2 py-2 text-center text-xs font-medium tabular-nums text-foreground">
                             {pageSerial(index)}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[11rem] overflow-hidden px-2 py-2">
                             <button
                               type="button"
-                              className="max-w-full truncate text-left font-mono text-[12px] font-semibold text-black hover:underline"
+                              className="block max-w-[10rem] truncate text-left font-mono text-[12px] font-semibold text-black hover:underline"
                               title={memo.caseNo || ""}
                               onClick={() => navigate(getDetentionMemoDetailPath(memo.id))}
                             >
@@ -511,52 +656,54 @@ export default function DetentionAssessmentPage() {
                             </button>
                           </TableCell>
                           {locations.enabled && (
-                            <TableCell className="whitespace-nowrap px-1.5 py-2 text-xs">
-                              {locations.labelFor(memo.locationCode)}
+                            <TableCell className="max-w-[8rem] overflow-hidden px-2 py-2 text-xs">
+                              <span className="block max-w-[7.5rem] truncate" title={locations.labelFor(memo.locationCode)}>
+                                {locations.labelFor(memo.locationCode)}
+                              </span>
                             </TableCell>
                           )}
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[9rem] overflow-hidden px-2 py-2">
                             <span
-                              className="block max-w-full truncate font-mono text-[11px] text-black"
+                              className="block max-w-[8rem] truncate font-mono text-[11px] text-black"
                               title={memo.referenceNumber || ""}
                             >
                               {memo.referenceNumber || "—"}
                             </span>
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs tabular-nums text-slate-700">
+                          <TableCell className="px-2 py-2 text-xs tabular-nums text-slate-700">
                             {memo.dateTimeDetention?.slice(0, 10) || "—"}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[10rem] overflow-hidden px-2 py-2">
                             <span
-                              className="block max-w-full truncate text-xs text-slate-700"
+                              className="block max-w-[9rem] truncate text-xs text-slate-700"
                               title={memo.placeOfDetention || ""}
                             >
                               {shortPlace(memo.placeOfDetention)}
                             </span>
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs text-slate-700">
-                            {memo.detentionType || "—"}
+                          <TableCell className="max-w-[7rem] overflow-hidden px-2 py-2 text-xs text-slate-700">
+                            <span className="block max-w-[6.5rem] truncate">{memo.detentionType || "—"}</span>
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[8rem] overflow-hidden px-2 py-2">
                             <span
-                              className="block max-w-full truncate text-xs"
+                              className="block max-w-[7rem] truncate text-xs"
                               title={memo.owner?.name || ""}
                             >
                               {memo.owner?.name || "—"}
                             </span>
                           </TableCell>
-                          <TableCell className="whitespace-normal px-1.5 py-2">
+                          <TableCell className="max-w-[14rem] overflow-hidden whitespace-normal px-2 py-2">
                             <p
-                              className="line-clamp-2 max-w-[11rem] break-words text-xs leading-snug text-foreground"
+                              className="line-clamp-2 max-w-[13rem] break-words text-xs leading-snug text-foreground"
                               title={goodsFull}
                             >
                               {goodsLabel}
                             </p>
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs tabular-nums text-slate-700">
+                          <TableCell className="px-2 py-2 text-xs tabular-nums text-slate-700">
                             {goodsValue(memo)}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="px-2 py-2">
                             {memo.verificationStatus === "Verified" ? (
                               <Badge className="rounded-md border-0 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100">
                                 Verified
@@ -570,8 +717,8 @@ export default function DetentionAssessmentPage() {
                               </Badge>
                             )}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
-                            <div className="min-w-0 space-y-0.5">
+                          <TableCell className="max-w-[9rem] overflow-hidden px-2 py-2">
+                            <div className="max-w-[8rem] space-y-0.5">
                               {assessmentStatusBadge(assessment)}
                               {assessment?.examiningOfficer ? (
                                 <p
@@ -583,64 +730,8 @@ export default function DetentionAssessmentPage() {
                               ) : null}
                             </div>
                           </TableCell>
-                          <TableCell className="sticky right-0 z-10 overflow-visible bg-card px-1 py-1.5 text-right group-hover:bg-sky-50/40">
-                            <TableActionGroup className="w-auto min-w-0 gap-0">
-                              <TableActionIcon label="View memo" to={getDetentionMemoDetailPath(memo.id)}>
-                                <Eye className="h-4 w-4" />
-                              </TableActionIcon>
-                              {assessment ? (
-                                <>
-                                  <TableActionIcon
-                                    label={
-                                      canUserEditAssessment(assessment, currentUser?.role)
-                                        ? "Edit assessment"
-                                        : "View assessment"
-                                    }
-                                    onClick={() =>
-                                      navigate(
-                                        canUserEditAssessment(assessment, currentUser?.role)
-                                          ? getSeizureMgmtAssessmentEditPath(assessment.id)
-                                          : getSeizureMgmtAssessmentDetailPath(assessment.id)
-                                      )
-                                    }
-                                  >
-                                    <ClipboardCheck className="h-4 w-4" />
-                                  </TableActionIcon>
-                                  {isApproved && assessment.documentRelevance === "Relevant" && (
-                                    <TableActionIcon label="Release" to={ROUTES.RELEASE_INVENTORY}>
-                                      <PackageOpen className="h-4 w-4" />
-                                    </TableActionIcon>
-                                  )}
-                                  {isApproved && assessment.documentRelevance === "Not Relevant" && (
-                                    <TableActionIcon
-                                      label="Create recovery memo"
-                                      to={recoveryMemoCreateHref(
-                                        assessment.detentionMemoId,
-                                        assessment.id
-                                      )}
-                                    >
-                                      <Package className="h-4 w-4" />
-                                    </TableActionIcon>
-                                  )}
-                                  {assessment.status !== "Approved" && (
-                                    <TableActionIcon
-                                      label="Delete assessment"
-                                      destructive
-                                      onClick={() => void handleDelete(assessment.id)}
-                                    >
-                                      <Trash2 className="h-4 w-4" />
-                                    </TableActionIcon>
-                                  )}
-                                </>
-                              ) : (
-                                <TableActionIcon
-                                  label="Assess"
-                                  to={`${ROUTES.SEIZURE_MGMT_ASSESSMENT_CREATE}?detentionMemoId=${encodeURIComponent(memo.id)}`}
-                                >
-                                  <ClipboardCheck className="h-4 w-4" />
-                                </TableActionIcon>
-                              )}
-                            </TableActionGroup>
+                          <TableCell className="sticky right-0 z-10 whitespace-nowrap bg-white px-1 py-1.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.18)] group-hover:bg-[#f3f8fd]">
+                            {renderRowActions(memo, assessment, isApproved)}
                           </TableCell>
                         </TableRow>
                       )
@@ -652,7 +743,7 @@ export default function DetentionAssessmentPage() {
 
             {filtered.length > 0 ? (
               <div className="flex flex-col gap-3 border-t bg-slate-50/40 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-muted-foreground">Rows per page</span>
                   <Select
                     value={pageSize.toString()}

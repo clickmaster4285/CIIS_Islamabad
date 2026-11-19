@@ -24,11 +24,11 @@ logger = logging.getLogger(__name__)
 
 WAKE_PHRASES = ("hello customs", "hallo customs", "helo customs", "hello custom", "ہیلو کسٹمز", "ہیلو کسٹم")
 # Biases Whisper toward spelling the wake phrase correctly.
-STT_PROMPT = "Hello Customs. TekEye, camera, main gate, ANPR, incident."
+STT_PROMPT = "Hello Customs. CIIS, camera, main gate, ANPR, incident."
 
 
 class CanUseVoiceAgent(permissions.BasePermission):
-    message = "Your role is not enabled for the TekEye voice agent."
+    message = "Your role is not enabled for the CIIS voice agent."
 
     def has_permission(self, request, view):
         return policy.can_use_voice_agent(request.user)

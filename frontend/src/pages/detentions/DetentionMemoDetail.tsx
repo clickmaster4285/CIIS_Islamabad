@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { useParams, Link, useSearchParams, useLocation } from "react-router-dom"
 import { ArrowLeft, FileText, Package, Pencil, QrCode, Users, Paperclip, Camera } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
 import { PrintMenu } from "@/components/seizure/print-menu"
 import {
   Dialog,
@@ -161,12 +160,137 @@ function ViewLocatedCameraDialog({
   )
 }
 
-function DetailRow({ label, value }: { label: string; value: string | undefined }) {
+type SectionTone = "blue" | "teal" | "amber" | "violet" | "rose"
+
+const SECTION_TONE: Record<
+  SectionTone,
+  { chip: string; head: string; border: string; rule: string }
+> = {
+  blue: {
+    chip: "bg-[#D7EBFF] text-[#0B5CAD]",
+    head: "bg-gradient-to-r from-[#E7F2FF] to-[#F8FBFF]",
+    border: "border-[#C5DDF7]",
+    rule: "border-[#D5E7FA]",
+  },
+  teal: {
+    chip: "bg-[#D5F4EE] text-[#0C7A68]",
+    head: "bg-gradient-to-r from-[#E5F8F4] to-[#F7FDFB]",
+    border: "border-[#BFE8DF]",
+    rule: "border-[#D3F0E9]",
+  },
+  amber: {
+    chip: "bg-[#FFE8C7] text-[#A15C00]",
+    head: "bg-gradient-to-r from-[#FFF3E0] to-[#FFFBF5]",
+    border: "border-[#F5D7A8]",
+    rule: "border-[#F8E4C4]",
+  },
+  violet: {
+    chip: "bg-[#E6E0FF] text-[#5340B0]",
+    head: "bg-gradient-to-r from-[#F1EDFF] to-[#FBFAFF]",
+    border: "border-[#D9D0F7]",
+    rule: "border-[#E6E0F8]",
+  },
+  rose: {
+    chip: "bg-[#FFDDE4] text-[#B4234A]",
+    head: "bg-gradient-to-r from-[#FFF0F3] to-[#FFF9FA]",
+    border: "border-[#F6C9D3]",
+    rule: "border-[#F8D7DF]",
+  },
+}
+
+function FieldTile({ label, value }: { label: string; value: string | undefined }) {
+  const text = (value ?? "").trim()
   return (
-    <div className="grid grid-cols-1 gap-1 border-b border-border/50 py-2 sm:grid-cols-[180px_1fr] sm:gap-2">
-      <span className="text-sm text-muted-foreground break-words">{label}</span>
-      <span className="text-sm font-medium break-words">{value ?? "—"}</span>
+    <div className="min-w-0 rounded-lg border border-[#D7E6F6] bg-gradient-to-br from-white to-[#F4F9FF] px-3.5 py-2.5 shadow-[inset_3px_0_0_#3B8FE8]">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[#1D6BB5]">{label}</p>
+      <p className="mt-1 break-words text-[13px] font-semibold leading-snug text-[#102C55] [overflow-wrap:anywhere]">
+        {text || "—"}
+      </p>
     </div>
+  )
+}
+
+function Snapshot({
+  label,
+  value,
+  className,
+}: {
+  label: string
+  value: string
+  className: string
+}) {
+  return (
+    <div className={cn("min-w-0 rounded-xl border px-3.5 py-3 shadow-sm", className)}>
+      <p className="text-[10px] font-semibold uppercase tracking-[0.08em] opacity-80">{label}</p>
+      <p className="mt-1 truncate text-[18px] font-semibold leading-tight">{value || "—"}</p>
+    </div>
+  )
+}
+
+function FieldGrid({ children, columns = "sm:grid-cols-2" }: { children: ReactNode; columns?: string }) {
+  return (
+    <div className={cn("grid grid-cols-1 gap-2", columns)}>
+      {children}
+    </div>
+  )
+}
+
+function Section({
+  icon,
+  title,
+  action,
+  children,
+  className,
+  tone = "blue",
+}: {
+  icon?: ReactNode
+  title: string
+  action?: ReactNode
+  children: ReactNode
+  className?: string
+  tone?: SectionTone
+}) {
+  const paint = SECTION_TONE[tone]
+  return (
+    <section className={cn("min-w-0 overflow-hidden rounded-xl border bg-white shadow-sm", paint.border, className)}>
+      <div className={cn("flex items-center justify-between gap-3 border-b px-4 py-3", paint.head, paint.rule)}>
+        <h3 className="flex min-w-0 items-center gap-2.5 text-[13px] font-semibold text-[#102C55]">
+          <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-lg", paint.chip)}>
+            {icon ?? <span className="h-2 w-2 rounded-full bg-current" />}
+          </span>
+          <span className="truncate">{title}</span>
+        </h3>
+        {action}
+      </div>
+      <div className="bg-white p-4">{children}</div>
+    </section>
+  )
+}
+
+function StatusMark({ status }: { status?: string }) {
+  const verified = status === "Verified"
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-semibold shadow-sm",
+        verified ? "bg-[#D9F5E8] text-[#0E7A45]" : "bg-[#FFE8C2] text-[#9A5B00]"
+      )}
+    >
+      <span className={cn("h-1.5 w-1.5 rounded-full", verified ? "bg-[#12A66A]" : "bg-[#F59E0B]")} />
+      {status?.trim() || "Pending"}
+    </span>
+  )
+}
+
+function NoteBlock({ children, tone = "blue" }: { children: ReactNode; tone?: "blue" | "amber" }) {
+  const paint =
+    tone === "amber"
+      ? "border-[#F5D7A8] bg-[#FFF8EE] text-[#5C3B12]"
+      : "border-[#C5DDF7] bg-[#F3F8FF] text-[#102C55]"
+  return (
+    <p className={cn("whitespace-pre-wrap break-words rounded-lg border px-4 py-3 text-sm leading-6 [overflow-wrap:anywhere]", paint)}>
+      {children}
+    </p>
   )
 }
 
@@ -215,15 +339,8 @@ function GoodsInformationBlock({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Package className="h-4 w-4" />
-          Goods Information
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="rounded-lg border p-0">
-        <div className="space-y-3 p-3 sm:hidden">
+    <Section icon={<Package className="h-4 w-4" />} title="Goods information" tone="teal" className="[&>div:last-child]:p-0">
+        <div className="space-y-3 p-3 xl:hidden">
           {items.map((item) => {
             const isHighlight =
               highlight &&
@@ -233,7 +350,7 @@ function GoodsInformationBlock({
             return (
               <div
                 key={item.id}
-                className={`rounded-md border bg-background p-3 ${isHighlight ? "ring-2 ring-primary" : ""}`}
+                className={`rounded-xl border border-[#BFE8DF] bg-gradient-to-br from-white to-[#F3FBFA] p-3 shadow-sm ${isHighlight ? "ring-2 ring-[#0E9F8A]" : ""}`}
               >
                 <div className="mb-3">
                   <GoodsQrDisplay
@@ -242,19 +359,52 @@ function GoodsInformationBlock({
                     size={56}
                   />
                 </div>
-                <div className="space-y-2 text-sm">
-                  <div><span className="text-muted-foreground">Description: </span><GoodsLineText className="inline-block align-top max-h-20 font-medium">{item.description || "—"}</GoodsLineText></div>
-                  <div><span className="text-muted-foreground">PCT Code: </span>{item.pctCode?.trim() || "—"}</div>
-                  <div><span className="text-muted-foreground">Qty/Unit: </span>{item.quantity || "—"} / {item.unit || "—"}</div>
-                  <div><span className="text-muted-foreground">Condition: </span>{item.condition || "—"}</div>
-                  <div><span className="text-muted-foreground">Assessable Value (PKR): </span>{item.assessableValuePkr?.trim() || "—"}</div>
-                  <div><span className="text-muted-foreground">Perishable: </span>{item.perishable ? "Yes" : "No"}</div>
-                  <div><span className="text-muted-foreground">Located Camera: </span>{cameraLabel(item.locatedCamera, item.locatedCameraId)}</div>
-                  <div><span className="text-muted-foreground">Zone: </span>{item.locatedCamera?.zone?.trim() || "—"}</div>
-                  <div><span className="text-muted-foreground">Detected At: </span>{item.detectedAt?.trim() || "—"}</div>
-                  <div><span className="text-muted-foreground">ID/Chassis: </span><span className="break-words">{item.identificationRef || "—"}</span></div>
-                  <div><span className="text-muted-foreground">Notes: </span><GoodsLineText className="inline-block align-top max-h-20">{item.itemNotes || "—"}</GoodsLineText></div>
-                </div>
+                <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                  <div className="col-span-2 min-w-0">
+                    <dt className="text-[10px] font-semibold uppercase tracking-wide text-[#0C7A68]">Description</dt>
+                    <dd><GoodsLineText className="font-medium">{item.description || "—"}</GoodsLineText></dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">PCT code</dt>
+                    <dd className="break-words">{item.pctCode?.trim() || "—"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Qty / unit</dt>
+                    <dd className="break-words">{item.quantity || "—"} / {item.unit || "—"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Condition</dt>
+                    <dd className="break-words">{item.condition || "—"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Value (PKR)</dt>
+                    <dd className="break-words">{item.assessableValuePkr?.trim() || "—"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Perishable</dt>
+                    <dd>{item.perishable ? "Yes" : "No"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Zone</dt>
+                    <dd className="truncate">{item.locatedCamera?.zone?.trim() || "—"}</dd>
+                  </div>
+                  <div className="col-span-2 min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Located camera</dt>
+                    <dd className="break-words">{cameraLabel(item.locatedCamera, item.locatedCameraId)}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Detected at</dt>
+                    <dd className="break-words">{item.detectedAt?.trim() || "—"}</dd>
+                  </div>
+                  <div className="min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">ID / chassis</dt>
+                    <dd className="break-words [overflow-wrap:anywhere]">{item.identificationRef || "—"}</dd>
+                  </div>
+                  <div className="col-span-2 min-w-0">
+                    <dt className="text-[10px] text-muted-foreground">Notes</dt>
+                    <dd><GoodsLineText>{item.itemNotes || "—"}</GoodsLineText></dd>
+                  </div>
+                </dl>
                 {camId != null && onViewCamera ? (
                   <Button size="sm" className="mt-3 gap-1.5" onClick={() => onViewCamera(item)}>
                     <Camera className="h-3.5 w-3.5" />
@@ -283,10 +433,10 @@ function GoodsInformationBlock({
           })}
         </div>
 
-        <div className="hidden max-w-full overflow-x-auto rounded-md border border-border/70 sm:block">
-          <Table className="w-max min-w-full text-sm">
+        <div className="hidden xl:block">
+          <Table containerClassName="max-w-full" className="w-max min-w-full text-sm">
               <TableHeader>
-                <TableRow className="border-b bg-muted/40 hover:bg-muted/40">
+                <TableRow className="border-b bg-[#E7F4F1] hover:bg-[#E7F4F1]">
                   <TableHead className={goodsHeadClass}>QR Code</TableHead>
                   <TableHead className={goodsHeadClass}>Description</TableHead>
                   <TableHead className={goodsHeadClass}>Located Camera</TableHead>
@@ -324,9 +474,9 @@ function GoodsInformationBlock({
                       <TableCell className={cn(goodsDetailCellClass, "min-w-[10rem] max-w-[16rem] font-medium")}>
                         <GoodsLineText>{item.description || "—"}</GoodsLineText>
                       </TableCell>
-                      <TableCell className={cn(goodsDetailCellClass, "min-w-[9rem] text-xs")}>
-                        <div className="space-y-0.5">
-                          <p className="font-medium text-sm">
+                      <TableCell className={cn(goodsDetailCellClass, "max-w-[12rem] overflow-hidden text-xs")}>
+                        <div className="max-w-[11rem] space-y-0.5">
+                          <p className="truncate text-sm font-medium" title={cameraLabel(item.locatedCamera, item.locatedCameraId)}>
                             {cameraLabel(item.locatedCamera, item.locatedCameraId)}
                           </p>
                           <p className="text-muted-foreground">
@@ -343,7 +493,11 @@ function GoodsInformationBlock({
                       <TableCell className={goodsDetailCellClass}>{item.condition || "—"}</TableCell>
                       <TableCell className={goodsDetailCellClass}>{item.assessableValuePkr?.trim() || "—"}</TableCell>
                       <TableCell className={goodsDetailCellClass}>{item.perishable ? "Yes" : "No"}</TableCell>
-                      <TableCell className={goodsDetailCellClass}>{item.identificationRef || "—"}</TableCell>
+                      <TableCell className={cn(goodsDetailCellClass, "max-w-[10rem] overflow-hidden")}>
+                        <span className="block max-w-[9rem] truncate" title={item.identificationRef || ""}>
+                          {item.identificationRef || "—"}
+                        </span>
+                      </TableCell>
                       <TableCell className={cn(goodsDetailCellClass, "min-w-[8rem] max-w-[14rem] text-muted-foreground")}>
                         <GoodsLineText>{item.itemNotes || "—"}</GoodsLineText>
                       </TableCell>
@@ -390,8 +544,7 @@ function GoodsInformationBlock({
               </TableBody>
             </Table>
         </div>
-      </CardContent>
-    </Card>
+    </Section>
   )
 }
 
@@ -598,7 +751,7 @@ export default function DetentionMemoDetailPage() {
   // Normal view (screen) – includes sidebar via ModulePageLayout
   return (
     <ModulePageLayout
-      title={`Detention Memo: ${row.caseNo}`}
+      title="Detention Memo"
       description={
         row.referenceNumber
           ? `Memo No. ${row.referenceNumber} · Pakistan Customs detention memo details.`
@@ -609,6 +762,22 @@ export default function DetentionMemoDetailPage() {
         { label: "Detention Memo", href: listPath },
         { label: row.caseNo },
       ]}
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          {canUserFullyEditSeizureDocs(getStoredUser()?.role) ? (
+            <Button size="sm" asChild>
+              <Link to={getDetentionMemoEditPath(row.id, pathname)}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit record
+              </Link>
+            </Button>
+          ) : null}
+          <PrintMenu
+            printHref={`${listPath}/${encodeURIComponent(row.id)}?print=full`}
+            pdfHref={`${listPath}/${encodeURIComponent(row.id)}?print=full&savepdf=1`}
+          />
+        </div>
+      }
     >
       {/* Global print style to hide sidebar if user accidentally prints this view */}
       <style>{`
@@ -623,201 +792,185 @@ export default function DetentionMemoDetailPage() {
           }
         }
       `}</style>
-      <div className="grid gap-4 sm:gap-6 print-keep">
-        <Card className="border-0 shadow-sm">
-          <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between px-4 sm:px-6">
-            <div>
-              <CardTitle className="flex items-center gap-2 text-lg sm:text-xl">
-                <FileText className="h-5 w-5 flex-shrink-0" />
-                <span className="break-words">{row.caseNo}</span>
-              </CardTitle>
-              <p className="text-sm text-muted-foreground mt-1">
-                {row.referenceNumber ? (
-                  <>
-                    Detention Memo No.{" "}
-                    <span className="font-semibold text-foreground">{row.referenceNumber}</span>
-                  </>
-                ) : (
-                  "Detention memo details and printable report."
-                )}
+      <div className="grid gap-4 print-keep">
+        <div className="overflow-hidden rounded-xl bg-[#102C55] text-white shadow-md">
+          <div className="flex flex-wrap items-start justify-between gap-4 px-5 py-5">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#D6EBFF]">
+                Pakistan Customs · Detention memo
               </p>
+              <h2 className="mt-1 break-all font-mono text-[24px] font-semibold leading-tight text-white">
+                {row.caseNo}
+              </h2>
+              <div className="mt-3 flex flex-wrap gap-2 text-[12px]">
+                <span className="rounded-full bg-white/15 px-2.5 py-1">
+                  Memo <span className="font-semibold">{row.referenceNumber || "—"}</span>
+                </span>
+                <span className="rounded-full bg-[#FFE3B0] px-2.5 py-1 font-semibold text-[#7A4A00]">
+                  {row.detentionType || "Type —"}
+                </span>
+                <span className="rounded-full bg-[#D7F6EA] px-2.5 py-1 font-semibold text-[#0C6B45]">
+                  {row.dateTimeDetention || "Date —"}
+                </span>
+                <span className="max-w-full rounded-full bg-white/15 px-2.5 py-1">
+                  {row.placeOfDetention || "Place —"}
+                </span>
+              </div>
             </div>
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:ml-auto">
-              <Badge variant={row.verificationStatus === "Verified" ? "default" : "secondary"} className="w-fit">
-                {row.verificationStatus}
-              </Badge>
-              {canUserFullyEditSeizureDocs(getStoredUser()?.role) ? (
-                <Button variant="default" size="sm" className="w-full sm:w-auto" asChild>
-                  <Link to={getDetentionMemoEditPath(row.id, pathname)}>
-                    <Pencil className="h-4 w-4 mr-2" />
-                    Edit
-                  </Link>
-                </Button>
-              ) : null}
-              <PrintMenu
-                printHref={`${listPath}/${encodeURIComponent(row.id)}?print=full`}
-                pdfHref={`${listPath}/${encodeURIComponent(row.id)}?print=full&savepdf=1`}
+            <StatusMark status={row.verificationStatus} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          <Snapshot
+            label="Goods lines"
+            value={String(row.goodsItems?.length ?? 0)}
+            className="border-[#B7E6DC] bg-[#E7F8F4] text-[#0C6B56]"
+          />
+          <Snapshot
+            label="Verification"
+            value={row.verificationStatus || "Pending"}
+            className={
+              row.verificationStatus === "Verified"
+                ? "border-[#B7E7CC] bg-[#E8F8EF] text-[#0E7A45]"
+                : "border-[#F5D7A8] bg-[#FFF4E4] text-[#9A5B00]"
+            }
+          />
+          <Snapshot
+            label="Settlement"
+            value={row.settlementStatus || "—"}
+            className="border-[#D4CBF6] bg-[#F3F0FF] text-[#5340B0]"
+          />
+          <Snapshot
+            label="Disposition"
+            value={row.dispositionStatus || "—"}
+            className="border-[#C5DDF7] bg-[#EAF3FF] text-[#0B5CAD]"
+          />
+        </div>
+
+        <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_260px]">
+          <Section icon={<FileText className="h-4 w-4" />} title="Case particulars" tone="blue">
+            <FieldGrid>
+              <FieldTile label="Case no." value={row.caseNo} />
+              <FieldTile label="Detention memo no." value={row.referenceNumber} />
+              <FieldTile label="FIR number" value={row.firNumber} />
+              <FieldTile label="Directorate" value={row.directorate} />
+              <FieldTile label="Date/time of occurrence" value={row.dateTimeOccurrence} />
+              <FieldTile label="Date/time of detention" value={row.dateTimeDetention} />
+              <FieldTile label="Place of occurrence" value={row.placeOfOccurrence} />
+              <FieldTile label="Place of detention" value={row.placeOfDetention} />
+              <FieldTile label="Detention type" value={row.detentionType} />
+              <FieldTile label="Reason for detention" value={row.reasonForDetention} />
+              <FieldTile label="Location of detention" value={row.locationOfDetention} />
+              <FieldTile label="Disposition status" value={row.dispositionStatus} />
+              <FieldTile label="Search / chassis number" value={row.searchChassisNumber} />
+              <FieldTile label="Receipt officer" value={row.receiptOfficer} />
+              <FieldTile label="GD number" value={row.gdNumber} />
+              <FieldTile label="GD number 2" value={row.gdNumber2} />
+            </FieldGrid>
+          </Section>
+          <Section icon={<QrCode className="h-4 w-4" />} title="Memo QR" tone="violet">
+            <div className="flex flex-col items-center rounded-xl bg-gradient-to-b from-[#F4F0FF] to-white px-3 py-4 text-center">
+              <img
+                src={getQrCodeUrl(qrPayload, 168)}
+                alt="Memo QR code"
+                className="h-auto max-w-full rounded-lg border border-[#DDD4F8] bg-white p-2 shadow-sm"
               />
+              <p className="mt-3 break-all font-mono text-[11px] text-[#607DA5]">{qrNumber}</p>
+              <Button variant="outline" size="sm" className="mt-3 w-full" asChild>
+                <Link to={`${listPath}/${encodeURIComponent(row.id)}?print=qr`}>Print QR label</Link>
+              </Button>
             </div>
-          </CardHeader>
-          <CardContent className="space-y-4 sm:space-y-6 px-4 sm:px-6">
-            <div className="grid gap-4 sm:gap-6 md:grid-cols-[1fr_220px]">
-              <Card className="border-dashed">
-                <CardContent className="pt-5">
-                  <h4 className="text-sm font-semibold mb-3">Basic Information</h4>
-                  <div className="grid grid-cols-1 gap-x-5 md:grid-cols-2">
-                    <DetailRow label="Case No." value={row.caseNo} />
-                    <DetailRow label="Detention Memo No." value={row.referenceNumber || "—"} />
-                    <DetailRow label="FIR Number" value={row.firNumber} />
-                    <DetailRow label="Date/Time of occurrence" value={row.dateTimeOccurrence} />
-                    <DetailRow label="Place of occurrence" value={row.placeOfOccurrence} />
-                    <DetailRow label="Date/Time of detention" value={row.dateTimeDetention} />
-                    <DetailRow label="Place of detention" value={row.placeOfDetention} />
-                    <DetailRow label="Detention Type" value={row.detentionType} />
-                    <DetailRow label="Directorate" value={row.directorate} />
-                    <DetailRow label="Reason for detention" value={row.reasonForDetention} />
-                    <DetailRow label="Location of Detention" value={row.locationOfDetention} />
-                    <DetailRow label="Search / Chassis Number" value={row.searchChassisNumber} />
-                    <DetailRow label="Receipt Officer" value={row.receiptOfficer} />
-                    <DetailRow label="GD Number" value={row.gdNumber} />
-                    <DetailRow label="GD Number 2" value={row.gdNumber2} />
-                    <DetailRow label="Disposition Status" value={row.dispositionStatus} />
+          </Section>
+        </div>
+
+        <Section title="Custody and verification" tone="teal">
+          <FieldGrid columns="sm:grid-cols-2 xl:grid-cols-4">
+            <FieldTile label="Goods detained at" value={row.whereDeposited} />
+            <FieldTile label="Settlement status" value={row.settlementStatus} />
+            <FieldTile label="Verification status" value={row.verificationStatus} />
+            <FieldTile label="Memo QR number" value={row.memoQrCodeNumber || qrNumber} />
+          </FieldGrid>
+        </Section>
+
+        <Section title="Record history" tone="amber">
+          <FieldGrid>
+            <FieldTile label="Created by" value={row.createdBy} />
+            <FieldTile label="Created on" value={row.createdAt} />
+            <FieldTile label="Updated by" value={row.updatedBy} />
+            <FieldTile label="Updated on" value={row.updatedAt ?? row.createdAt} />
+          </FieldGrid>
+          {(row.auditLog?.length ?? 0) > 0 ? (
+            <ol className="mt-4 space-y-3 border-t border-[#E8F0FA] pt-4">
+              {row.auditLog!.map((entry) => (
+                <li key={entry.id} className="grid grid-cols-[10px_minmax(0,1fr)] gap-3">
+                  <span className="mt-1.5 h-2.5 w-2.5 rounded-full bg-[#0875E1]" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-[#102C55]">
+                      {entry.actionLabel || entry.action}
+                      {entry.performedBy ? ` · ${entry.performedBy}` : ""}
+                    </p>
+                    {entry.message ? (
+                      <p className="mt-0.5 whitespace-pre-wrap break-words text-xs text-[#607DA5]">{entry.message}</p>
+                    ) : null}
+                    <p className="mt-0.5 text-[11px] text-[#90A7C4]">
+                      {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "—"}
+                    </p>
                   </div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent className="pt-5">
-                  <h4 className="text-sm font-semibold mb-3 flex items-center gap-2"><QrCode className="h-4 w-4" /> Memo QR</h4>
-                  <div className="flex justify-center">
-                    <img
-                      src={getQrCodeUrl(qrPayload, typeof window !== 'undefined' && window.innerWidth < 640 ? 150 : 180)}
-                      alt="Memo QR code"
-                      className="border rounded-lg p-2 bg-white max-w-full h-auto"
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-3 break-all">{qrNumber}</p>
-                  <Button variant="outline" size="sm" className="w-full mt-3" asChild>
-                    <Link to={`${listPath}/${encodeURIComponent(row.id)}?print=qr`}>
-                      Print QR
-                    </Link>
-                  </Button>
-                </CardContent>
-              </Card>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-3 text-sm text-[#607DA5]">No audit events recorded yet.</p>
+          )}
+        </Section>
+
+        <div className="grid items-start gap-4 xl:grid-cols-2">
+          <Section icon={<Users className="h-4 w-4" />} title="Owner" tone="blue">
+            <div className="flex items-start gap-4">
+              {row.owner?.picture ? (
+                <img
+                  src={row.owner.picture}
+                  alt="Owner"
+                  className="h-20 w-20 shrink-0 rounded-lg border border-[#E4EEF8] bg-[#F7FAFE] object-cover"
+                />
+              ) : null}
+              <div className="min-w-0 flex-1">
+                <FieldGrid>
+                  <FieldTile label="Name" value={row.owner?.name} />
+                  <FieldTile label="CNIC" value={row.owner?.cnic} />
+                  <FieldTile label="Contact" value={row.owner?.contact} />
+                </FieldGrid>
+              </div>
             </div>
+          </Section>
+          <Section icon={<Users className="h-4 w-4" />} title="Driver" tone="violet">
+            <div className="flex items-start gap-4">
+              {row.driver?.picture ? (
+                <img
+                  src={row.driver.picture}
+                  alt="Driver"
+                  className="h-20 w-20 shrink-0 rounded-lg border border-[#E4EEF8] bg-[#F7FAFE] object-cover"
+                />
+              ) : null}
+              <div className="min-w-0 flex-1">
+                <FieldGrid>
+                  <FieldTile label="Name" value={row.driver?.name} />
+                  <FieldTile label="CNIC" value={row.driver?.cnic} />
+                  <FieldTile label="Contact" value={row.driver?.contact} />
+                </FieldGrid>
+              </div>
+            </div>
+          </Section>
+        </div>
 
-            <Card>
-              <CardHeader><CardTitle className="text-base">Memo Details</CardTitle></CardHeader>
-              <CardContent className="grid grid-cols-1 gap-x-5 md:grid-cols-2">
-                <DetailRow label="Goods detained at" value={row.whereDeposited} />
-                <DetailRow label="Settlement Status" value={row.settlementStatus} />
-                <DetailRow label="Verification Status" value={row.verificationStatus} />
-                <DetailRow label="Memo QR Number" value={row.memoQrCodeNumber || qrNumber} />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Audit Log</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 gap-x-5 md:grid-cols-2">
-                  <DetailRow label="Created By" value={row.createdBy || "—"} />
-                  <DetailRow label="Created On" value={row.createdAt} />
-                  <DetailRow label="Updated By" value={row.updatedBy || "—"} />
-                  <DetailRow label="Updated On" value={row.updatedAt ?? row.createdAt} />
-                </div>
-                {(row.auditLog?.length ?? 0) > 0 ? (
-                  <ol className="relative border-l border-muted-foreground/30 ml-2 space-y-4">
-                    {row.auditLog!.map((entry) => (
-                      <li key={entry.id} className="ml-4">
-                        <span className="absolute -left-1.5 mt-1.5 h-3 w-3 rounded-full border bg-primary border-primary" />
-                        <p className="text-sm font-medium">
-                          {entry.actionLabel || entry.action}
-                          {entry.performedBy ? ` · ${entry.performedBy}` : ""}
-                        </p>
-                        {entry.message ? (
-                          <p className="text-xs text-muted-foreground whitespace-pre-wrap">{entry.message}</p>
-                        ) : null}
-                        <p className="text-xs text-muted-foreground">
-                          {entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "—"}
-                        </p>
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No audit events recorded yet.</p>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Users className="h-4 w-4" />
-                  Owner
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid grid-cols-1 gap-x-5 md:grid-cols-2">
-                  <DetailRow label="Name" value={row.owner?.name} />
-                  <DetailRow label="CNIC" value={row.owner?.cnic} />
-                  <DetailRow label="Contact" value={row.owner?.contact} />
-                </div>
-                {row.owner?.picture && (
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">Photo</p>
-                    <img
-                      src={row.owner.picture}
-                      alt="Owner"
-                      className="max-h-48 rounded-lg border object-contain bg-muted/30 w-full sm:w-auto"
-                    />
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Users className="h-4 w-4" />
-                  Driver
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid grid-cols-1 gap-x-5 md:grid-cols-2">
-                  <DetailRow label="Name" value={row.driver?.name} />
-                  <DetailRow label="CNIC" value={row.driver?.cnic} />
-                  <DetailRow label="Contact" value={row.driver?.contact} />
-                </div>
-                {row.driver?.picture && (
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">Photo</p>
-                    <img
-                      src={row.driver.picture}
-                      alt="Driver"
-                      className="max-h-48 rounded-lg border object-contain bg-muted/30 w-full sm:w-auto"
-                    />
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader><CardTitle className="text-base">Purpose of Detention</CardTitle></CardHeader>
-              <CardContent className="rounded-lg border p-4">
-                <p className="text-sm whitespace-pre-wrap break-words">{row.purposeOfDetention || "—"}</p>
-              </CardContent>
-            </Card>
+        <Section title="Purpose of detention" tone="amber">
+          <NoteBlock tone="amber">{row.purposeOfDetention || "—"}</NoteBlock>
+        </Section>
 
             {row.mediaAttachments && row.mediaAttachments.length > 0 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base flex items-center gap-2">
-                    <Paperclip className="h-4 w-4" />
-                    Attached documents & videos
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
+              <Section icon={<Paperclip className="h-4 w-4" />} title="Attached documents and videos" tone="rose">
+                <div className="space-y-4">
                   {row.mediaAttachments.map((att) =>
                     att.kind === "video" ? (
                       <div key={att.id} className="space-y-1">
@@ -839,16 +992,13 @@ export default function DetentionMemoDetailPage() {
                       </div>
                     )
                   )}
-                </CardContent>
-              </Card>
+                </div>
+              </Section>
             )}
 
-            <Card>
-              <CardHeader><CardTitle className="text-base">Memo Description</CardTitle></CardHeader>
-              <CardContent className="rounded-lg border p-4">
-                <p className="text-sm whitespace-pre-wrap break-words">{row.briefFacts || "—"}</p>
-              </CardContent>
-            </Card>
+            <Section title="Memo description" tone="blue">
+              <NoteBlock>{row.briefFacts || "—"}</NoteBlock>
+            </Section>
 
             {row.goodsItems && row.goodsItems.length > 0 && (
               <GoodsInformationBlock
@@ -869,36 +1019,21 @@ export default function DetentionMemoDetailPage() {
 
             <ViewLocatedCameraDialog target={viewCamera} onClose={() => setViewCamera(null)} />
 
-            <Card>
-              <CardHeader><CardTitle className="text-base">Additional Information</CardTitle></CardHeader>
-              <CardContent className="rounded-lg border p-4 space-y-4">
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Seizing Officer Notes</p>
-                  <p className="text-sm whitespace-pre-wrap break-words">{row.seizingOfficerNotes || "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Examining Officer Notes</p>
-                  <p className="text-sm whitespace-pre-wrap break-words">{row.examiningOfficerNotes || "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Detention / Customs Clarification Notes</p>
-                  <p className="text-sm whitespace-pre-wrap break-words">{row.detentionNotes || "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Forwarding Officer Remarks</p>
-                  <p className="text-sm whitespace-pre-wrap break-words">{row.forwardingOfficerRemarks || "—"}</p>
-                </div>
-              </CardContent>
-            </Card>
+            <Section title="Officer notes" tone="teal">
+              <FieldGrid>
+                <FieldTile label="Seizing officer notes" value={row.seizingOfficerNotes} />
+                <FieldTile label="Examining officer notes" value={row.examiningOfficerNotes} />
+                <FieldTile label="Detention / customs clarification" value={row.detentionNotes} />
+                <FieldTile label="Forwarding officer remarks" value={row.forwardingOfficerRemarks} />
+              </FieldGrid>
+            </Section>
 
             <Button asChild variant="outline" className="w-full sm:w-auto">
               <Link to={listPath}>
-                <ArrowLeft className="h-4 w-4 mr-2" />
+                <ArrowLeft className="mr-2 h-4 w-4" />
                 Back to list
               </Link>
             </Button>
-          </CardContent>
-        </Card>
       </div>
     </ModulePageLayout>
   )

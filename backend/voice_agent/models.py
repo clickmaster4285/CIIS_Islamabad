@@ -1,4 +1,4 @@
-"""TekEye voice agent — conversation sessions, tool audit trail, incidents."""
+"""CIIS voice agent — conversation sessions, tool audit trail, incidents."""
 
 import uuid
 
@@ -153,7 +153,7 @@ class Incident(models.Model):
 
 
 class AgentReport(models.Model):
-    """A report the agent compiled from TekEye records; downloadable as PDF / Excel."""
+    """A report the agent compiled from CIIS records; downloadable as PDF / Excel."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     session = models.ForeignKey(

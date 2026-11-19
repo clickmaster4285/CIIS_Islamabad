@@ -194,7 +194,8 @@ class MLVideoAnalyzeAPIView(APIView):
         vehicle = _form_bool(request, "vehicle", True)
         weapon = _form_bool(request, "weapon", True)
         fire = _form_bool(request, "fire", True)
-        if not any([person, vehicle, weapon, fire]):
+        plate = _form_bool(request, "plate", False)
+        if not any([person, vehicle, weapon, fire, plate]):
             return Response({"detail": "Select at least one detection type."}, status=400)
 
         from .video_analyze_jobs import start_job
@@ -207,6 +208,7 @@ class MLVideoAnalyzeAPIView(APIView):
                 "weapon": weapon,
                 "fire": fire,
                 "match_staff": _form_bool(request, "match_staff", True),
+                "plate": plate,
                 "sample_fps": min(4.0, max(0.5, _form_float(request, "sample_fps", 1.0))),
             },
         )

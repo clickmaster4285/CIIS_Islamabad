@@ -1,5 +1,5 @@
 /**
- * TekEye voice agent ("Hello Customs") — backend API client.
+ * CIIS voice agent ("Hello Customs") — backend API client.
  */
 import { API_BASE_URL, getAuthHeaders, getAuthHeadersFormData } from "@/lib/api"
 

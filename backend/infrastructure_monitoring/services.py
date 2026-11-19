@@ -1,4 +1,4 @@
-"""Sync TekEye cameras/NVRs into Infrastructure Monitoring + evaluate alerts."""
+"""Sync CIIS cameras/NVRs into Infrastructure Monitoring + evaluate alerts."""
 
 from __future__ import annotations
 

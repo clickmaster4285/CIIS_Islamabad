@@ -214,7 +214,7 @@ export function GpsPdfReport({
                       fontWeight: 700,
                     }}
                   >
-                    Customs · TekEye
+                    Customs · CIIS
                   </p>
                   <h1
                     style={{

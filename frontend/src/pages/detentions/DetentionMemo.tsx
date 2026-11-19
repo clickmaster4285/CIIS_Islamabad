@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { SourceLocationSelect } from "@/components/sync/source-location-select"
 import { ALL_SOURCE_LOCATIONS, useSourceLocations } from "@/lib/source-location"
 import { Link, useLocation, useNavigate } from "react-router-dom"
-import { AlertTriangle, BookOpen, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Eye, Package, Plus, Printer, Search, Edit2, Trash2 } from "lucide-react"
+import { AlertTriangle, BookOpen, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Eye, MoreHorizontal, Package, Plus, Printer, Search, Edit2, Trash2 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { TableActionGroup, TableActionIcon } from "@/components/seizure/table-action-icon"
 import { Card, CardContent } from "@/components/ui/card"
@@ -46,6 +46,7 @@ import { useBatchPdfExport } from "@/hooks/use-batch-pdf-export"
 import { PdfExportHost } from "@/components/seizure/pdf-export-host"
 import { canUserFullyEditSeizureDocs } from "@/lib/seizure-management-api"
 import { getStoredUser } from "@/lib/auth"
+import { cn } from "@/lib/utils"
 const PAGE_SIZE_OPTIONS = [10, 20, 25, 50, 100]
 const DEFAULT_PAGE_SIZE = 20
 const DETENTION_ALERT_DAYS = 60
@@ -84,6 +85,88 @@ function printQr(id: string, pathname?: string) {
   window.location.assign(reportUrl)
 }
 
+type MemoListFilter = "all" | "verified" | "pending" | "alert"
+
+const LIST_FILTERS: { id: MemoListFilter; label: string; valueClass: string; activeClass: string }[] = [
+  { id: "all", label: "Total Memos", valueClass: "text-foreground", activeClass: "border-[#0875E1] bg-[#F4F8FD] ring-1 ring-[#0875E1]" },
+  { id: "verified", label: "Verified", valueClass: "text-emerald-700", activeClass: "border-emerald-300 bg-emerald-50 ring-1 ring-emerald-200" },
+  { id: "pending", label: "Pending Verify", valueClass: "text-amber-700", activeClass: "border-amber-300 bg-amber-50 ring-1 ring-amber-200" },
+  { id: "alert", label: "Over 60 Days", valueClass: "text-orange-700", activeClass: "border-orange-300 bg-orange-50 ring-1 ring-orange-200" },
+]
+
+function VerificationBadge({ status }: { status?: string }) {
+  if (status === "Verified") {
+    return (
+      <Badge className="shrink-0 rounded-md border-0 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100">
+        Verified
+      </Badge>
+    )
+  }
+  return (
+    <Badge variant="outline" className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+      {status || "Pending"}
+    </Badge>
+  )
+}
+
+function RowActions({
+  row,
+  pathname,
+  deposited,
+  onDeposit,
+  onSeize,
+  onEdit,
+  onDelete,
+}: {
+  row: DetentionMemoRow
+  pathname: string
+  deposited: boolean
+  onDeposit: (row: DetentionMemoRow) => void
+  onSeize: (row: DetentionMemoRow) => void
+  onEdit: (row: DetentionMemoRow) => void
+  onDelete: (row: DetentionMemoRow) => void
+}) {
+  return (
+    <TableActionGroup className="w-max max-w-none flex-nowrap gap-0">
+      <TableActionIcon label="View" to={getDetentionMemoDetailPath(row.id, pathname)}>
+        <Eye className="h-4 w-4" />
+      </TableActionIcon>
+      <TableActionIcon label="Edit" onClick={() => onEdit(row)}>
+        <Edit2 className="h-4 w-4" />
+      </TableActionIcon>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8" title="More actions" aria-label="More actions">
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuItem onClick={() => printQr(row.id, pathname)}>
+            <Printer className="h-4 w-4" />
+            Print QR code
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => printMemo(row.id, pathname)}>
+            <Printer className="h-4 w-4" />
+            Print full report
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={deposited} onClick={() => onDeposit(row)}>
+            <BookOpen className="h-4 w-4" />
+            {deposited ? "Already deposited" : "Add to deposit account"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onSeize(row)}>
+            <Package className="h-4 w-4" />
+            Add to seizure register
+          </DropdownMenuItem>
+          <DropdownMenuItem variant="destructive" onClick={() => onDelete(row)}>
+            <Trash2 className="h-4 w-4" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </TableActionGroup>
+  )
+}
+
 export default function DetentionMemoPage() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -93,6 +176,7 @@ export default function DetentionMemoPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [caseNumberSearch, setCaseNumberSearch] = useState("")
+  const [listFilter, setListFilter] = useState<MemoListFilter>("all")
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
   const [page, setPage] = useState(1)
   const [memoIdsWithDeposit, setMemoIdsWithDeposit] = useState<Set<string>>(() => new Set())
@@ -140,16 +224,24 @@ export default function DetentionMemoPage() {
   const locations = useSourceLocations()
   const tableColumns = 10 + (locations.enabled ? 1 : 0)
 
+  const locationRows = useMemo(
+    () => rows.filter((r) => locations.matches(r.locationCode, sourceLocation)),
+    [rows, sourceLocation, locations]
+  )
+
   const filteredRows = useMemo(() => {
-    const byLocation = rows.filter((r) => locations.matches(r.locationCode, sourceLocation))
-    if (!caseNumberSearch.trim()) return byLocation
+    let list = locationRows
+    if (listFilter === "verified") list = list.filter((r) => r.verificationStatus === "Verified")
+    else if (listFilter === "pending") list = list.filter((r) => r.verificationStatus !== "Verified")
+    else if (listFilter === "alert") list = list.filter((r) => isDetentionOverTwoMonths(r.dateTimeDetention))
     const q = caseNumberSearch.trim().toLowerCase()
-    return byLocation.filter(
+    if (!q) return list
+    return list.filter(
       (r) =>
         r.caseNo.toLowerCase().includes(q) ||
         (r.referenceNumber ?? "").toLowerCase().includes(q)
     )
-  }, [rows, caseNumberSearch, sourceLocation, locations])
+  }, [locationRows, listFilter, caseNumberSearch])
 
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize))
   const pageRows = useMemo(() => filteredRows.slice((page - 1) * pageSize, page * pageSize), [filteredRows, page, pageSize])
@@ -241,15 +333,15 @@ export default function DetentionMemoPage() {
   }
 
   const stats = useMemo(() => {
-    const verified = rows.filter((r) => r.verificationStatus === "Verified").length
-    const alerts = rows.filter((r) => isDetentionOverTwoMonths(r.dateTimeDetention)).length
+    const verified = locationRows.filter((r) => r.verificationStatus === "Verified").length
+    const alerts = locationRows.filter((r) => isDetentionOverTwoMonths(r.dateTimeDetention)).length
     return {
-      total: rows.length,
+      all: locationRows.length,
       verified,
-      pending: rows.length - verified,
-      alerts,
+      pending: locationRows.length - verified,
+      alert: alerts,
     }
-  }, [rows])
+  }, [locationRows])
 
   const pageSerial = (index: number) => (page - 1) * pageSize + index + 1
 
@@ -285,65 +377,68 @@ export default function DetentionMemoPage() {
         ) : null}
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {[
-            { label: "Total Memos", value: stats.total, tone: "text-foreground" },
-            { label: "Verified", value: stats.verified, tone: "text-emerald-700" },
-            { label: "Pending Verify", value: stats.pending, tone: "text-amber-700" },
-            { label: "Over 60 Days", value: stats.alerts, tone: "text-orange-700" },
-          ].map((stat) => (
-            <div
-              key={stat.label}
-              className="rounded-xl border border-border/80 bg-card px-3 py-3 shadow-sm"
+          {LIST_FILTERS.map((stat) => (
+            <button
+              key={stat.id}
+              type="button"
+              onClick={() => {
+                setListFilter((current) => (current === stat.id ? "all" : stat.id))
+                setPage(1)
+              }}
+              className={cn(
+                "min-w-0 overflow-hidden rounded-xl border px-3 py-3 text-left shadow-sm transition",
+                listFilter === stat.id
+                  ? stat.activeClass
+                  : "border-border/80 bg-card hover:border-slate-300 hover:bg-slate-50"
+              )}
             >
-              <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              <p className="text-[11px] font-medium uppercase leading-snug tracking-wide text-muted-foreground">
                 {stat.label}
               </p>
-              <p className={`mt-1 text-2xl font-semibold tabular-nums tracking-tight ${stat.tone}`}>
-                {loading ? "—" : stat.value}
+              <p className={cn("mt-1 text-2xl font-semibold tabular-nums tracking-tight", stat.valueClass)}>
+                {loading ? "—" : stats[stat.id]}
               </p>
-            </div>
+            </button>
           ))}
         </div>
 
         <Card className="overflow-hidden rounded-xl border-border/80 shadow-sm">
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b bg-slate-50/60 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative w-full sm:w-72">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={caseNumberSearch}
-                    onChange={(e) => {
-                      setCaseNumberSearch(e.target.value)
-                      setPage(1)
-                    }}
-                    placeholder="Search case or memo no…"
-                    className="h-8 bg-white pl-8 text-sm"
-                    onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                  />
-                </div>
-                {locations.enabled && (
-                  <SourceLocationSelect
-                    value={sourceLocation}
-                    onChange={(v) => {
-                      setSourceLocation(v)
-                      setPage(1)
-                    }}
-                    options={locations.options}
-                    className="h-8 w-full bg-white text-sm sm:w-44"
-                  />
-                )}
-                {caseNumberSearch ? (
-                  <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-xs" onClick={handleClear}>
-                    Clear
-                  </Button>
-                ) : null}
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {filteredRows.length} of {rows.length} shown
-                </span>
+            <div className="flex flex-wrap items-center gap-2 border-b bg-slate-50/60 px-4 py-3">
+              <div className="relative min-w-[12rem] flex-1 basis-56">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={caseNumberSearch}
+                  onChange={(e) => {
+                    setCaseNumberSearch(e.target.value)
+                    setPage(1)
+                  }}
+                  placeholder="Search case or memo no…"
+                  className="h-8 bg-white pl-8 text-sm"
+                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                />
               </div>
+              {locations.enabled && (
+                <SourceLocationSelect
+                  value={sourceLocation}
+                  onChange={(v) => {
+                    setSourceLocation(v)
+                    setPage(1)
+                  }}
+                  options={locations.options}
+                  className="h-8 w-full shrink-0 bg-white text-sm sm:w-44"
+                />
+              )}
+              {caseNumberSearch ? (
+                <Button type="button" variant="ghost" size="sm" className="h-8 shrink-0 px-2 text-xs" onClick={handleClear}>
+                  Clear
+                </Button>
+              ) : null}
+              <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                {filteredRows.length} of {locationRows.length} shown
+              </span>
               <Link
-                className="text-xs font-medium text-sky-700 hover:underline"
+                className="ml-auto shrink-0 text-xs font-medium text-sky-700 hover:underline"
                 to={ROUTES.DEPOSIT_ACCOUNT_REGISTER}
               >
                 Deposit Account Register →
@@ -351,7 +446,7 @@ export default function DetentionMemoPage() {
             </div>
 
             {/* Mobile */}
-            <div className="space-y-2 p-3 md:hidden">
+            <div className="space-y-2 p-3 lg:hidden">
               {loading ? (
                 <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
               ) : pageRows.length === 0 ? (
@@ -363,7 +458,13 @@ export default function DetentionMemoPage() {
                 pageRows.map((row, index) => {
                   const isAlert = isDetentionOverTwoMonths(row.dateTimeDetention)
                   return (
-                    <div key={row.id} className="rounded-xl border bg-card p-3 shadow-sm">
+                    <div
+                      key={row.id}
+                      className={cn(
+                        "rounded-xl border bg-card p-3 shadow-sm",
+                        isAlert && "border-amber-200 bg-amber-50/40"
+                      )}
+                    >
                       <div className="mb-2 flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -374,25 +475,28 @@ export default function DetentionMemoPage() {
                             {row.referenceNumber || "—"}
                           </p>
                         </div>
-                        {row.verificationStatus === "Verified" ? (
-                          <Badge className="rounded-md border-0 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100">
-                            Verified
-                          </Badge>
-                        ) : (
-                          <Badge
-                            variant="outline"
-                            className="rounded-md px-1.5 py-0.5 text-[10px] font-medium text-slate-600"
-                          >
-                            {row.verificationStatus || "Pending"}
-                          </Badge>
-                        )}
+                        <VerificationBadge status={row.verificationStatus} />
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs text-slate-700">
-                        <div>
+                        {locations.enabled && (
+                          <div className="min-w-0">
+                            <p className="text-[10px] text-muted-foreground">Location</p>
+                            <p className="truncate">{locations.labelFor(row.locationCode)}</p>
+                          </div>
+                        )}
+                        <div className="min-w-0">
                           <p className="text-[10px] text-muted-foreground">Date</p>
                           <p className="tabular-nums">{row.dateTimeDetention?.slice(0, 16) || "—"}</p>
                         </div>
-                        <div>
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">Posted</p>
+                          <p className="tabular-nums">{(row.createdAt || "").slice(0, 10) || "—"}</p>
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[10px] text-muted-foreground">Updated</p>
+                          <p className="tabular-nums">{(row.updatedAt ?? row.createdAt ?? "").toString().slice(0, 10) || "—"}</p>
+                        </div>
+                        <div className="min-w-0">
                           <p className="text-[10px] text-muted-foreground">Created by</p>
                           <p className="truncate">{row.createdBy || "—"}</p>
                         </div>
@@ -404,37 +508,16 @@ export default function DetentionMemoPage() {
                           </div>
                         ) : null}
                       </div>
-                      <div className="mt-2 flex flex-wrap justify-end gap-0.5 border-t pt-2">
-                        <TableActionIcon label="View" to={getDetentionMemoDetailPath(row.id, pathname)}>
-                          <Eye className="h-4 w-4" />
-                        </TableActionIcon>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Print" aria-label="Print">
-                              <Printer className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => printQr(row.id, pathname)}>Print QR Code</DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => printMemo(row.id, pathname)}>Print Full Report</DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                        <TableActionIcon
-                          label={memoIdsWithDeposit.has(row.id) ? "Already deposited" : "Add to Deposit Account"}
-                          disabled={memoIdsWithDeposit.has(row.id)}
-                          onClick={() => void handleDeposit(row)}
-                        >
-                          <BookOpen className="h-4 w-4" />
-                        </TableActionIcon>
-                        <TableActionIcon label="Seize" onClick={() => void handleSeize(row)}>
-                          <Package className="h-4 w-4" />
-                        </TableActionIcon>
-                        <TableActionIcon label="Edit" onClick={() => handleEdit(row)}>
-                          <Edit2 className="h-4 w-4" />
-                        </TableActionIcon>
-                        <TableActionIcon label="Delete" destructive onClick={() => handleDeleteClick(row)}>
-                          <Trash2 className="h-4 w-4" />
-                        </TableActionIcon>
+                      <div className="mt-2 flex justify-end border-t pt-2">
+                        <RowActions
+                          row={row}
+                          pathname={pathname}
+                          deposited={memoIdsWithDeposit.has(row.id)}
+                          onDeposit={(item) => void handleDeposit(item)}
+                          onSeize={(item) => void handleSeize(item)}
+                          onEdit={handleEdit}
+                          onDelete={handleDeleteClick}
+                        />
                       </div>
                     </div>
                   )
@@ -442,44 +525,43 @@ export default function DetentionMemoPage() {
               )}
             </div>
 
-            {/* Desktop table */}
-            <div className="hidden w-full max-w-full overflow-x-auto md:block">
-              <Table className="min-w-[920px] table-fixed">
+            <div className="hidden lg:block">
+              <Table containerClassName="max-w-full" className="w-max min-w-full">
                 <TableHeader>
-                  <TableRow className="border-b bg-slate-50/90 hover:bg-slate-50/90">
-                    <TableHead className="w-12 px-1.5 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  <TableRow className="border-b bg-slate-50 hover:bg-slate-50">
+                    <TableHead className="w-14 px-2 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Sr. No
                     </TableHead>
-                    <TableHead className="w-[9rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[9rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Case No
                     </TableHead>
                     {locations.enabled && (
-                      <TableHead className="w-[7rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      <TableHead className="min-w-[7.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                         Location
                       </TableHead>
                     )}
-                    <TableHead className="w-[8rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[8rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Memo No
                     </TableHead>
-                    <TableHead className="w-[8rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[9.5rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Date
                     </TableHead>
-                    <TableHead className="w-[5.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[6rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Status
                     </TableHead>
-                    <TableHead className="w-[7rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[7rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Posted
                     </TableHead>
-                    <TableHead className="w-[7rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[7rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Updated
                     </TableHead>
-                    <TableHead className="w-[4rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[4rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Alert
                     </TableHead>
-                    <TableHead className="w-[6.5rem] px-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="min-w-[7rem] px-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                       Created By
                     </TableHead>
-                    <TableHead className="sticky right-0 z-20 w-[7.5rem] bg-slate-50/95 px-1.5 text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    <TableHead className="sticky right-0 z-20 min-w-[7.5rem] bg-slate-50 px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500 shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.18)]">
                       Actions
                     </TableHead>
                   </TableRow>
@@ -504,15 +586,18 @@ export default function DetentionMemoPage() {
                       return (
                         <TableRow
                           key={row.id}
-                          className="group border-b border-slate-100 transition-colors hover:bg-sky-50/40"
+                          className={cn(
+                            "group border-b border-slate-100 transition-colors hover:bg-sky-50/40",
+                            isAlert && "bg-amber-50/70 hover:bg-amber-50"
+                          )}
                         >
-                          <TableCell className="px-1.5 py-2 text-center text-xs font-medium tabular-nums text-foreground">
+                          <TableCell className="px-2 py-2 text-center text-xs font-medium tabular-nums text-foreground">
                             {pageSerial(index)}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[11rem] overflow-hidden px-2 py-2">
                             <button
                               type="button"
-                              className="max-w-full truncate text-left font-mono text-[12px] font-semibold text-black hover:underline"
+                              className="block max-w-[10rem] truncate text-left font-mono text-[12px] font-semibold text-black hover:underline"
                               title={row.caseNo}
                               onClick={() => navigate(getDetentionMemoDetailPath(row.id, pathname))}
                             >
@@ -520,42 +605,33 @@ export default function DetentionMemoPage() {
                             </button>
                           </TableCell>
                           {locations.enabled && (
-                            <TableCell className="whitespace-nowrap px-1.5 py-2 text-xs">
-                              {locations.labelFor(row.locationCode)}
+                            <TableCell className="max-w-[8rem] overflow-hidden px-2 py-2 text-xs">
+                              <span className="block max-w-[7.5rem] truncate" title={locations.labelFor(row.locationCode)}>
+                                {locations.labelFor(row.locationCode)}
+                              </span>
                             </TableCell>
                           )}
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="max-w-[9rem] overflow-hidden px-2 py-2">
                             <span
-                              className="block max-w-full truncate font-mono text-[11px] text-black"
+                              className="block max-w-[8rem] truncate font-mono text-[11px] text-black"
                               title={row.referenceNumber || ""}
                             >
                               {row.referenceNumber || "—"}
                             </span>
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs tabular-nums text-slate-700">
+                          <TableCell className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-slate-700">
                             {row.dateTimeDetention?.slice(0, 16) || "—"}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
-                            {row.verificationStatus === "Verified" ? (
-                              <Badge className="rounded-md border-0 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 hover:bg-emerald-100">
-                                Verified
-                              </Badge>
-                            ) : (
-                              <Badge
-                                variant="outline"
-                                className="rounded-md px-1.5 py-0.5 text-[10px] font-medium text-slate-600"
-                              >
-                                {row.verificationStatus || "Pending"}
-                              </Badge>
-                            )}
+                          <TableCell className="px-2 py-2">
+                            <VerificationBadge status={row.verificationStatus} />
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs tabular-nums text-slate-600">
+                          <TableCell className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-slate-600">
                             {(row.createdAt || "").slice(0, 10) || "—"}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2 text-xs tabular-nums text-slate-600">
+                          <TableCell className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-slate-600">
                             {(row.updatedAt ?? row.createdAt ?? "").toString().slice(0, 10) || "—"}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
+                          <TableCell className="px-2 py-2">
                             {isAlert ? (
                               <span
                                 className="inline-flex items-center rounded-md border border-amber-200 bg-amber-50 p-1 text-amber-700"
@@ -567,44 +643,26 @@ export default function DetentionMemoPage() {
                               <span className="text-xs text-muted-foreground">—</span>
                             )}
                           </TableCell>
-                          <TableCell className="px-1.5 py-2">
-                            <span className="block max-w-full truncate text-xs" title={row.createdBy || ""}>
+                          <TableCell className="max-w-[8rem] overflow-hidden px-2 py-2">
+                            <span className="block max-w-[7rem] truncate text-xs" title={row.createdBy || ""}>
                               {row.createdBy || "—"}
                             </span>
                           </TableCell>
-                          <TableCell className="sticky right-0 z-10 overflow-visible bg-card px-1 py-1.5 text-right group-hover:bg-sky-50/40">
-                            <TableActionGroup className="w-auto min-w-0 gap-0">
-                              <TableActionIcon label="View" to={getDetentionMemoDetailPath(row.id, pathname)}>
-                                <Eye className="h-4 w-4" />
-                              </TableActionIcon>
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                  <Button variant="ghost" size="icon" className="h-8 w-8" title="Print" aria-label="Print">
-                                    <Printer className="h-4 w-4" />
-                                  </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end">
-                                  <DropdownMenuItem onClick={() => printQr(row.id, pathname)}>Print QR Code</DropdownMenuItem>
-                                  <DropdownMenuItem onClick={() => printMemo(row.id, pathname)}>Print Full Report</DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                              <TableActionIcon
-                                label={memoIdsWithDeposit.has(row.id) ? "Already deposited" : "Add to Deposit Account"}
-                                disabled={memoIdsWithDeposit.has(row.id)}
-                                onClick={() => void handleDeposit(row)}
-                              >
-                                <BookOpen className="h-4 w-4" />
-                              </TableActionIcon>
-                              <TableActionIcon label="Seize" onClick={() => void handleSeize(row)}>
-                                <Package className="h-4 w-4" />
-                              </TableActionIcon>
-                              <TableActionIcon label="Edit" onClick={() => handleEdit(row)}>
-                                <Edit2 className="h-4 w-4" />
-                              </TableActionIcon>
-                              <TableActionIcon label="Delete" destructive onClick={() => handleDeleteClick(row)}>
-                                <Trash2 className="h-4 w-4" />
-                              </TableActionIcon>
-                            </TableActionGroup>
+                          <TableCell
+                            className={cn(
+                              "sticky right-0 z-10 whitespace-nowrap px-1 py-1.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.18)]",
+                              isAlert ? "bg-[#fff8ee] group-hover:bg-amber-50" : "bg-white group-hover:bg-[#f3f8fd]"
+                            )}
+                          >
+                            <RowActions
+                              row={row}
+                              pathname={pathname}
+                              deposited={memoIdsWithDeposit.has(row.id)}
+                              onDeposit={(item) => void handleDeposit(item)}
+                              onSeize={(item) => void handleSeize(item)}
+                              onEdit={handleEdit}
+                              onDelete={handleDeleteClick}
+                            />
                           </TableCell>
                         </TableRow>
                       )
@@ -616,7 +674,7 @@ export default function DetentionMemoPage() {
 
             {filteredRows.length > 0 ? (
               <div className="flex flex-col gap-3 border-t bg-slate-50/40 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-muted-foreground">Rows per page</span>
                   <Select
                     value={pageSize.toString()}

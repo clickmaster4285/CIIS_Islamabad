@@ -121,6 +121,7 @@ def _run_job(folder: Path, params: dict[str, Any]) -> None:
             weapon=bool(params.get("weapon")),
             fire=bool(params.get("fire")),
             match_staff=bool(params.get("match_staff")),
+            plate=bool(params.get("plate")),
             sample_fps=float(params.get("sample_fps") or 1),
         )
         ml_job_id = str(started.get("job_id") or "").strip()

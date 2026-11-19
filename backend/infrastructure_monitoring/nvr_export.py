@@ -600,7 +600,7 @@ NVR_HEADERS = [
     "Cameras Offline",
     "Cameras Video Loss",
     "Cameras Recording",
-    "Registered in TekEye",
+    "Registered in CIIS",
     "HDD Count",
     "Storage Health",
     "Storage Detail",

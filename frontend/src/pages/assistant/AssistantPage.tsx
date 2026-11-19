@@ -65,7 +65,7 @@ const SUGGESTIONS = [
   "Approve note sheet NS-REG-056",
 ]
 
-const THINKING_HINTS = ["Planning", "Searching TekEye records", "Checking results", "Writing the answer"]
+const THINKING_HINTS = ["Planning", "Searching CIIS records", "Checking results", "Writing the answer"]
 
 let seq = 0
 const nextId = () => `m${Date.now()}-${seq++}`
@@ -337,7 +337,7 @@ export default function AssistantPage() {
     return (
       <div className="mx-auto mt-16 max-w-md rounded-xl border border-slate-200 bg-white p-6 text-center">
         <ShieldAlert className="mx-auto mb-2 h-8 w-8 text-slate-400" />
-        <p className="font-medium text-slate-900">TekEye Assistant isn't enabled for your role</p>
+        <p className="font-medium text-slate-900">CIIS Assistant isn't enabled for your role</p>
         <p className="mt-1 text-sm text-slate-500">Ask an administrator if you need access.</p>
       </div>
     )
@@ -375,7 +375,7 @@ export default function AssistantPage() {
           </Button>
           <Bot className="h-5 w-5 text-blue-600" />
           <p className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
-            {sessions.find((s) => s.session_id === activeId)?.title || "TekEye Assistant"}
+            {sessions.find((s) => s.session_id === activeId)?.title || "CIIS Assistant"}
           </p>
           <span className="hidden text-xs text-slate-400 sm:inline">Model: {status.provider}</span>
         </header>
@@ -501,7 +501,7 @@ export default function AssistantPage() {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={onKeyDown}
                 rows={1}
-                placeholder={pending ? "Type yes / no, or ask something else…" : "Message TekEye Assistant…"}
+                placeholder={pending ? "Type yes / no, or ask something else…" : "Message CIIS Assistant…"}
                 className="max-h-[200px] min-h-[24px] flex-1 resize-none bg-transparent py-1 text-sm outline-none placeholder:text-slate-400"
                 disabled={sending}
               />

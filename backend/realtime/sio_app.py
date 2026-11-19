@@ -1,4 +1,4 @@
-"""Socket.IO realtime bus for Tekeye (WSGI/ASGI compatible)."""
+"""Socket.IO realtime bus for CIIS (WSGI/ASGI compatible)."""
 
 from __future__ import annotations
 

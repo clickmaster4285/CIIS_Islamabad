@@ -55,7 +55,7 @@ INCIDENT_WRITE_ROLES = frozenset(
 # Detention / seizure / warehouse case records: the operational officers who handle cases.
 CASE_ROLES = INCIDENT_WRITE_ROLES
 
-# System audit trail (who did what in TekEye).
+# System audit trail (who did what in CIIS).
 AUDIT_ROLES = frozenset({GLOBAL_ADMIN_ROLE, IT_SUPERADMIN_ROLE})
 
 

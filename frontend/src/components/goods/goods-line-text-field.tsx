@@ -17,8 +17,8 @@ export const GOODS_COL_WIDTHS = [
   132, // ID / Chassis
   180, // Item Notes
   88, // Images
-  140, // Camera Zone
-  160, // Located Camera
+  160, // Camera Zone
+  220, // Located Camera
   48, // Delete
 ] as const
 
@@ -45,7 +45,7 @@ export const goodsPlaceholderClass =
   "h-9 w-full min-w-0 max-w-full shadow-none placeholder:text-muted-foreground placeholder:opacity-100"
 
 export const goodsSelectTriggerClass =
-  "h-9 w-full min-w-0 max-w-full shadow-none *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:truncate"
+  "h-9 w-full min-w-0 max-w-full overflow-hidden px-2 text-left text-foreground shadow-none [&_[data-slot=select-value]]:!line-clamp-none [&_[data-slot=select-value]]:block [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:flex-1 [&_[data-slot=select-value]]:truncate [&_[data-slot=select-value]]:text-left [&_[data-slot=select-value]]:text-foreground"
 
 export const goodsHeadClass =
   "h-9 px-2 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground whitespace-nowrap align-bottom overflow-hidden"

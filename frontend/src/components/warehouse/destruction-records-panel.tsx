@@ -72,10 +72,12 @@ export function DestructionRecordsPanel({
   }
 
   return (
-    <Card className="border-orange-200/60 dark:border-orange-900/40">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <Flame className="h-4 w-4 text-orange-600" />
+    <Card className="overflow-hidden border-[#F5D7A8] shadow-sm">
+      <CardHeader className="border-b border-[#F8E4C4] bg-gradient-to-r from-[#FFF3E0] to-white pb-3">
+        <CardTitle className="flex items-center gap-2 text-base text-[#102C55]">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#FFE8C7] text-[#A15C00]">
+            <Flame className="h-4 w-4" />
+          </span>
           {title}
         </CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -103,10 +105,9 @@ export function DestructionRecordsPanel({
         ) : records.length === 0 ? (
           <p className="text-sm text-muted-foreground py-2">No destruction sessions recorded for this case yet.</p>
         ) : (
-          <div className="rounded-md border overflow-x-auto">
-            <Table>
+          <Table containerClassName="max-w-full rounded-md border" className="w-max min-w-full">
               <TableHeader>
-                <TableRow>
+                <TableRow className="bg-[#FFF6E8] hover:bg-[#FFF6E8]">
                   <TableHead>Case</TableHead>
                   <TableHead>Items</TableHead>
                   <TableHead>Outcome</TableHead>
@@ -155,7 +156,6 @@ export function DestructionRecordsPanel({
                 ))}
               </TableBody>
             </Table>
-          </div>
         )}
         {qrCode && records && records.length > 0 && (
           <p className="text-xs text-muted-foreground mt-3">

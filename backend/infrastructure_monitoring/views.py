@@ -270,7 +270,7 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="nvr_command")
     def nvr_command(self, request, pk=None):
         """
-        Execute an NVR control action from TekeEye (reboot, format, sync time, etc.).
+        Execute an NVR control action from CIIS (reboot, format, sync time, etc.).
         Body: { "action": "reboot"|"format_hdd"|"sync_time"|..., "disk_id"?, "channel"? }
         """
         from .models import DeviceType

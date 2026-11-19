@@ -1,7 +1,7 @@
 """
 Write operations for the agent (perform_action).
 
-Each action goes through the same REST endpoint the TekEye UI uses, called in-process as the
+Each action goes through the same REST endpoint the CIIS UI uses, called in-process as the
 officer (force_authenticate), so that endpoint's own validation, numbering, notifications and
 permission checks all still apply. This layer adds what the endpoints don't: the agent capability
 check, location scoping (targets are found only in the officer's scoped datasets), two-phase
@@ -66,11 +66,11 @@ def _error_text(data, status_code: int) -> str:
         text = " | ".join(parts)
     else:
         text = str(data or "")
-    return (text or f"TekEye refused the request (HTTP {status_code}).")[:500]
+    return (text or f"CIIS refused the request (HTTP {status_code}).")[:500]
 
 
 def call_api(user, method: str, path: str, body: dict | None = None) -> dict:
-    """Run a TekEye API view as this officer, exactly as the web app would."""
+    """Run a CIIS API view as this officer, exactly as the web app would."""
     factory = APIRequestFactory()
     if method == "GET":
         request = factory.get(path, HTTP_HOST=_host())

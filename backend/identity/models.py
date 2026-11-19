@@ -1,4 +1,4 @@
-"""Tek Eye Person Identity Engine — one place that decides "who is this?".
+"""CIIS Person Identity Engine — one place that decides "who is this?".
 
 Every face model (InsightFace attendance, SFace journey) reports into these
 tables instead of marking attendance on its own:

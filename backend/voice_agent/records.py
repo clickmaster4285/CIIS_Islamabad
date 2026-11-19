@@ -72,7 +72,7 @@ DATASETS: dict[str, Dataset] = {
     # ---- incident register (created via create_incident)
     "incident_register": Dataset(
         "voice_agent.Incident",
-        "Incidents officers reported in TekEye (INC-n): title, severity, status, location, camera. Not detention cases.",
+        "Incidents officers reported in CIIS (INC-n): title, severity, status, location, camera. Not detention cases.",
         "incidents.view",
         ("id", "title", "description", "severity", "status", "location", "camera__name", "created_by__username",
          "created_at"),
@@ -98,7 +98,7 @@ DATASETS: dict[str, Dataset] = {
     ),
     "system_users": Dataset(
         "users.User",
-        "TekEye login accounts: username, name, role, designation, location, active, last login.",
+        "CIIS login accounts: username, name, role, designation, location, active, last login.",
         "staff.view",
         ("username", "full_name", "role", "designation", "location", "collectorate", "is_active", "last_login"),
         ("username", "full_name", "role", "designation", "employee_id", "email"),
@@ -132,7 +132,7 @@ DATASETS: dict[str, Dataset] = {
     ),
     "user_activity": Dataset(
         "logs.UserActivityLog",
-        "Audit log of user actions in TekEye (who did what, when, from where).",
+        "Audit log of user actions in CIIS (who did what, when, from where).",
         "audit.view",
         ("user__username", "user__full_name", "action", "source", "ip_address", "city", "device", "browser", "time"),
         ("action", "user__username", "user__full_name", "ip_address", "source"),

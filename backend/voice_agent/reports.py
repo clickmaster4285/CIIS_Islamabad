@@ -208,7 +208,7 @@ def render_pdf(report: AgentReport) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=pagesize, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=16 * mm, bottomMargin=14 * mm,
-        title=report.title, author="TekEye",
+        title=report.title, author="CIIS",
     )
     width = pagesize[0] - 28 * mm
     ink, muted, accent = colors.HexColor("#0f172a"), colors.HexColor("#64748b"), colors.HexColor("#1e3a8a")
@@ -226,7 +226,7 @@ def render_pdf(report: AgentReport) -> bytes:
     payload = report_payload(report)
 
     story = [
-        p("PAKISTAN CUSTOMS — TEKEYE", "brand"),
+        p("PAKISTAN CUSTOMS — CIIS", "brand"),
         p(report.title, "title"),
         p(f"Generated {payload['created_at']} by {payload['created_by']} · {len(report.sections)} section(s)", "meta"),
     ]
@@ -272,7 +272,7 @@ def render_pdf(report: AgentReport) -> bytes:
         canvas.saveState()
         canvas.setFont(font, 7)
         canvas.setFillColor(muted)
-        canvas.drawString(14 * mm, 8 * mm, f"{report.title} — TekEye agent report")
+        canvas.drawString(14 * mm, 8 * mm, f"{report.title} — CIIS agent report")
         canvas.drawRightString(pagesize[0] - 14 * mm, 8 * mm, f"Page {_doc.page}")
         canvas.restoreState()
 

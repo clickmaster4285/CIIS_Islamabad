@@ -180,7 +180,7 @@ class DecisionListView(APIView):
 
 
 class DecisionDetailView(APIView):
-    """"Why did TekEye identify this person as Ahmed?" — the full evidence."""
+    """"Why did CIIS identify this person as Ahmed?" — the full evidence."""
 
     permission_classes = [IsAdminOrHR]
 

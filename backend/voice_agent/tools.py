@@ -1,5 +1,5 @@
 """
-TekEye capabilities exposed to the voice agent.
+CIIS capabilities exposed to the voice agent.
 
 The agent never touches the database, NVRs or the ML service directly: each tool is a
 controlled capability with a JSON schema, an access class (read / control / write),
@@ -911,7 +911,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "ui_navigate",
-        "Open a TekEye screen on the officer's display. Detail pages need 'id' (person uuid or vehicle plate_key).",
+        "Open a CIIS screen on the officer's display. Detail pages need 'id' (person uuid or vehicle plate_key).",
         _schema({"page": {"type": "string", "enum": sorted(UI_PAGES)}, "id": {"type": "string"}}, ["page"]),
         "control",
         "ui.control",
@@ -927,7 +927,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "search_records",
-        "Search, count and group any other TekEye records — staff, cases, seizures, goods, warehouse, visitors, "
+        "Search, count and group any other CIIS records — staff, cases, seizures, goods, warehouse, visitors, "
         "camera health, tracked objects, infrastructure, logs. Use it for any question the other tools don't cover. "
         "'text' matches names, numbers, case/FIR/reference numbers, CNIC, descriptions, etc. (English). "
         "Use group_by for 'how many per …' questions; 'total' is the full match count. Datasets:\n"
@@ -951,7 +951,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "perform_action",
-        "PREPARE a change in TekEye: register/approve/deny visitors, file/approve/reject leave, create/update "
+        "PREPARE a change in CIIS: register/approve/deny visitors, file/approve/reject leave, create/update "
         "detention memos and note sheets, submit/approve/reject note sheets, assessments and recovery memos, "
         "acknowledge/resolve alerts, update incidents. Nothing changes until the officer says yes: read the returned "
         "summary back and ask them to confirm. 'target' names the existing record (name, case no, number) — "
@@ -971,7 +971,7 @@ TOOLS: list[Tool] = [
     ),
     Tool(
         "generate_report",
-        "Compile a formal report (PDF + Excel download) from TekEye records. Each section is a search_records-style "
+        "Compile a formal report (PDF + Excel download) from CIIS records. Each section is a search_records-style "
         "query: {heading, dataset, text?, filters?, group_by?, date_from?, date_to?, last_days?, limit? (rows, max 500)}. "
         "Use group_by for breakdowns (they become charts). Optional 'summary' is a short narrative for the top of the "
         "document. The real figures come back so you can summarise them.",

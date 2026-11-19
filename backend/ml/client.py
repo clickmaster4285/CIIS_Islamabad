@@ -742,6 +742,7 @@ def ml_start_video_analyze(
     weapon: bool = True,
     fire: bool = True,
     match_staff: bool = True,
+    plate: bool = False,
     sample_fps: float = 1.0,
 ) -> dict[str, Any]:
     form: dict[str, str] = {
@@ -750,6 +751,7 @@ def ml_start_video_analyze(
         "weapon": str(bool(weapon)).lower(),
         "fire": str(bool(fire)).lower(),
         "match_staff": str(bool(match_staff)).lower(),
+        "plate": str(bool(plate)).lower(),
         "sample_fps": str(sample_fps),
     }
     files: dict[str, Any] = {}

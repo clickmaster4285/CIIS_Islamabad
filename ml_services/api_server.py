@@ -10,6 +10,7 @@ Or:
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -348,7 +349,7 @@ def voice_transcribe(
     language: str = Form(""),
     prompt: str = Form(""),
 ):
-    """On-prem Whisper STT for the TekEye voice agent (short WAV utterances)."""
+    """On-prem Whisper STT for the CIIS voice agent (short WAV utterances)."""
     import speech_to_text
 
     if not speech_to_text.available():
@@ -359,6 +360,7 @@ def voice_transcribe(
     try:
         return speech_to_text.transcribe(data, language=language.strip() or None, prompt=prompt.strip())
     except Exception as exc:
+        logging.getLogger("ml.stt").exception("voice transcribe failed")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
 
 
@@ -643,7 +645,7 @@ def live_mjpeg_attendance(
     )
 
 
-# ---------- Person Journey (Tek Eye) — parallel pipeline, does not alter live inference ----------
+# ---------- Person Journey (CIIS) — parallel pipeline, does not alter live inference ----------
 
 
 class JourneyCameraEntry(BaseModel):
@@ -774,9 +776,10 @@ async def analyze_video(
     weapon: str = Form(default="true"),
     fire: str = Form(default="true"),
     match_staff: str = Form(default="true"),
-    sample_fps: float = 0.5,
+    plate: str = Form(default="false"),
+    sample_fps: float = Form(default=0.5),
 ):
-    """Tag an uploaded video with person / vehicle / weapon / fire detections."""
+    """Tag an uploaded video with person / vehicle / weapon / fire / licence plate detections."""
     from video_analyze_jobs import copy_upload, new_upload_dir, start_analyze_job
 
     allowed_local = os.getenv("ML_ALLOW_LOCAL_VIDEO_PATHS", "true").strip().lower() in {
@@ -809,7 +812,8 @@ async def analyze_video(
     want_vehicle = _form_flag(vehicle)
     want_weapon = _form_flag(weapon)
     want_fire = _form_flag(fire)
-    if not any([want_person, want_vehicle, want_weapon, want_fire]):
+    want_plate = _form_flag(plate)
+    if not any([want_person, want_vehicle, want_weapon, want_fire, want_plate]):
         raise HTTPException(status_code=400, detail="Select at least one detection type.")
 
     job_id = start_analyze_job(
@@ -821,6 +825,7 @@ async def analyze_video(
         match_staff=_form_flag(match_staff),
         sample_fps=max(0.5, min(float(sample_fps or 0.5), 4.0)),
         cleanup_video=cleanup_video,
+        plate=want_plate,
     )
     return {"job_id": job_id, "status": "queued", "progress": 1, "message": "Queued"}
 

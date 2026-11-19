@@ -1,4 +1,4 @@
-"""NVR health probing — channels & logs from the NVR (ISAPI / Dahua), not TekEye cameras."""
+"""NVR health probing — channels & logs from the NVR (ISAPI / Dahua), not CIIS cameras."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from urllib.parse import quote
 from xml.etree.ElementTree import Element
 
 import requests
-from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+from requests.auth import HTTPDigestAuth
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +64,9 @@ def _http_request(
     hdrs = {"Content-Type": "application/xml"} if data else {}
     if headers:
         hdrs.update(headers)
-    auths = []
-    if username:
-        auths.append(HTTPDigestAuth(username, password or ""))
-        auths.append(HTTPBasicAuth(username, password or ""))
-    else:
-        auths.append(None)
+    # Digest only. Never fall back to HTTP Basic: over plain http:// it sends
+    # the device password in clear text to anyone on the network.
+    auths = [HTTPDigestAuth(username, password or "")] if username else [None]
 
     last_err = ""
     for auth in auths:
@@ -92,6 +89,13 @@ def _http_request(
             last_err = str(exc)
             logger.debug("NVR HTTP %s %s failed: %s", method, url, exc)
     return None, last_err
+
+
+def _with_query(path: str, query: str = "") -> str:
+    """Append a query string (e.g. "devIndex=..." for NVR passthrough) to a path."""
+    if not query:
+        return path
+    return f"{path}{'&' if '?' in path else '?'}{query}"
 
 
 def _http_get(ip: str, path: str, **kwargs) -> tuple[int | None, str]:
@@ -401,10 +405,7 @@ def fetch_channel_snapshot_jpeg(
     ]
     url_base = f"http://{ip}:{http_port}"
     for path in paths:
-        for auth in (
-            HTTPDigestAuth(username, password or ""),
-            HTTPBasicAuth(username, password or ""),
-        ):
+        for auth in (HTTPDigestAuth(username, password or ""),):
             try:
                 res = requests.get(
                     f"{url_base}{path}",
@@ -968,7 +969,7 @@ def _normalize_link_oper_status(raw: str) -> str:
 
 
 def fetch_hikvision_network(
-    ip: str, *, username: str, password: str, http_port: int = 80
+    ip: str, *, username: str, password: str, http_port: int = 80, query: str = ""
 ) -> dict[str, Any]:
     """
     Parse NVR NIC status correctly.
@@ -986,7 +987,7 @@ def fetch_hikvision_network(
     out: dict[str, Any] = {}
     code, body = _http_get(
         ip,
-        "/ISAPI/System/Network/interfaces",
+        _with_query("/ISAPI/System/Network/interfaces", query),
         username=username,
         password=password,
         port=http_port,
@@ -1118,7 +1119,7 @@ def fetch_hikvision_network(
             f"/ISAPI/System/Network/interfaces/{iface_id}",
         ):
             sc, sb = _http_get(
-                ip, path, username=username, password=password, port=http_port, timeout=8
+                ip, _with_query(path, query), username=username, password=password, port=http_port, timeout=8
             )
             if sc != 200 or not sb:
                 continue
@@ -1153,7 +1154,7 @@ def fetch_hikvision_network(
         "/ISAPI/System/Network/interfaces/statistics",
     ):
         sc, sb = _http_get(
-            ip, path, username=username, password=password, port=http_port, timeout=8
+            ip, _with_query(path, query), username=username, password=password, port=http_port, timeout=8
         )
         if sc != 200 or not sb:
             continue
@@ -2159,13 +2160,13 @@ def parse_hikvision_device_status_xml(body: str) -> dict[str, Any]:
 
 
 def fetch_hikvision_system_health(
-    ip: str, *, username: str, password: str, http_port: int = 80
+    ip: str, *, username: str, password: str, http_port: int = 80, query: str = ""
 ) -> dict[str, Any]:
     """CPU / RAM / temperature / uptime from NVR status (+ fallback endpoints)."""
     out: dict[str, Any] = {}
     code, body = _http_get(
         ip,
-        "/ISAPI/System/status",
+        _with_query("/ISAPI/System/status", query),
         username=username,
         password=password,
         port=http_port,
@@ -2183,7 +2184,7 @@ def fetch_hikvision_system_health(
             "/ISAPI/System/WorkStatus",
         ):
             sc, sb = _http_get(
-                ip, path, username=username, password=password, port=http_port, timeout=8
+                ip, _with_query(path, query), username=username, password=password, port=http_port, timeout=8
             )
             if sc != 200 or not sb:
                 continue
@@ -2206,7 +2207,7 @@ def fetch_hikvision_system_health(
     if out.get("cpu_percent") is None:
         sc, sb = _http_get(
             ip,
-            "/cgi-bin/magicBox.cgi?action=getCPUUsage",
+            _with_query("/cgi-bin/magicBox.cgi?action=getCPUUsage", query),
             username=username,
             password=password,
             port=http_port,
@@ -2221,7 +2222,7 @@ def fetch_hikvision_system_health(
     if out.get("memory_percent") is None:
         sc, sb = _http_get(
             ip,
-            "/cgi-bin/magicBox.cgi?action=getMemoryInfo",
+            _with_query("/cgi-bin/magicBox.cgi?action=getMemoryInfo", query),
             username=username,
             password=password,
             port=http_port,
@@ -2915,7 +2916,7 @@ def probe_dahua_cgi(
 def enrich_nvr_metrics(device) -> dict[str, Any]:
     """
     Probe the NVR appliance directly for health, camera channels, and logs.
-    Does NOT use TekEye Camera Management camera records for channel status.
+    Does NOT use CIIS Camera Management camera records for channel status.
     """
     from .models import DeviceStatus
 
@@ -3065,7 +3066,7 @@ def build_nvr_detail_payload(device) -> dict[str, Any]:
     """Structured detail payload — channels & logs sourced from the NVR."""
     m = dict(device.last_metrics or {})
     channels = m.get("channels") if isinstance(m.get("channels"), dict) else _summarize_channels([])
-    # Never fall back to TekEye camera sync for this payload
+    # Never fall back to CIIS camera sync for this payload
     if channels.get("source") != "nvr" and not channels.get("items"):
         channels = _summarize_channels([])
         channels["source"] = "nvr"

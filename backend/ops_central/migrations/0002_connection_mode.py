@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='remoteserver',
             name='connection_mode',
-            field=models.CharField(choices=[('ml', 'ML service only'), ('django', 'Full Tekeye (Django + ML)')], default='ml', help_text='ml = cameras from that ML /live/status; django = full remote API', max_length=16),
+            field=models.CharField(choices=[('ml', 'ML service only'), ('django', 'Full CIIS (Django + ML)')], default='ml', help_text='ml = cameras from that ML /live/status; django = full remote API', max_length=16),
         ),
         migrations.AlterField(
             model_name='remoteserver',

@@ -310,7 +310,7 @@ def _resolve_ffmpeg_path() -> str:
 FFMPEG_PATH = _resolve_ffmpeg_path()
 
 # -----------------------------
-# TekEye voice agent ("Hello Customs")
+# CIIS voice agent ("Hello Customs")
 # -----------------------------
 # anthropic (Claude API; needs ANTHROPIC_API_KEY) or ollama (fully on-prem LLM)
 VOICE_AGENT_PROVIDER = os.getenv("VOICE_AGENT_PROVIDER", "anthropic").strip().lower()

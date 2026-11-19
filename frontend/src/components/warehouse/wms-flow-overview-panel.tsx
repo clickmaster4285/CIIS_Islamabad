@@ -136,10 +136,12 @@ export function WmsFlowOverviewPanel({
   const timeline = data?.timeline || []
 
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base flex items-center gap-2">
-          <Warehouse className="h-4 w-4 text-muted-foreground" />
+    <Card className="overflow-hidden border-[#C5DDF7] shadow-sm">
+      <CardHeader className="border-b border-[#D5E7FA] bg-gradient-to-r from-[#E7F2FF] to-white pb-3">
+        <CardTitle className="text-base flex items-center gap-2 text-[#102C55]">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#D7EBFF] text-[#0B5CAD]">
+            <Warehouse className="h-4 w-4" />
+          </span>
           {title}
         </CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -176,21 +178,21 @@ export function WmsFlowOverviewPanel({
           <>
             {summary && (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                <div className="rounded-md border p-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">In custody qty</p>
-                  <p className="text-sm font-semibold">{summary.inInventoryQuantity || "0"}</p>
+                <div className="rounded-lg border border-[#B7E6DC] bg-[#E7F8F4] p-2.5 text-[#0C6B56]">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide">In custody</p>
+                  <p className="text-lg font-semibold">{summary.inInventoryQuantity || "0"}</p>
                 </div>
-                <div className="rounded-md border p-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Released qty</p>
-                  <p className="text-sm font-semibold">{summary.releasedQuantity || "0"}</p>
+                <div className="rounded-lg border border-[#C5DDF7] bg-[#EAF3FF] p-2.5 text-[#0B5CAD]">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide">Released</p>
+                  <p className="text-lg font-semibold">{summary.releasedQuantity || "0"}</p>
                 </div>
-                <div className="rounded-md border p-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Destroyed qty</p>
-                  <p className="text-sm font-semibold">{summary.destructedQuantity || "0"}</p>
+                <div className="rounded-lg border border-[#F6C9D3] bg-[#FFF0F3] p-2.5 text-[#B4234A]">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide">Destroyed</p>
+                  <p className="text-lg font-semibold">{summary.destructedQuantity || "0"}</p>
                 </div>
-                <div className="rounded-md border p-2">
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Total lines</p>
-                  <p className="text-sm font-semibold">{summary.totalGoodsLines}</p>
+                <div className="rounded-lg border border-[#F5D7A8] bg-[#FFF4E4] p-2.5 text-[#9A5B00]">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide">Total lines</p>
+                  <p className="text-lg font-semibold">{summary.totalGoodsLines}</p>
                 </div>
               </div>
             )}
@@ -201,36 +203,44 @@ export function WmsFlowOverviewPanel({
                   <Package className="h-3.5 w-3.5" />
                   Stock lines
                 </p>
-                <div className="rounded-md border overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>QR</TableHead>
-                        <TableHead>Description</TableHead>
-                        <TableHead>Qty</TableHead>
-                        <TableHead>Warehouse</TableHead>
-                        <TableHead>Status</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {stockItems.map((item) => (
-                        <TableRow key={item.id}>
-                          <TableCell className="text-xs font-mono">{item.qrCode || "—"}</TableCell>
-                          <TableCell className="text-xs max-w-[220px] truncate">
+                <Table containerClassName="max-w-full rounded-md border" className="w-max min-w-full">
+                  <TableHeader>
+                    <TableRow className="bg-[#EAF3FF] hover:bg-[#EAF3FF]">
+                      <TableHead className="min-w-[7rem]">QR</TableHead>
+                      <TableHead className="min-w-[12rem]">Description</TableHead>
+                      <TableHead className="min-w-[5rem]">Qty</TableHead>
+                      <TableHead className="min-w-[8rem]">Warehouse</TableHead>
+                      <TableHead className="min-w-[6rem]">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {stockItems.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell className="max-w-[9rem] overflow-hidden text-xs font-mono">
+                          <span className="block max-w-[8rem] truncate" title={item.qrCode || ""}>
+                            {item.qrCode || "—"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="max-w-[16rem] overflow-hidden whitespace-normal text-xs">
+                          <span className="block max-w-[15rem] truncate" title={item.description || ""}>
                             {item.description || "—"}
-                          </TableCell>
-                          <TableCell className="text-xs whitespace-nowrap">
-                            {item.quantity} {item.unit}
-                          </TableCell>
-                          <TableCell className="text-xs">{item.godownWarehouse || "—"}</TableCell>
-                          <TableCell className="text-xs">
-                            <Badge variant="outline">{item.status || "—"}</Badge>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                          </span>
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {item.quantity} {item.unit}
+                        </TableCell>
+                        <TableCell className="max-w-[12rem] overflow-hidden whitespace-normal text-xs">
+                          <span className="block max-w-[11rem] truncate" title={item.godownWarehouse || ""}>
+                            {item.godownWarehouse || "—"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          <Badge variant="outline">{item.status || "—"}</Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             )}
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Flame, Loader2, Shield, User, Car, Video } from "lucide-react"
+import { Flame, Loader2, Shield, User, Car, Video, RectangleHorizontal } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -10,7 +10,12 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Progress } from "@/components/ui/progress"
 import { toast } from "@/hooks/use-toast"
 import { resolveMediaUrl } from "@/lib/cameras-api"
-import { analyzeVideoFile, type VideoAnalyzeHit, type VideoAnalyzeResult } from "@/lib/ml-api"
+import {
+  analyzeVideoFile,
+  type VideoAnalyzeHit,
+  type VideoAnalyzePlate,
+  type VideoAnalyzeResult,
+} from "@/lib/ml-api"
 import { ROUTES } from "@/routes/config"
 
 function formatTime(seconds: number): string {
@@ -26,6 +31,7 @@ function kindBadge(kind: string) {
   if (kind === "vehicle") return "Vehicle"
   if (kind === "weapon") return "Weapon"
   if (kind === "fire") return "Fire"
+  if (kind === "plate") return "Plate"
   return kind
 }
 
@@ -35,6 +41,7 @@ export default function VideoAiTestPage() {
   const [vehicle, setVehicle] = useState(true)
   const [weapon, setWeapon] = useState(true)
   const [fire, setFire] = useState(true)
+  const [plate, setPlate] = useState(true)
   const [matchStaff, setMatchStaff] = useState(true)
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -61,10 +68,10 @@ export default function VideoAiTestPage() {
       })
       return
     }
-    if (!person && !vehicle && !weapon && !fire) {
+    if (!person && !vehicle && !weapon && !fire && !plate) {
       toast({
         title: "Select detections",
-        description: "Turn on at least one of Person, Vehicle, Weapon, or Fire.",
+        description: "Turn on at least one of Person, Vehicle, Weapon, Fire, or License plate.",
         variant: "destructive",
       })
       return
@@ -79,8 +86,10 @@ export default function VideoAiTestPage() {
         vehicle,
         weapon,
         fire,
+        plate,
         matchStaff: person && matchStaff,
-        sampleFps: 0.5,
+        // A passing car can be gone in under 2 s — sample more often when reading plates.
+        sampleFps: plate ? 1 : 0.5,
         onProgress: (job) => {
           setProgress(Math.max(0, Math.min(100, job.progress || 0)))
           if (job.message) setProgressMessage(job.message)
@@ -109,11 +118,12 @@ export default function VideoAiTestPage() {
   const outputSrc = result?.output_url ? resolveMediaUrl(result.output_url) : ""
   const downloadName = result?.output_name || outputSrc.split("/").pop() || "tagged.mp4"
   const hits: VideoAnalyzeHit[] = result?.hits || []
+  const plates: VideoAnalyzePlate[] = result?.plates || []
 
   return (
     <ModulePageLayout
       title="Video AI Test"
-      description="Upload a video, choose what to detect, match attendance staff by face, and download a tagged MP4."
+      description="Upload a video, choose what to detect, match attendance staff by face, read number plates, and download a tagged MP4."
       breadcrumbs={[
         { label: "AI Analytics", href: ROUTES.ANALYTICS_DASHBOARD },
         { label: "Video AI Test" },
@@ -174,6 +184,11 @@ export default function VideoAiTestPage() {
                 <Checkbox checked={fire} onCheckedChange={(v) => setFire(v === true)} />
                 <Flame className="h-4 w-4" />
                 Fire & smoke
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox checked={plate} onCheckedChange={(v) => setPlate(v === true)} />
+                <RectangleHorizontal className="h-4 w-4" />
+                License plate (read number)
               </label>
             </div>
             <Button className="w-full" onClick={() => void runAnalyze()} disabled={running}>
@@ -254,6 +269,57 @@ export default function VideoAiTestPage() {
                   </CardContent>
                 </Card>
               ) : null}
+              {result.plate_requested ? (
+                <Card>
+                  <CardHeader className="pb-2">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <RectangleHorizontal className="h-4 w-4" />
+                      Number plates ({plates.length})
+                    </CardTitle>
+                    <CardDescription>
+                      Each plate is listed once with its best reading. Only plates found on a vehicle are kept.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {result.plate_engine_available === false ? (
+                      <p className="text-sm text-destructive">
+                        The plate reader is not loaded on the AI server (plate model or PaddleOCR missing), so
+                        plates were not checked.
+                      </p>
+                    ) : plates.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No readable number plates found in this video.</p>
+                    ) : (
+                      <div className="max-h-[420px] space-y-2 overflow-y-auto">
+                        {plates.map((row, index) => (
+                          <div
+                            key={`${row.plate_number}-${index}`}
+                            className="flex flex-wrap items-center gap-3 rounded-md border px-3 py-2 text-sm"
+                          >
+                            {row.image ? (
+                              <img
+                                src={row.image}
+                                alt={`Plate ${row.plate_number}`}
+                                className="h-10 rounded border bg-black object-contain"
+                              />
+                            ) : null}
+                            <span className="font-mono text-base font-semibold tracking-wider">
+                              {row.plate_number}
+                            </span>
+                            <span className="font-mono text-xs text-muted-foreground">
+                              {formatTime(row.first_t)}
+                              {row.last_t > row.first_t ? ` – ${formatTime(row.last_t)}` : ""}
+                            </span>
+                            <span className="ml-auto text-xs text-muted-foreground">
+                              {row.reads} read{row.reads === 1 ? "" : "s"} ·{" "}
+                              {Math.round((row.ocr_confidence || 0) * 100)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ) : null}
               <Card>
                 <CardHeader className="pb-2">
                   <CardTitle className="text-base">Detections</CardTitle>
@@ -284,7 +350,7 @@ export default function VideoAiTestPage() {
           ) : (
             <Card>
               <CardContent className="py-16 text-center text-sm text-muted-foreground">
-                Upload a video, choose Person / Vehicle / Weapon / Fire, then click Run AI.
+                Upload a video, choose Person / Vehicle / Weapon / Fire / License plate, then click Run AI.
               </CardContent>
             </Card>
           )}

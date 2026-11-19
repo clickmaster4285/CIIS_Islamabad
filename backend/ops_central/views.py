@@ -580,6 +580,37 @@ class CityControlGridAPIView(APIView):
         return Response(board)
 
 
+class CityControlSectionAPIView(APIView):
+    """GET /ops/city-control/<city_id>/<section>/?days=1|7|30|90 - one left-menu screen of a city page.
+
+    Read from data the city synced to HQ; seizure/detention lists carry case details only.
+    """
+
+    permission_classes = [IsOpsViewer]
+
+    def get(self, request, city_id: str, section: str):
+        from django.core.cache import cache
+
+        from .city_sections import UnknownCity, build_city_section
+
+        params = request.query_params
+        import hashlib
+
+        raw = ":".join([city_id, section] + [f"{k}={params.get(k, '')}" for k in ("days", "page", "type", "camera", "alerts", "q")])
+        key = "city-section:" + hashlib.sha1(raw.encode()).hexdigest()  # search text may hold spaces
+        data = cache.get(key)
+        if data is not None:
+            return Response(data)
+        try:
+            data = build_city_section(city_id, section, params)
+            cache.set(key, data, 20)  # many viewers, one build every 20s
+            return Response(data)
+        except UnknownCity:
+            return Response({"detail": "City not found."}, status=404)
+        except ValueError:
+            return Response({"detail": "Unknown section."}, status=404)
+
+
 class AnalyticsDashboardAPIView(APIView):
     """GET /ops/analytics/?location=ALL|CODE&from=YYYY-MM-DD&to=YYYY-MM-DD - Analytics Dashboard data."""
 
@@ -1026,7 +1057,7 @@ class QuickConnectView(APIView):
                 }
             )
 
-        # ——— Django mode (full remote Tekeye) ———
+        # ——— Django mode (full remote CIIS) ———
         token = resolve_remote_token(request, ser.validated_data.get("auth_token"))
         if not token:
             return Response(

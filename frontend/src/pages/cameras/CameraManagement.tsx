@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { Link } from "react-router-dom"
 import {
   Building2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Eye,
   HardDrive,
   Layers,
@@ -79,6 +83,8 @@ const emptyNvrForm = (siteId?: number): NvrWritePayload => ({
   stream_path_template: "",
 })
 
+const CAMERA_PAGE_SIZES = [10, 20, 50, 100] as const
+
 const emptyCameraForm = (nvrId?: number): CameraWritePayload => ({
   name: "",
   nvr: nvrId ?? 0,
@@ -103,6 +109,8 @@ export function CameraManagementContent({
 
   const [filterSiteId, setFilterSiteId] = useState<string>("all")
   const [filterNvrId, setFilterNvrId] = useState<string>("all")
+  const [cameraPage, setCameraPage] = useState(1)
+  const [cameraPageSize, setCameraPageSize] = useState(10)
 
   const [siteForm, setSiteForm] = useState<SiteWritePayload>(emptySiteForm())
   const [editingSiteId, setEditingSiteId] = useState<number | null>(null)
@@ -163,6 +171,20 @@ export function CameraManagementContent({
     }
     return rows
   }, [cameras, filterSiteId, filterNvrId, selectedSite])
+
+  const cameraTotalPages = Math.max(1, Math.ceil(filteredCameras.length / cameraPageSize))
+  const cameraPageRows = useMemo(
+    () => filteredCameras.slice((cameraPage - 1) * cameraPageSize, cameraPage * cameraPageSize),
+    [filteredCameras, cameraPage, cameraPageSize]
+  )
+
+  useEffect(() => {
+    setCameraPage(1)
+  }, [filterSiteId, filterNvrId, cameraPageSize])
+
+  useEffect(() => {
+    if (cameraPage > cameraTotalPages) setCameraPage(cameraTotalPages)
+  }, [cameraPage, cameraTotalPages])
 
   const cameraFormSiteCode = useMemo(() => {
     const nvr = nvrs.find((n) => n.id === cameraForm.nvr)
@@ -356,8 +378,8 @@ export function CameraManagementContent({
         </p>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-4">
-        <Card>
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <Card className="min-w-0 gap-0 py-4">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Sites</CardTitle>
           </CardHeader>
@@ -365,7 +387,7 @@ export function CameraManagementContent({
             <p className="text-2xl font-semibold">{sites.length}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="min-w-0 gap-0 py-4">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">NVRs</CardTitle>
           </CardHeader>
@@ -373,7 +395,7 @@ export function CameraManagementContent({
             <p className="text-2xl font-semibold">{nvrs.length}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="min-w-0 gap-0 py-4">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Cameras</CardTitle>
           </CardHeader>
@@ -381,7 +403,7 @@ export function CameraManagementContent({
             <p className="text-2xl font-semibold">{cameras.length}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card className="min-w-0 gap-0 py-4">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Online</CardTitle>
           </CardHeader>
@@ -397,7 +419,7 @@ export function CameraManagementContent({
           <CardDescription>Site → NVR → Camera. Streams are built dynamically on the server.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-4">
-          <div className="space-y-2 min-w-[200px]">
+          <div className="min-w-[12rem] flex-1 basis-56 space-y-2">
             <Label>Site</Label>
             <Select value={filterSiteId} onValueChange={(v) => { setFilterSiteId(v); setFilterNvrId("all") }}>
               <SelectTrigger><SelectValue placeholder="All sites" /></SelectTrigger>
@@ -409,7 +431,7 @@ export function CameraManagementContent({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2 min-w-[200px]">
+          <div className="min-w-[12rem] flex-1 basis-56 space-y-2">
             <Label>NVR</Label>
             <Select value={filterNvrId} onValueChange={setFilterNvrId}>
               <SelectTrigger><SelectValue placeholder="All NVRs" /></SelectTrigger>
@@ -425,15 +447,15 @@ export function CameraManagementContent({
       </Card>
 
       <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="grid w-full max-w-lg grid-cols-3">
+        <TabsList className="grid h-auto w-full max-w-lg grid-cols-3">
           <TabsTrigger value="sites" className="gap-1.5"><Building2 className="h-4 w-4" />Sites</TabsTrigger>
           <TabsTrigger value="nvrs" className="gap-1.5"><HardDrive className="h-4 w-4" />NVRs</TabsTrigger>
           <TabsTrigger value="cameras" className="gap-1.5"><Video className="h-4 w-4" />Cameras</TabsTrigger>
         </TabsList>
 
         <TabsContent value="sites" className="mt-4 space-y-4">
-          <div className="grid gap-6 lg:grid-cols-5">
-            <Card className="lg:col-span-2">
+          <div className="grid items-start gap-6 lg:grid-cols-5">
+            <Card className="min-w-0 lg:col-span-2">
               <CardHeader>
                 <CardTitle className="text-lg">{editingSiteId ? "Edit site" : "Add site"}</CardTitle>
                 <CardDescription>Step 1 — define a physical location (city, branch, facility).</CardDescription>
@@ -476,11 +498,12 @@ export function CameraManagementContent({
                 </form>
               </CardContent>
             </Card>
-            <Card className="lg:col-span-3">
+            <Card className="min-w-0 lg:col-span-3">
               <CardHeader><CardTitle>Sites</CardTitle></CardHeader>
-              <CardContent>
+              <CardContent className="min-w-0">
                 {loading ? <p className="text-muted-foreground text-sm py-8 text-center">Loading…</p> : (
-                  <Table>
+                  <div className="max-w-full overflow-x-auto rounded-lg border">
+                  <Table className="w-max min-w-full" containerClassName="overflow-visible">
                     <TableHeader>
                       <TableRow>
                         <TableHead>Code</TableHead>
@@ -493,11 +516,11 @@ export function CameraManagementContent({
                     <TableBody>
                       {sites.map((s) => (
                         <TableRow key={s.id}>
-                          <TableCell className="font-mono text-xs">{s.code}</TableCell>
-                          <TableCell className="font-medium">{s.name}</TableCell>
+                          <TableCell className="max-w-[8rem] truncate font-mono text-xs" title={s.code}>{s.code}</TableCell>
+                          <TableCell className="max-w-[14rem] truncate font-medium" title={s.name}>{s.name}</TableCell>
                           <TableCell>{s.nvr_count}</TableCell>
                           <TableCell>{s.camera_count}</TableCell>
-                          <TableCell className="text-right">
+                          <TableCell className="whitespace-nowrap text-right">
                             <Button variant="ghost" size="icon" onClick={() => { setEditingSiteId(s.id); setSiteForm({ code: s.code, name: s.name, description: s.description }) }}>
                               <Pencil className="h-4 w-4" />
                             </Button>
@@ -513,6 +536,7 @@ export function CameraManagementContent({
                       ))}
                     </TableBody>
                   </Table>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -520,8 +544,8 @@ export function CameraManagementContent({
         </TabsContent>
 
         <TabsContent value="nvrs" className="mt-4 space-y-4">
-          <div className="grid gap-6 lg:grid-cols-5">
-            <Card className="lg:col-span-2">
+          <div className="grid items-start gap-6 lg:grid-cols-5">
+            <Card className="min-w-0 lg:col-span-2">
               <CardHeader>
                 <CardTitle className="text-lg">{editingNvrId ? "Edit NVR" : "Add NVR"}</CardTitle>
                 <CardDescription>Step 2 — register device credentials (stored securely on server only).</CardDescription>
@@ -590,10 +614,11 @@ export function CameraManagementContent({
                 </form>
               </CardContent>
             </Card>
-            <Card className="lg:col-span-3">
+            <Card className="min-w-0 lg:col-span-3">
               <CardHeader><CardTitle>NVR devices</CardTitle></CardHeader>
-              <CardContent>
-                <Table>
+              <CardContent className="min-w-0">
+                <div className="max-w-full overflow-x-auto rounded-lg border">
+                <Table className="w-max min-w-full" containerClassName="overflow-visible">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Name</TableHead>
@@ -607,12 +632,12 @@ export function CameraManagementContent({
                   <TableBody>
                     {filteredNvrs.map((n) => (
                       <TableRow key={n.id}>
-                        <TableCell className="font-medium">{n.name}</TableCell>
-                        <TableCell>{n.site_name}</TableCell>
-                        <TableCell className="font-mono text-xs">{n.ip_address}:{n.port}</TableCell>
+                        <TableCell className="max-w-[12rem] truncate font-medium" title={n.name}>{n.name}</TableCell>
+                        <TableCell className="max-w-[12rem] truncate" title={n.site_name}>{n.site_name}</TableCell>
+                        <TableCell className="whitespace-nowrap font-mono text-xs">{n.ip_address}:{n.port}</TableCell>
                         <TableCell><Badge variant="secondary">{n.brand_label}</Badge></TableCell>
                         <TableCell>{n.camera_count}</TableCell>
-                        <TableCell className="text-right">
+                        <TableCell className="whitespace-nowrap text-right">
                           <Button variant="ghost" size="icon" onClick={() => {
                             setEditingNvrId(n.id)
                             setNvrForm({
@@ -637,16 +662,17 @@ export function CameraManagementContent({
                         </TableCell>
                       </TableRow>
                     ))}
-                  </TableBody>
+                    </TableBody>
                 </Table>
+                </div>
               </CardContent>
             </Card>
           </div>
         </TabsContent>
 
         <TabsContent value="cameras" className="mt-4 space-y-4">
-          <div className="grid gap-6 lg:grid-cols-5">
-            <Card className="lg:col-span-2">
+          <div className="grid items-start gap-6 lg:grid-cols-5">
+            <Card className="min-w-0 lg:col-span-2">
               <CardHeader>
                 <CardTitle className="text-lg">{editingCameraId ? "Rename camera" : "Add camera channel"}</CardTitle>
                 <CardDescription>Step 3 — map channels and assign meaningful names.</CardDescription>
@@ -792,7 +818,7 @@ export function CameraManagementContent({
               </CardContent>
             </Card>
 
-            <Card className="lg:col-span-3">
+            <Card className="min-w-0 lg:col-span-3">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
                   <Wifi className="h-5 w-5 text-muted-foreground" />
@@ -800,7 +826,7 @@ export function CameraManagementContent({
                 </CardTitle>
                 <CardDescription>RTSP URLs are generated on demand — never stored or exposed.</CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="min-w-0">
                 {loading ? (
                   <p className="text-sm text-muted-foreground py-8 text-center">Loading…</p>
                 ) : filteredCameras.length === 0 ? (
@@ -809,8 +835,9 @@ export function CameraManagementContent({
                     No cameras yet. Add a site and NVR first, then create channels.
                   </div>
                 ) : (
-                  <div className="overflow-x-auto rounded-lg border">
-                    <Table>
+                  <div className="max-w-full overflow-hidden rounded-lg border">
+                    <div className="max-w-full overflow-x-auto">
+                    <Table className="w-max min-w-full" containerClassName="overflow-visible">
                       <TableHeader>
                         <TableRow>
                           <TableHead>Name</TableHead>
@@ -823,10 +850,10 @@ export function CameraManagementContent({
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {filteredCameras.map((cam) => (
+                        {cameraPageRows.map((cam) => (
                           <TableRow key={cam.id}>
-                            <TableCell className="font-medium">{cam.name}</TableCell>
-                            <TableCell className="text-xs text-muted-foreground">{cameraSourceLabel(cam)}</TableCell>
+                            <TableCell className="max-w-[14rem] truncate font-medium" title={cam.name}>{cam.name}</TableCell>
+                            <TableCell className="max-w-[16rem] truncate text-xs text-muted-foreground" title={cameraSourceLabel(cam)}>{cameraSourceLabel(cam)}</TableCell>
                             <TableCell className="font-mono">{cam.channel}</TableCell>
                             <TableCell>{zoneLabel(cam.zone)}</TableCell>
                             <TableCell className="text-xs text-muted-foreground">
@@ -835,7 +862,7 @@ export function CameraManagementContent({
                             <TableCell>
                               <Badge variant={cam.status === "Online" ? "default" : "outline"}>{cam.status}</Badge>
                             </TableCell>
-                            <TableCell className="text-right">
+                            <TableCell className="whitespace-nowrap text-right">
                               <Button variant="ghost" size="sm" className="text-[#3b82f6]" asChild>
                                 <Link to={`${viewBasePath}/${cam.id}`}>
                                   <Eye className="h-4 w-4 mr-1" />
@@ -877,6 +904,47 @@ export function CameraManagementContent({
                         ))}
                       </TableBody>
                     </Table>
+                    </div>
+                    <div className="flex flex-col gap-3 border-t px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-muted-foreground">Rows per page</span>
+                        <Select
+                          value={String(cameraPageSize)}
+                          onValueChange={(value) => setCameraPageSize(Number(value))}
+                        >
+                          <SelectTrigger className="h-8 w-[72px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {CAMERA_PAGE_SIZES.map((size) => (
+                              <SelectItem key={size} value={String(size)}>
+                                {size}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <span className="text-xs tabular-nums text-muted-foreground">
+                          {(cameraPage - 1) * cameraPageSize + 1}–{Math.min(cameraPage * cameraPageSize, filteredCameras.length)} of {filteredCameras.length}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={() => setCameraPage(1)} disabled={cameraPage === 1} aria-label="First page">
+                          <ChevronsLeft className="h-4 w-4" />
+                        </Button>
+                        <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={() => setCameraPage((prev) => Math.max(1, prev - 1))} disabled={cameraPage === 1} aria-label="Previous page">
+                          <ChevronLeft className="h-4 w-4" />
+                        </Button>
+                        <span className="px-2 text-xs tabular-nums text-muted-foreground">
+                          {cameraPage} / {cameraTotalPages}
+                        </span>
+                        <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={() => setCameraPage((prev) => Math.min(cameraTotalPages, prev + 1))} disabled={cameraPage === cameraTotalPages} aria-label="Next page">
+                          <ChevronRight className="h-4 w-4" />
+                        </Button>
+                        <Button variant="outline" size="sm" className="h-8 w-8 p-0" onClick={() => setCameraPage(cameraTotalPages)} disabled={cameraPage === cameraTotalPages} aria-label="Last page">
+                          <ChevronsRight className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </CardContent>

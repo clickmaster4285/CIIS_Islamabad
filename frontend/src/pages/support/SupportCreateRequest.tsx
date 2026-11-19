@@ -38,7 +38,7 @@ type RequestTypeOption = {
   label: string
 }
 
-/** TekEye sidebar modules — for Module Access requests */
+/** CIIS sidebar modules — for Module Access requests */
 const TEKEYE_MODULES = [
   "Visitor Management",
   "Warehouse Management",
@@ -138,7 +138,7 @@ function flagsForType(type: string): FieldFlags {
         showModule: true,
         requireModule: true,
         locationTitle: "Module access",
-        locationSubtitle: "Which TekEye module do you need access to?",
+        locationSubtitle: "Which CIIS module do you need access to?",
       }
     case "ACCESS":
       return {
@@ -599,7 +599,7 @@ export default function SupportCreateRequest() {
   return (
     <ModulePageLayout
       title="Create Support Request"
-      description="Submit any request to TekEye Support — IT, modules, evidence, access, reports, and more."
+      description="Submit any request to CIIS Support — IT, modules, evidence, access, reports, and more."
       breadcrumbs={[
         { label: "Requests & Support", href: ROUTES.SUPPORT_DASHBOARD },
         { label: "Create Request" },
@@ -706,7 +706,7 @@ export default function SupportCreateRequest() {
             >
               {flags.showModule && (
                 <div>
-                  <FieldLabel required={flags.requireModule}>TekEye Module</FieldLabel>
+                  <FieldLabel required={flags.requireModule}>CIIS Module</FieldLabel>
                   <Select value={moduleName} onValueChange={setModuleName}>
                     <SelectTrigger className={fieldClass}>
                       <SelectValue placeholder="Select module" />

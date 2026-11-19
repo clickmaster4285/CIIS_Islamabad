@@ -1,7 +1,8 @@
-"""Offline video AI test: person / vehicle / weapon / fire with staff-name tags."""
+"""Offline video AI test: person / vehicle / weapon / fire / licence plate with staff-name tags."""
 
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -252,6 +253,67 @@ def _hit_kind(det: dict[str, Any]) -> str:
     return "other"
 
 
+def _crop_data_url(crop, height: int = 64) -> str:
+    """Small JPEG thumbnail of a plate crop, inlined so the UI can show what was read."""
+    try:
+        if crop is None or crop.size == 0:
+            return ""
+        h, w = crop.shape[:2]
+        if h > height:
+            scale = height / float(h)
+            crop = cv2.resize(crop, (max(1, int(w * scale)), height), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if not ok:
+            return ""
+        return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def _read_plates(
+    full_frame,
+    small_frame,
+    raw_small_detections: list[dict[str, Any]],
+    engine,
+) -> list[dict[str, Any]]:
+    """Detect + OCR plates on the full-size frame; return boxes scaled to the small frame.
+
+    Nothing is saved to the live licence-plate captures (save=False).
+    """
+    fh, fw = full_frame.shape[:2]
+    sh, sw = small_frame.shape[:2]
+    sx = fw / float(sw or 1)
+    sy = fh / float(sh or 1)
+    vehicle_boxes: list[list[float]] = []
+    for det in raw_small_detections:
+        if not _is_vehicle(det):
+            continue
+        bbox = det.get("bbox") or []
+        if len(bbox) >= 4:
+            vehicle_boxes.append(
+                [float(bbox[0]) * sx, float(bbox[1]) * sy, float(bbox[2]) * sx, float(bbox[3]) * sy]
+            )
+    try:
+        plates = engine.detect_and_read(full_frame, save=False, vehicle_boxes=vehicle_boxes)
+    except Exception as exc:
+        print(f"[video-ai] plate read failed: {exc}", flush=True)
+        return []
+    out: list[dict[str, Any]] = []
+    for det in plates:
+        text = str(det.get("plate_number") or "").strip()
+        bbox = det.get("bbox") or []
+        if not text or len(bbox) < 4:
+            continue
+        x1, y1, x2, y2 = (int(v) for v in bbox[:4])
+        crop = full_frame[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+        work = dict(det)
+        work["label"] = text
+        work["bbox"] = [int(x1 / sx), int(y1 / sy), int(x2 / sx), int(y2 / sy)]
+        work["_crop"] = crop
+        out.append(work)
+    return out
+
+
 def _open_writer(path: str, fps: float, width: int, height: int) -> cv2.VideoWriter | None:
     fps = max(1.0, float(fps) or 1.0)
     for fourcc_name in ("mp4v", "avc1", "XVID"):
@@ -271,11 +333,25 @@ def analyze_video_path(
     weapon: bool = True,
     fire: bool = True,
     match_staff: bool = True,
+    plate: bool = False,
     sample_fps: float = 0.5,
     progress_cb: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
-    if not any([person, vehicle, weapon, fire]):
+    if not any([person, vehicle, weapon, fire, plate]):
         raise ValueError("Select at least one detection type.")
+    plate_engine = None
+    if plate:
+        from plate_recognizer import (
+            canonicalize_plate,
+            get_plate_engine,
+            plate_key,
+            plates_are_same_vehicle,
+        )
+
+        plate_engine = get_plate_engine()
+        if not plate_engine.available:
+            print("[video-ai] plate engine not available — plates skipped", flush=True)
+            plate_engine = None
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError("Could not open the video file.")
@@ -310,6 +386,39 @@ def analyze_video_path(
     writer: cv2.VideoWriter | None = None
     known_staff: set[str] = set()
     counts = {"known": 0, "unknown": 0, "vehicle": 0, "weapon": 0, "fire": 0}
+    # Unique plates: canonical key → best read across the whole video.
+    unique_plates: dict[str, dict[str, Any]] = {}
+
+    def remember_plate(det: dict[str, Any], t: float) -> None:
+        text = str(det.get("plate_number") or det.get("label") or "")
+        key = canonicalize_plate(text) or plate_key(text)
+        if not key:
+            return
+        ocr = float(det.get("ocr_confidence") or 0)
+        slot = None
+        for existing_key, row in unique_plates.items():
+            if plates_are_same_vehicle(key, existing_key, ocr, float(row.get("ocr_confidence") or 0)):
+                slot = existing_key
+                break
+        if slot is None:
+            unique_plates[key] = {
+                "plate_number": text,
+                "first_t": round(t, 2),
+                "last_t": round(t, 2),
+                "reads": 1,
+                "ocr_confidence": round(ocr, 4),
+                "confidence": det.get("confidence"),
+                "image": _crop_data_url(det.get("_crop")),
+            }
+            return
+        row = unique_plates[slot]
+        row["reads"] += 1
+        row["last_t"] = round(t, 2)
+        if ocr > float(row.get("ocr_confidence") or 0):
+            row["plate_number"] = text
+            row["ocr_confidence"] = round(ocr, 4)
+            row["confidence"] = det.get("confidence")
+            row["image"] = _crop_data_url(det.get("_crop")) or row.get("image", "")
 
     def report(pct: int, message: str) -> None:
         if progress_cb:
@@ -334,10 +443,12 @@ def analyze_video_path(
                     raise ValueError("Could not create the tagged video file.")
             report(5 + int(90 * scanned / report_frames), f"Detecting sample {scanned + 1}…")
             do_faces = bool(match_staff and person and (scanned % 2 == 0))
+            # Plates are only kept when they sit on a vehicle, so vehicles are always
+            # detected when plates are on (but only tagged if Vehicle was ticked).
             raw = detect_selected(
                 small,
                 person=person,
-                vehicle=vehicle,
+                vehicle=vehicle or plate_engine is not None,
                 weapon=weapon,
                 fire=fire,
                 match_staff=do_faces,
@@ -369,7 +480,24 @@ def analyze_video_path(
                         "bbox": det.get("bbox") or [],
                     }
                 )
-            tagged = draw_detections(small, boxes) if boxes else small
+            plate_boxes: list[dict[str, Any]] = []
+            if plate_engine is not None:
+                plate_boxes = _read_plates(frame, small, raw, plate_engine)
+                for det in plate_boxes:
+                    remember_plate(det, t)
+                    hits.append(
+                        {
+                            "t": round(t, 2),
+                            "kind": "plate",
+                            "class_name": "license_plate",
+                            "label": str(det.get("plate_number") or ""),
+                            "model": "plate",
+                            "confidence": det.get("ocr_confidence"),
+                            "bbox": det.get("bbox") or [],
+                        }
+                    )
+            drawn = boxes + [{k: v for k, v in d.items() if k != "_crop"} for d in plate_boxes]
+            tagged = draw_detections(small, drawn) if drawn else small
             writer.write(tagged)
             frames_written += 1
             scanned += 1
@@ -399,6 +527,9 @@ def analyze_video_path(
         "vehicles": counts["vehicle"],
         "weapons": counts["weapon"],
         "fires": counts["fire"],
+        "plate_requested": bool(plate),
+        "plate_engine_available": plate_engine is not None,
+        "plates": sorted(unique_plates.values(), key=lambda r: float(r["first_t"]))[:200],
         "hits": hits[:2000],
         "output_name": Path(output_path).name,
     }

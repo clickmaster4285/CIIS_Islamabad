@@ -34,7 +34,9 @@ import {
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { ROUTES, getSeizureMgmtNoteSheetDetailPath } from "@/routes/config"
 import { getStoredUser } from "@/lib/auth"
-import { locationLabel } from "@/lib/locations"
+import { inferLocationCode, locationLabel } from "@/lib/locations"
+import { fetchZones, type SiteZoneRecord } from "@/lib/warehouse-zones-api"
+import { zoneLabel } from "@/lib/warehouse-zones"
 import { fetchCurrentUser, pickUserContact } from "@/lib/users-api"
 import { useCameras } from "@/hooks/use-cameras"
 import type { CameraRecord } from "@/lib/cameras-api"
@@ -121,30 +123,126 @@ function normalizeLocationKey(value: string): string {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, "")
 }
 
-function camerasForOfficeLocation(cameras: CameraRecord[], office: string): CameraRecord[] {
-  const active = cameras.filter((c) => c.is_active)
-  const key = normalizeLocationKey(office)
-  if (!key) return active
-  return active.filter((c) => {
-    const loc = normalizeLocationKey(c.location || c.site_code || "")
-    const site = normalizeLocationKey(c.site_name || "")
-    return loc.includes(key) || key.includes(loc) || site.includes(key) || key.includes(site)
-  })
+function keysOverlap(a: string, b: string): boolean {
+  if (!a || !b) return false
+  if (a === b) return true
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a]
+  if (shorter.length < 3) return false
+  return longer.includes(shorter)
 }
 
-function uniqueCameraZones(cameras: CameraRecord[]): string[] {
-  const zones = new Set<string>()
-  for (const cam of cameras) {
-    const z = (cam.zone || "").trim()
-    if (z) zones.add(z)
+function locationMatchKeys(office: string): string[] {
+  const raw = office.trim()
+  const withoutParen = raw.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim()
+  const keys = new Set<string>()
+  for (const part of [withoutParen, raw]) {
+    const key = normalizeLocationKey(part)
+    if (key) keys.add(key)
   }
-  return Array.from(zones).sort((a, b) => a.localeCompare(b))
+  const code = inferLocationCode(withoutParen, raw)
+  if (code) keys.add(normalizeLocationKey(code))
+  const userLoc = (getStoredUser()?.location || "").trim()
+  if (userLoc) keys.add(normalizeLocationKey(userLoc))
+  return Array.from(keys)
 }
 
-function camerasForZone(cameras: CameraRecord[], zone: string): CameraRecord[] {
+function cameraMatchesLocation(cam: CameraRecord, keys: string[]): boolean {
+  if (!keys.length) return true
+  const loc = normalizeLocationKey(cam.location || cam.site_code || "")
+  const site = normalizeLocationKey(cam.site_name || "")
+  return keys.some((key) => keysOverlap(loc, key) || keysOverlap(site, key))
+}
+
+function zoneLinkTokens(zones: SiteZoneRecord[]): Set<string> {
+  const tokens = new Set<string>()
+  for (const zone of zones) {
+    for (const raw of zone.camera_ids || []) {
+      const token = String(raw).trim().toLowerCase()
+      if (token) tokens.add(token)
+    }
+  }
+  return tokens
+}
+
+function cameraLinkedToZones(cam: CameraRecord, tokens: Set<string>): boolean {
+  if (!tokens.size) return false
+  const id = String(cam.id)
+  const code = (cam.code || "").trim().toLowerCase()
+  const name = (cam.name || "").trim().toLowerCase()
+  return tokens.has(id) || (code && tokens.has(code)) || (name && tokens.has(name))
+}
+
+function camerasForOfficeLocation(
+  cameras: CameraRecord[],
+  office: string,
+  siteZones: SiteZoneRecord[]
+): CameraRecord[] {
+  const active = cameras.filter((c) => c.is_active)
+  const tokens = zoneLinkTokens(siteZones)
+  const useful = (list: CameraRecord[]) =>
+    list.filter((c) => (c.zone || "").trim() || cameraLinkedToZones(c, tokens))
+  const keys = locationMatchKeys(office)
+  const matched = keys.length ? active.filter((c) => cameraMatchesLocation(c, keys)) : active
+  if (useful(matched).length) return matched
+  const zoned = useful(active)
+  if (zoned.length) return zoned
+  return matched.length ? matched : active
+}
+
+type ZoneOption = { value: string; label: string }
+
+function zoneOptionsFor(cameras: CameraRecord[], siteZones: SiteZoneRecord[]): ZoneOption[] {
+  const map = new Map<string, ZoneOption>()
+  for (const zone of siteZones) {
+    if (zone.is_active === false) continue
+    const code = (zone.code || "").trim()
+    if (!code) continue
+    const name = (zone.name || "").trim()
+    const known = zoneLabel(code)
+    const label =
+      name && name.toLowerCase() !== code.toLowerCase()
+        ? `${code} — ${name}`
+        : known !== "—"
+          ? `${code} — ${known}`
+          : code
+    map.set(code.toLowerCase(), { value: code, label })
+  }
+  for (const cam of cameras) {
+    const code = (cam.zone || "").trim()
+    if (!code) continue
+    const key = code.toLowerCase()
+    if (map.has(key)) continue
+    const known = zoneLabel(code)
+    map.set(key, { value: code, label: known !== "—" && known.toLowerCase() !== code.toLowerCase() ? `${code} — ${known}` : code })
+  }
+  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
+}
+
+function camerasForZone(
+  cameras: CameraRecord[],
+  siteZones: SiteZoneRecord[],
+  zone: string
+): CameraRecord[] {
   const z = zone.trim().toLowerCase()
   if (!z) return []
-  return cameras.filter((c) => (c.zone || "").trim().toLowerCase() === z)
+  const linked = new Set<string>()
+  for (const row of siteZones) {
+    const code = (row.code || "").trim().toLowerCase()
+    const name = (row.name || "").trim().toLowerCase()
+    if (code !== z && name !== z) continue
+    for (const raw of row.camera_ids || []) {
+      const token = String(raw).trim().toLowerCase()
+      if (token) linked.add(token)
+    }
+  }
+  return cameras.filter((c) => {
+    const cz = (c.zone || "").trim().toLowerCase()
+    if (cz === z) return true
+    const id = String(c.id)
+    const code = (c.code || "").trim().toLowerCase()
+    const name = (c.name || "").trim().toLowerCase()
+    return linked.has(id) || (code && linked.has(code)) || (name && linked.has(name))
+  })
 }
 
 function cameraOptionLabel(cam: CameraRecord): string {
@@ -215,26 +313,46 @@ export default function NoteSheetCreatePage() {
   const [items, setItems] = useState<NoteSheetItem[]>([])
   const [previewQrData, setPreviewQrData] = useState<string | null>(null)
 
-  const { cameras: allCameras } = useCameras({ activeOnly: true, allocatedOnly: true })
-  const locationCameras = useMemo(
-    () => camerasForOfficeLocation(allCameras, office),
-    [allCameras, office]
-  )
-  const availableZones = useMemo(() => uniqueCameraZones(locationCameras), [locationCameras])
+  const { cameras: allCameras } = useCameras({ activeOnly: true })
+  const [siteZones, setSiteZones] = useState<SiteZoneRecord[]>([])
 
   useEffect(() => {
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.locatedCameraId == null) return item
-        const cam = locationCameras.find((c) => c.id === item.locatedCameraId)
-        if (!cam) return { ...item, locatedCameraId: null, locatedZone: item.locatedZone }
-        const zone = (cam.zone || "").trim()
-        if (item.locatedZone && zone && item.locatedZone !== zone) {
-          return { ...item, locatedCameraId: null }
-        }
-        return item.locatedZone ? item : { ...item, locatedZone: zone }
+    let cancelled = false
+    const code = inferLocationCode(office, getStoredUser()?.location || "")
+    fetchZones(code ? { location: code } : undefined)
+      .then((rows) => {
+        if (!cancelled) setSiteZones(rows)
       })
-    )
+      .catch(() => {
+        if (!cancelled) setSiteZones([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [office])
+
+  const locationCameras = useMemo(
+    () => camerasForOfficeLocation(allCameras, office, siteZones),
+    [allCameras, office, siteZones]
+  )
+  const availableZones = useMemo(
+    () => zoneOptionsFor(locationCameras, siteZones),
+    [locationCameras, siteZones]
+  )
+
+  useEffect(() => {
+    setItems((prev) => {
+      let changed = false
+      const next = prev.map((item) => {
+        if (item.locatedCameraId == null || (item.locatedZone || "").trim()) return item
+        const cam = locationCameras.find((c) => c.id === item.locatedCameraId)
+        const zone = (cam?.zone || "").trim()
+        if (!zone) return item
+        changed = true
+        return { ...item, locatedZone: zone }
+      })
+      return changed ? next : prev
+    })
   }, [locationCameras])
 
   const [placeOfInspection, setPlaceOfInspection] = useState("")
@@ -553,26 +671,38 @@ export default function NoteSheetCreatePage() {
       ]}
     >
       <div className="mb-4">
-        <Button variant="ghost" size="sm" asChild>
+        <Button variant="ghost" size="sm" className="text-[#102C55]" asChild>
           <Link to={isEdit && editId ? getSeizureMgmtNoteSheetDetailPath(editId) : ROUTES.SEIZURE_MGMT_NOTE_SHEET}>
-            <ArrowLeft className="h-4 w-4 mr-2" />
+            <ArrowLeft className="mr-2 h-4 w-4" />
             Back
           </Link>
         </Button>
       </div>
 
-      <div className="space-y-4 w-full max-w-[1600px]">
+      <div className="mb-4 overflow-hidden rounded-xl bg-[#102C55] px-5 py-4 text-white shadow-md">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#D6EBFF]">
+          Seizure management · Note sheet
+        </p>
+        <h2 className="mt-1 text-[22px] font-semibold leading-tight">
+          {isEdit ? "Edit note sheet" : "New note sheet"}
+        </h2>
+        <p className="mt-1 max-w-3xl text-[13px] leading-5 text-[#D6EBFF]">
+          First legal document in the workflow. Record why goods may be detained, then send it for senior officer approval.
+        </p>
+      </div>
+
+      <div className="w-full max-w-[1600px] space-y-4">
         {/* 1. Basic Information */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">1. Basic Information</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">1. Basic Information</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 grid gap-4 md:grid-cols-2">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 grid gap-4 md:grid-cols-2">
                 <div className="grid gap-2">
                   <Label>Note Sheet Number</Label>
                   <Input
@@ -651,15 +781,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 2. Officer Information */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">2. Officer Information</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">2. Officer Information</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 grid gap-4 md:grid-cols-2">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 grid gap-4 md:grid-cols-2">
                 <div className="grid gap-2">
                   <Label htmlFor="ns-prepared-by">Preparing Officer <span className="text-red-600">*</span></Label>
                   <Input
@@ -704,15 +834,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 3. Suspect / Accused */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">3. Suspect / Accused Information</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">3. Suspect / Accused Information</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 grid gap-4 md:grid-cols-2">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 grid gap-4 md:grid-cols-2">
                 <div className="grid gap-2">
                   <Label htmlFor="ns-accused-name">Name (or business) <span className="text-red-600">*</span></Label>
                   <Input
@@ -774,19 +904,18 @@ export default function NoteSheetCreatePage() {
 
         {/* 4. Goods Information */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">4. Goods Information</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">4. Goods Information</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4">
                 <p className="text-sm text-muted-foreground mb-4">
                   List of seized/detained goods. <strong>Each item gets a unique QR code</strong> for scanning.
-                  Pick <strong>Zone</strong> first, then <strong>Located Camera</strong> (filtered by Office / Region).
-                  Only <strong>assigned</strong> cameras are listed.
+                  Pick <strong>Zone</strong> first, then <strong>Located Camera</strong>. Zones are the ones linked to cameras for this office.
                   {office ? ` Office: ${office}.` : " Set Office / Region to filter cameras by location."}
                 </p>
                 <div
@@ -806,7 +935,7 @@ export default function NoteSheetCreatePage() {
                   >
                     <GoodsTableColGroup />
                     <TableHeader>
-                      <TableRow className="border-b bg-muted/40 hover:bg-muted/40">
+                      <TableRow className="border-b bg-[#E7F2FF] hover:bg-[#E7F2FF]">
                         <TableHead className={goodsHeadClass}>QR Code</TableHead>
                         <TableHead className={goodsHeadClass}>
                           Description <span className="normal-case text-red-600">*</span>
@@ -832,16 +961,28 @@ export default function NoteSheetCreatePage() {
                         </TableRow>
                       ) : (
                         items.map((row, index) => {
-                          const zoneCameras = camerasForZone(locationCameras, row.locatedZone || "")
+                          const zoneCameras = camerasForZone(locationCameras, siteZones, row.locatedZone || "")
                           const selectedCam =
                             row.locatedCameraId != null
                               ? zoneCameras.find((c) => c.id === row.locatedCameraId) ||
                                 locationCameras.find((c) => c.id === row.locatedCameraId) ||
                                 null
                               : null
+                          const selectedCameraLabel = selectedCam
+                            ? cameraOptionLabel(selectedCam)
+                            : (row.locatedCamera?.name || row.locatedCamera?.displayLabel || row.locatedCamera?.code || "").trim()
                           const cameraSelectOptions =
-                            selectedCam && !zoneCameras.some((c) => c.id === selectedCam.id)
-                              ? [selectedCam, ...zoneCameras]
+                            row.locatedCameraId != null &&
+                            !zoneCameras.some((c) => c.id === row.locatedCameraId)
+                              ? [
+                                  selectedCam ||
+                                    ({
+                                      id: row.locatedCameraId,
+                                      name: selectedCameraLabel || `Camera ${row.locatedCameraId}`,
+                                      code: row.locatedCamera?.code || "",
+                                    } as CameraRecord),
+                                  ...zoneCameras,
+                                ]
                               : zoneCameras
                           return (
                           <TableRow key={row.clientLineId || index} className={index % 2 === 1 ? "bg-muted/10" : ""}>
@@ -1023,8 +1164,8 @@ export default function NoteSheetCreatePage() {
                                   <SelectContent>
                                     <SelectItem value="__none__">Select zone</SelectItem>
                                     {availableZones.map((zone) => (
-                                      <SelectItem key={zone} value={zone}>
-                                        {zone}
+                                      <SelectItem key={zone.value} value={zone.value}>
+                                        {zone.label}
                                       </SelectItem>
                                     ))}
                                   </SelectContent>
@@ -1055,7 +1196,7 @@ export default function NoteSheetCreatePage() {
                                           ? {
                                               ...item,
                                               locatedCameraId: Number.isFinite(camId) ? camId : null,
-                                              locatedZone: cam?.zone?.trim() || item.locatedZone || "",
+                                              locatedZone: item.locatedZone || cam?.zone?.trim() || "",
                                               locatedCamera: cam
                                                 ? {
                                                     id: cam.id,
@@ -1063,9 +1204,9 @@ export default function NoteSheetCreatePage() {
                                                     name: cam.name,
                                                     zone: cam.zone,
                                                     location: cam.location,
-                                                    displayLabel: cam.name || cam.code,
+                                                    displayLabel: cameraOptionLabel(cam),
                                                   }
-                                                : null,
+                                                : item.locatedCamera,
                                             }
                                           : item
                                       )
@@ -1073,12 +1214,23 @@ export default function NoteSheetCreatePage() {
                                   }}
                                   disabled={!row.locatedZone}
                                 >
-                                  <SelectTrigger className={goodsSelectTriggerClass} title="Located camera">
-                                    <SelectValue
-                                      placeholder={row.locatedZone ? "Select camera" : "Pick zone first"}
+                                  <SelectTrigger
+                                    className={cn(
+                                      goodsSelectTriggerClass,
+                                      "relative [&_[data-slot=select-value]]:!absolute [&_[data-slot=select-value]]:!m-0 [&_[data-slot=select-value]]:!h-px [&_[data-slot=select-value]]:!w-px [&_[data-slot=select-value]]:!overflow-hidden [&_[data-slot=select-value]]:!p-0 [&_[data-slot=select-value]]:!opacity-0"
+                                    )}
+                                    title={selectedCameraLabel || "Located camera"}
+                                  >
+                                    <span
+                                      className={cn(
+                                        "block min-w-0 flex-1 overflow-hidden text-left text-sm whitespace-nowrap text-ellipsis",
+                                        selectedCameraLabel ? "text-[#102C55]" : "text-[#607DA5]"
+                                      )}
                                     >
-                                      {selectedCam ? cameraOptionLabel(selectedCam) : undefined}
-                                    </SelectValue>
+                                      {selectedCameraLabel ||
+                                        (row.locatedZone ? "Select camera" : "Pick zone first")}
+                                    </span>
+                                    <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="__none__">No camera</SelectItem>
@@ -1133,15 +1285,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 5. Location Information */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">5. Location Information</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">5. Location Information</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 grid gap-4 md:grid-cols-2">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 grid gap-4 md:grid-cols-2">
                 <div className="grid gap-2">
                   <Label htmlFor="ns-place">Place of Inspection <span className="text-red-600">*</span></Label>
                   <Input
@@ -1184,15 +1336,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 6. Grounds of Suspicion */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">6. Grounds of Suspicion <span className="text-red-600">*</span></CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">6. Grounds of Suspicion <span className="text-[#FFD0D0]">*</span></CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4">
                 <Textarea
                   id="ns-grounds"
                   rows={8}
@@ -1211,15 +1363,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 7. Evidence Collected */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">7. Evidence Collected</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">7. Evidence Collected</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 grid gap-3 sm:grid-cols-2">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 grid gap-3 sm:grid-cols-2">
                 {EVIDENCE_OPTIONS.map((option) => {
                   const checked = evidenceCollected.includes(option)
                   return (
@@ -1239,15 +1391,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 8. Documents Attached */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">8. Documents Attached</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">8. Documents Attached</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 space-y-4">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 space-y-4">
                 {existingAttachments.length > 0 && (
                   <div className="rounded-md border p-3 space-y-2">
                     <p className="text-sm font-medium">Already uploaded</p>
@@ -1293,15 +1445,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 9. Preliminary Findings */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">9. Preliminary Findings <span className="text-red-600">*</span></CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">9. Preliminary Findings <span className="text-[#FFD0D0]">*</span></CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4">
                 <Textarea
                   id="ns-findings"
                   rows={6}
@@ -1320,15 +1472,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 10. Recommendation */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">10. Recommendation</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">10. Recommendation</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4">
                 <RadioGroup value={recommendation} onValueChange={setRecommendation} className="gap-3">
                   {RECOMMENDATION_OPTIONS.map((option) => (
                     <label key={option} className="flex items-center gap-2 text-sm cursor-pointer">
@@ -1344,15 +1496,15 @@ export default function NoteSheetCreatePage() {
 
         {/* 11. Approval Workflow (preparation) */}
         <Collapsible defaultOpen>
-          <Card className="rounded-[10px] border-gray-200">
+          <Card className="gap-0 overflow-hidden rounded-xl border-[#C5DDF7] py-0 shadow-sm">
             <CollapsibleTrigger asChild>
-              <CardHeader className="cursor-pointer flex flex-row items-center justify-between hover:bg-muted/50 rounded-t-lg">
-                <CardTitle className="text-base">11. Approval Workflow</CardTitle>
-                <ChevronDown className="h-4 w-4 shrink-0" />
+              <CardHeader className="flex cursor-pointer flex-row items-center justify-between border-b border-[#0A2244] bg-[#102C55] px-4 py-3 text-white hover:bg-[#0C2748]">
+                <CardTitle className="text-[13px] font-semibold text-white">11. Approval Workflow</CardTitle>
+                <ChevronDown className="h-4 w-4 shrink-0 text-[#D6EBFF]" />
               </CardHeader>
             </CollapsibleTrigger>
             <CollapsibleContent>
-              <CardContent className="pt-0 space-y-6">
+              <CardContent className="bg-[#F8FBFF] px-4 py-4 space-y-6">
                 <div>
                   <p className="text-sm font-medium mb-3">Prepared By</p>
                   <div className="grid gap-4 md:grid-cols-2">
@@ -1380,7 +1532,7 @@ export default function NoteSheetCreatePage() {
                 </div>
                 <div>
                   <p className="text-sm font-medium mb-3">Forward To</p>
-                  <div className="rounded-md border bg-muted/40 px-3 py-3 space-y-1">
+                  <div className="space-y-1 rounded-lg border border-[#C5DDF7] bg-[#EAF3FF] px-3 py-3">
                     <p className="text-sm font-medium">Approving officials (automatic)</p>
                     <p className="text-sm text-foreground">{NOTE_SHEET_APPROVER_LABEL}</p>
                     <p className="text-xs text-muted-foreground">
@@ -1399,12 +1551,12 @@ export default function NoteSheetCreatePage() {
           </Card>
         </Collapsible>
 
-        <div className="flex flex-wrap gap-2 pb-8">
-          <Button type="button" variant="outline" disabled={saving} onClick={() => void handleSave(false)}>
+        <div className="sticky bottom-3 z-20 flex flex-wrap gap-2 rounded-xl border border-[#C5DDF7] bg-white/95 px-4 py-3 shadow-md backdrop-blur">
+          <Button type="button" variant="outline" className="border-[#C5DDF7] text-[#102C55]" disabled={saving} onClick={() => void handleSave(false)}>
             {saving ? "Saving…" : "Save Draft"}
           </Button>
-          <Button type="button" disabled={saving} onClick={() => void handleSave(true)}>
-            <Send className="h-4 w-4 mr-2" />
+          <Button type="button" className="bg-[#102C55] text-white hover:bg-[#0C2748]" disabled={saving} onClick={() => void handleSave(true)}>
+            <Send className="mr-2 h-4 w-4" />
             {saving ? "Submitting…" : "Send for Approval"}
           </Button>
         </div>

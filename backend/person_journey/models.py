@@ -1,4 +1,4 @@
-"""Tek Eye Person Journey — enterprise cross-camera person tracking."""
+"""CIIS Person Journey — enterprise cross-camera person tracking."""
 
 from __future__ import annotations
 

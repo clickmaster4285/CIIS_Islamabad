@@ -79,6 +79,7 @@ def start_analyze_job(
     match_staff: bool,
     sample_fps: float,
     cleanup_video: bool = True,
+    plate: bool = False,
 ) -> str:
     job_id = uuid.uuid4().hex[:12]
     out_path = Path(video_path).parent / unique_tagged_filename(job_id, video_path)
@@ -107,6 +108,7 @@ def start_analyze_job(
             match_staff,
             sample_fps,
             cleanup_video,
+            plate,
         ),
         daemon=True,
         name=f"video-analyze-{job_id}",
@@ -125,6 +127,7 @@ def _run_job(
     match_staff: bool,
     sample_fps: float,
     cleanup_video: bool,
+    plate: bool = False,
 ) -> None:
     _patch(job_id, status="running", progress=2, message="Waiting for GPU")
     with _RUN_LOCK:
@@ -152,6 +155,7 @@ def _run_job(
                 weapon=weapon,
                 fire=fire,
                 match_staff=match_staff,
+                plate=plate,
                 sample_fps=sample_fps,
                 progress_cb=progress_cb,
             )

@@ -199,7 +199,7 @@ export function parseUsagePct(disks: { usage_pct?: number | null }[]): number | 
 export function managedHint() {
   return (
     <span className="inline-flex items-center rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700">
-      Managed from TekeEye
+      Managed from CIIS
     </span>
   )
 }

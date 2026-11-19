@@ -163,6 +163,13 @@ def heartbeat_extras() -> dict:
     except Exception:  # noqa: BLE001
         logger.exception("Could not count live cameras for HQ")
     try:
+        from ops_central.server_vitals import local_vitals
+
+        # Uptime, disk, ML service, infrastructure devices — HQ's Quick Status.
+        extras["vitals"] = local_vitals()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not collect server vitals for HQ")
+    try:
         cameras, digest = camera_directory()
     except Exception:  # noqa: BLE001
         logger.exception("Could not build camera list for HQ")

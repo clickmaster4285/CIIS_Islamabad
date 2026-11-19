@@ -1,4 +1,9 @@
-"""Per-camera health: NVR channel status + direct ISAPI when the camera has its own IP."""
+"""Per-camera health: NVR channel status + camera ISAPI.
+
+Camera ISAPI pages are read THROUGH the parent NVR (devIndex passthrough) with
+the NVR login. The NVR password is never sent to a camera IP; a camera is only
+contacted directly when it has its own username and password saved.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from .nvr_health import (
     _format_uptime,
     _http_get,
     _safe_float,
+    _with_query,
     _tag,
     _truthy,
     fetch_hikvision_network,
@@ -29,7 +35,7 @@ def _meta(device) -> dict[str, Any]:
 
 def _resolve_nvr_channel_id(raw: Any) -> str:
     """
-    TekEye often stores Hikvision-style ids (101, 2501) while NVR InputProxy uses 1, 25.
+    CIIS often stores Hikvision-style ids (101, 2501) while NVR InputProxy uses 1, 25.
     """
     if raw is None or raw == "":
         return ""
@@ -158,6 +164,7 @@ def _fetch_nvr_channel(
             out["serial_number"] = _find_text(root, "serialNumber")
             out["firmware_version"] = _find_text(root, "firmwareVersion")
             out["proxy_protocol"] = _find_text(root, "proxyProtocol")
+            out["dev_index"] = _find_text(root, "devIndex")
             out["channel_config_ok"] = True
         except ET.ParseError as exc:
             out["channel_config_error"] = str(exc)[:120]
@@ -236,17 +243,22 @@ def _fetch_nvr_channel(
     return out
 
 
-def _probe_camera_direct(
-    cam_ip: str, *, username: str, password: str, http_port: int = 80
+def _probe_camera_isapi(
+    host: str, *, username: str, password: str, http_port: int = 80, query: str = ""
 ) -> dict[str, Any]:
-    """ISAPI health from the camera itself (preferred when NVR exposes camera IP)."""
-    out: dict[str, Any] = {"camera_ip": cam_ip, "http_port": http_port}
-    if not cam_ip or not username:
+    """Camera ISAPI health from ``host``.
+
+    host = camera IP (camera's own login), or the NVR IP with
+    query="devIndex=<id>" so the NVR relays the request to the camera.
+    """
+    out: dict[str, Any] = {}
+    if not host or not username:
         return out
+    cam_ip = host
 
     code, body = _http_get(
         cam_ip,
-        "/ISAPI/System/deviceInfo",
+        _with_query("/ISAPI/System/deviceInfo", query),
         username=username,
         password=password,
         port=http_port,
@@ -267,21 +279,21 @@ def _probe_camera_direct(
             out["device_info_ok"] = False
 
     health = fetch_hikvision_system_health(
-        cam_ip, username=username, password=password, http_port=http_port
+        cam_ip, username=username, password=password, http_port=http_port, query=query
     )
     out.update(health)
     if health.get("system_status_ok"):
         out["management_online"] = True
 
     net = fetch_hikvision_network(
-        cam_ip, username=username, password=password, http_port=http_port
+        cam_ip, username=username, password=password, http_port=http_port, query=query
     )
     out.update(net)
 
     # Main stream FPS / codec on the camera
     sc, sb = _http_get(
         cam_ip,
-        "/ISAPI/Streaming/channels/101",
+        _with_query("/ISAPI/Streaming/channels/101", query),
         username=username,
         password=password,
         port=http_port,
@@ -319,15 +331,19 @@ def enrich_camera_metrics(device) -> dict[str, Any]:
     channel_id = _resolve_nvr_channel_id(meta.get("channel"))
     metrics["nvr_channel_id"] = channel_id
 
-    user = (device.username or "").strip()
-    password = device.password or ""
+    cam_user = (device.username or "").strip()
+    cam_password = device.password or ""
+    # Auto-sync copies the NVR login onto every camera row (services.py), so a
+    # login equal to the parent NVR's is the NVR's — it must not go to the camera.
+    own_creds = bool(cam_user and cam_password) and not (
+        nvr
+        and cam_user == (nvr.username or "").strip()
+        and cam_password == (nvr.password or "")
+    )
+    ch: dict[str, Any] = {}
     if nvr:
         metrics["parent_nvr_id"] = nvr.id
         metrics["parent_nvr_name"] = nvr.name
-        if not user:
-            user = (nvr.username or "").strip()
-        if not password:
-            password = nvr.password or ""
         ch = _fetch_nvr_channel(
             nvr,
             channel_id=channel_id,
@@ -365,10 +381,27 @@ def enrich_camera_metrics(device) -> dict[str, Any]:
         if not nvr or str(device.ip_address) != str(nvr.ip_address):
             cam_ip = str(device.ip_address)
 
-    if cam_ip and user:
-        direct = _probe_camera_direct(
-            cam_ip, username=user, password=password, http_port=80
+    direct: dict[str, Any] | None = None
+    if own_creds and cam_ip:
+        # Camera has its own saved login → ask the camera directly.
+        direct = _probe_camera_isapi(
+            cam_ip, username=cam_user, password=cam_password, http_port=80
         )
+        metrics["camera_probe_via"] = "camera"
+    elif nvr and (ch.get("dev_index") or "").strip():
+        # Use the NVR login, but only against the NVR: it relays to the camera.
+        nvr_ip, nvr_user, nvr_password, nvr_port = _nvr_http_creds(nvr)
+        direct = _probe_camera_isapi(
+            nvr_ip,
+            username=nvr_user,
+            password=nvr_password,
+            http_port=nvr_port,
+            query=f"devIndex={ch['dev_index'].strip()}",
+        )
+        metrics["camera_probe_via"] = "nvr_passthrough"
+
+    if direct is not None:
+        direct["camera_ip"] = cam_ip
         metrics["direct_probe"] = {
             k: direct.get(k)
             for k in (
@@ -386,7 +419,8 @@ def enrich_camera_metrics(device) -> dict[str, Any]:
                 continue
             if v is not None and v != "":
                 metrics[k] = v
-        metrics["camera_ip"] = cam_ip
+        if cam_ip:
+            metrics["camera_ip"] = cam_ip
 
     # SNMP UDP is often closed on these cameras; management plane via ISAPI counts as ONLINE
     if metrics.get("management_online") or metrics.get("channel_online"):
