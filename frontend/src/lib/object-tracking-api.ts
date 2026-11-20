@@ -92,6 +92,11 @@ export type ObjectMovementRecord = {
   distance_px: number
   distance_pct: number
   direction: MovementDirection
+  /** People with pose: net body (hip) move in torso lengths; null when pose was not available */
+  body_shift: number | null
+  /** "sitting" | "standing" | "walking" | "" (unknown) */
+  posture_from: string
+  posture_to: string
 }
 
 export type MotionClipBrief = {
@@ -239,6 +244,8 @@ export async function fetchMotionClips(query: {
   object?: string
   date_from?: string
   date_to?: string
+  time_from?: string
+  time_to?: string
   page?: number
   page_size?: number
 } = {}): Promise<PaginatedResponse<MotionClipRecord>> {
@@ -249,6 +256,8 @@ export async function fetchMotionClips(query: {
     object: query.object,
     date_from: query.date_from,
     date_to: query.date_to,
+    time_from: query.time_from,
+    time_to: query.time_to,
     page: query.page ?? 1,
     page_size: query.page_size ?? 24,
   })

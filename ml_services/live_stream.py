@@ -69,6 +69,7 @@ from inference_engine import (
 )
 from motion_clips import MotionClipRecorder
 from motion_state import MotionRegistry
+from pose_estimator import POSE_CONF, POSE_IMGSZ, attach_poses, get_pose_model, is_person, parse_pose_result
 from object_identity import get_object_identity_registry
 from plate_recognizer import PlateEngine, get_plate_engine
 
@@ -749,6 +750,16 @@ def _overlay_text(det: dict[str, Any]) -> str:
     return (display_id or name).strip()
 
 
+_POSE_DRAW = os.getenv("ML_POSE_DRAW", "true").strip().lower() in ("true", "1", "yes")
+
+
+def _draw_skeleton(output: np.ndarray, kps: list, thickness: int, min_conf: float = 0.3) -> None:
+    draw_skeleton(output, kps, thickness, min_conf)
+
+
+from motion_path_draw import draw_motion_path, draw_skeleton  # noqa: E402
+
+
 def draw_detections(frame: np.ndarray, detections: list[dict[str, Any]], label_scale: float = 0.55) -> np.ndarray:
     if not detections:
         return frame
@@ -777,7 +788,12 @@ def draw_detections(frame: np.ndarray, detections: list[dict[str, Any]], label_s
         else:
             color = (0, 220, 0)
         cv2.rectangle(output, (int(x1), int(y1)), (int(x2), int(y2)), color, box_thickness)
-        label = f"{_overlay_text(det)} {conf:.2f}".strip()
+        if _POSE_DRAW and det.get("keypoints"):
+            _draw_skeleton(output, det["keypoints"], box_thickness)
+        if det.get("motion_path"):
+            draw_motion_path(output, det["motion_path"], max(2, box_thickness + 1))
+        posture_word = str(det.get("posture") or "").strip()
+        label = f"{_overlay_text(det)} {conf:.2f}{' ' + posture_word if posture_word else ''}".strip()
         (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
         text_x = int(x1)
         text_y = max(text_h + 4, int(y1) - 4)
@@ -964,18 +980,20 @@ def filter_osd_detections(
     x_left = frame_w * max(0.0, min(left_frac, 1.0))
     x_right = frame_w * (1.0 - max(0.0, min(right_frac, 1.0)))
     kept: list[dict[str, Any]] = []
+    small_h = frame_h * 0.06  # date / time / camera-name text is short
     for det in detections:
-        x1, y1, x2, y2 = det.get("bbox", [0, 0, 0, 0])
-        cx = (float(x1) + float(x2)) / 2.0
-        cy = (float(y1) + float(y2)) / 2.0
-        # Full-width top OSD strip (date/time overlays)
-        if cy <= y_top:
+        x1, y1, x2, y2 = (float(v) for v in det.get("bbox", [0, 0, 0, 0])[:4])
+        cx = (x1 + x2) / 2.0
+        # Box ENTIRELY inside the top OSD strip (date/time text). A real object that only
+        # reaches into the strip (a car on the road beyond a gate) is kept — the old centre
+        # test deleted 56% of the vehicles on the gate camera.
+        if y2 <= y_top:
             continue
-        # Bottom OSD strip if configured
-        if bottom_frac > 0 and cy >= y_bottom:
+        # Bottom OSD strip if configured: box entirely inside it
+        if bottom_frac > 0 and y1 >= y_bottom:
             continue
-        # Extra left/right corner guard slightly below top band
-        if cy <= y_top * 1.35 and (cx <= x_left or cx >= x_right):
+        # Corner guard just below the strip: only small, text-sized boxes
+        if y2 <= y_top * 1.35 and (y2 - y1) <= small_h and (cx <= x_left or cx >= x_right):
             continue
         kept.append(det)
     return kept
@@ -1057,6 +1075,8 @@ class LiveStreamManager:
         self._clips = MotionClipRecorder(
             ffmpeg_path=_resolve_ffmpeg_path,
             frame_sources=lambda: {key: s.stream for key, s in list(self._sessions.items())},
+            pose_batch=self._clip_pose_batch,
+            vehicle_batch=self._clip_vehicle_batch,
         )
         self._infer_executor: ThreadPoolExecutor | None = None
         self._infer_futures: list[Future] = []
@@ -1070,6 +1090,7 @@ class LiveStreamManager:
         self._custom_model = None
         self._smoke_model = None
         self._weapon_model = None
+        self._pose_model = None
         self._device: str | int = 0
         self._conf = 0.12
         self._iou = 0.45
@@ -1098,6 +1119,12 @@ class LiveStreamManager:
         self._plate_frame_counters: dict[str, int] = {}
         self._plate_counter_lock = threading.Lock()
         self._last_plate_dets: dict[str, list[dict[str, Any]]] = {}
+        # Alarm-type models (custom / smoke-fire / weapon) run every Nth frame per camera;
+        # object detection + pose (what movement needs) run on every frame. Between runs the
+        # last alarm-model boxes are reused so overlays and alerts do not flicker.
+        self._specialist_every = max(1, _env_int("ML_SPECIALIST_EVERY_N", 3))
+        self._specialist_count: dict[str, int] = {}
+        self._last_specialist: dict[str, tuple[list, list, list]] = {}
         # 0 = native 4K passthrough for browser preview (override via ML_LIVE_MAX_WIDTH/HEIGHT).
         self._max_width = 0
         self._max_height = 0
@@ -1177,6 +1204,8 @@ class LiveStreamManager:
         self._evidence_wh.pop(key, None)
         self._plate_frame_counters.pop(key, None)
         self._last_plate_dets.pop(key, None)
+        self._specialist_count.pop(key, None)
+        self._last_specialist.pop(key, None)
         if self._plate_engine is not None:
             try:
                 self._plate_engine.clear_camera_tracks(key)
@@ -1432,6 +1461,7 @@ class LiveStreamManager:
                 self._custom_model = get_yolo_custom_model()
                 self._smoke_model = get_yolo_smoke_model()
                 self._weapon_model = get_yolo_weapon_model()
+                self._pose_model = get_pose_model()
                 if (
                     self._coco_model is None
                     and self._custom_model is None
@@ -1559,6 +1589,7 @@ class LiveStreamManager:
             "custom_model_loaded": self._custom_model is not None,
             "smoke_model_loaded": self._smoke_model is not None,
             "weapon_model_loaded": self._weapon_model is not None,
+            "pose_model_loaded": self._pose_model is not None,
             "dual_model_mode": self._coco_model is not None and self._smoke_model is not None,
             "general_model_loaded": self._coco_model is not None,
             "infer_workers": self._infer_workers,
@@ -1717,14 +1748,16 @@ class LiveStreamManager:
         tag = "native-4K" if keep_native else "scaled"
         print(f"[live] Bound shared session: {key} ({tag})")
 
-    def _predict(self, model, frame: np.ndarray, *, min_conf: float | None = None, classes=None):
+    def _predict(
+        self, model, frame: np.ndarray, *, min_conf: float | None = None, classes=None, imgsz: int | None = None
+    ):
         use_half = self._device != "cpu"
         conf = max(self._conf, min_conf) if min_conf is not None else self._conf
         kwargs = {
             "device": self._device,
             "conf": conf,
             "iou": self._iou,
-            "imgsz": self._imgsz,
+            "imgsz": imgsz or self._imgsz,
             "max_det": self._max_det,
             "half": use_half,
             "verbose": False,
@@ -1738,6 +1771,58 @@ class LiveStreamManager:
         self._timing.add("gpu_lock_wait", t1 - t0)
         self._timing.add("yolo_predict", time.perf_counter() - t1)
         return result
+
+    def _clip_pose_batch(self, images: list[np.ndarray]) -> list[list[dict[str, Any]]]:
+        """YOLO pose on a few clip frames (one short GPU turn). [] per image when pose is off."""
+        if self._pose_model is None or not images:
+            return [[] for _ in images]
+        t0 = time.perf_counter()
+        with gpu_predict_lock():
+            t1 = time.perf_counter()
+            results = self._pose_model.predict(
+                images,
+                device=self._device,
+                conf=POSE_CONF,
+                imgsz=POSE_IMGSZ,
+                half=self._device != "cpu",
+                verbose=False,
+            )
+        self._timing.add("gpu_lock_wait", t1 - t0)
+        self._timing.add("clip_pose", time.perf_counter() - t1)
+        return [parse_pose_result(r) for r in results]
+
+    def _clip_vehicle_batch(self, images: list[np.ndarray]) -> list[list[dict[str, Any]]]:
+        """YOLO vehicle boxes (car / motorcycle / bus / truck) on a few clip frames."""
+        if self._coco_model is None or not images:
+            return [[] for _ in images]
+        t0 = time.perf_counter()
+        with gpu_predict_lock():
+            t1 = time.perf_counter()
+            results = self._coco_model.predict(
+                images,
+                device=self._device,
+                conf=self._conf,
+                iou=self._iou,
+                imgsz=self._imgsz,
+                classes=sorted(_ANPR_VEHICLE_CLASS_IDS),
+                half=self._device != "cpu",
+                verbose=False,
+            )
+        self._timing.add("gpu_lock_wait", t1 - t0)
+        self._timing.add("clip_vehicles", time.perf_counter() - t1)
+        out: list[list[dict[str, Any]]] = []
+        for img, r in zip(images, results):
+            dets = []
+            boxes = getattr(r, "boxes", None)
+            if boxes is not None and len(boxes):
+                for b, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist()):
+                    dets.append({"bbox": [float(v) for v in b[:4]], "score": float(c)})
+            if self._osd_filter:
+                h, w = img.shape[:2]
+                dets = filter_osd_detections(dets, h, w, top_frac=self._osd_top, left_frac=self._osd_left,
+                                             right_frac=self._osd_right, bottom_frac=self._osd_bottom)
+            out.append(dets)
+        return out
 
     def _purposes_for(self, camera_key: str) -> list[str]:
         values = self._purposes.get(camera_key) or []
@@ -1868,7 +1953,27 @@ class LiveStreamManager:
                 )
             _step("coco_and_faces")
 
-        if pipeline.get("custom") and self._custom_model is not None:
+            # Pose (17 body points) only when this frame has people; other objects have no pose
+            if self._pose_model is not None and any(is_person(d) for d in coco_detections):
+                try:
+                    pose_results = self._predict(self._pose_model, infer_frame, min_conf=POSE_CONF, imgsz=POSE_IMGSZ)
+                    attach_poses(coco_detections, parse_pose_result(pose_results[0], sx=sx, sy=sy))
+                except Exception as exc:
+                    print(f"[pose] Pose error [{camera_key}]: {exc}")
+                _step("pose")
+
+        n = self._specialist_count.get(camera_key, 0)
+        self._specialist_count[camera_key] = n + 1
+        run_specialists = n % self._specialist_every == 0
+        if not run_specialists and camera_key in self._last_specialist:
+            last_custom, last_smoke, last_weapon = self._last_specialist[camera_key]
+            custom_detections = [dict(d) for d in last_custom]
+            smoke_detections = [dict(d) for d in last_smoke]
+            weapon_detections = [dict(d) for d in last_weapon]
+        else:
+            run_specialists = True
+
+        if run_specialists and pipeline.get("custom") and self._custom_model is not None:
             custom_ids = custom_only_class_ids(self._custom_model)
             results = self._predict(
                 self._custom_model,
@@ -1889,7 +1994,7 @@ class LiveStreamManager:
             )
             _step("custom_model")
 
-        if pipeline.get("smoke") and self._smoke_model is not None:
+        if run_specialists and pipeline.get("smoke") and self._smoke_model is not None:
             results = self._predict(self._smoke_model, infer_frame, min_conf=SMOKE_FIRE_MIN_CONF)
             smoke_detections = parse_yolo_result(
                 frame,
@@ -1903,7 +2008,7 @@ class LiveStreamManager:
             )
             _step("smoke_model")
 
-        if pipeline.get("weapon") and self._weapon_model is not None:
+        if run_specialists and pipeline.get("weapon") and self._weapon_model is not None:
             results = self._predict(self._weapon_model, infer_frame, min_conf=WEAPON_MIN_CONF)
             weapon_detections = parse_yolo_result(
                 frame,
@@ -1916,6 +2021,13 @@ class LiveStreamManager:
                 face_db=None,
             )
             _step("weapon_model")
+
+        if run_specialists:
+            self._last_specialist[camera_key] = (
+                [dict(d) for d in custom_detections],
+                [dict(d) for d in smoke_detections],
+                [dict(d) for d in weapon_detections],
+            )
 
         detections = merge_triple_detections(coco_detections, custom_detections, smoke_detections)
         detections.extend(weapon_detections)

@@ -107,6 +107,12 @@ def _resolve_osnet_weights() -> Path | None:
     return None
 
 
+def _torchreid_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("torchreid") is not None
+
+
 def _try_osnet_embedding(person_crop: np.ndarray) -> list[float]:
     """Optional Torch OSNet via torchreid if installed + weights present."""
     global _osnet_model, _osnet_device, _osnet_failed
@@ -125,6 +131,21 @@ def _try_osnet_embedding(person_crop: np.ndarray) -> list[float]:
     except Exception:
         _osnet_failed = True
         return []
+
+    if _osnet_model is None and not _torchreid_available():
+        # torchreid is not installed (needs a C compiler on Windows): same network, bundled
+        try:
+            from inference_engine import resolve_ml_device
+            from osnet import load_osnet_x1_0
+
+            device = "cpu" if resolve_ml_device() == "cpu" else "cuda"
+            _osnet_model = load_osnet_x1_0(str(weights), device)
+            _osnet_device = device
+            print(f"[reid] OSNet loaded from {weights} ({device}, bundled osnet.py, all tensors matched)")
+        except Exception as exc:
+            print(f"[reid] OSNet unavailable ({exc}) — using part-based ReID")
+            _osnet_failed = True
+            return []
 
     if _osnet_model is None:
         try:
@@ -207,3 +228,46 @@ def extract_reid_embedding(person_crop: np.ndarray) -> list[float]:
             # space and would corrupt the person's gallery (cosine between the two is meaningless).
             return []
     return _part_embedding(person_crop)
+
+
+def _osnet_preprocess(crop: np.ndarray) -> np.ndarray:
+    img = cv2.resize(crop, (128, 256), interpolation=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    rgb = (rgb - np.array([0.485, 0.456, 0.406], dtype=np.float32)) / np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    return rgb.transpose(2, 0, 1)
+
+
+def extract_reid_embeddings(crops: list[np.ndarray | None]) -> list[list[float]]:
+    """Appearance codes for many crops at once (one GPU batch with OSNet). [] for a bad crop."""
+    out: list[list[float]] = [[] for _ in crops]
+    valid = [i for i, c in enumerate(crops) if c is not None and getattr(c, "size", 0)]
+    if not valid:
+        return out
+    if _env_backend() in ("osnet", "torchreid", "auto"):
+        if _osnet_model is None and not _osnet_failed:
+            out[valid[0]] = _try_osnet_embedding(crops[valid[0]])  # loads the model
+            valid = valid[1:]
+        if _osnet_model is not None:
+            try:
+                import torch
+
+                for start in range(0, len(valid), 32):
+                    idx = valid[start : start + 32]
+                    batch = np.stack([_osnet_preprocess(crops[i]) for i in idx])
+                    tensor = torch.from_numpy(batch).to(_osnet_device)
+                    with torch.no_grad():
+                        feat = _osnet_model(tensor)
+                        if isinstance(feat, (tuple, list)):
+                            feat = feat[0]
+                        feat = torch.nn.functional.normalize(feat, dim=1)
+                    for i, vec in zip(idx, feat.detach().cpu().numpy().astype(np.float32)):
+                        vec = vec.reshape(-1)
+                        vec = np.pad(vec, (0, REID_DIM - vec.size)) if vec.size < REID_DIM else vec[:REID_DIM]
+                        out[i] = [float(v) for v in vec]
+                return out
+            except Exception as exc:
+                print(f"[reid] batch failed ({exc}) — per-crop fallback")
+                return [extract_reid_embedding(c) if c is not None else [] for c in crops]
+    for i in valid:
+        out[i] = extract_reid_embedding(crops[i])
+    return out

@@ -283,6 +283,37 @@ def _classify_alert_key(det: dict[str, Any]) -> str | None:
     return None
 
 
+def _box_iou(a: list[Any], b: list[Any]) -> float:
+    try:
+        a = [float(v) for v in a[:4]]
+        b = [float(v) for v in b[:4]]
+    except (TypeError, ValueError):
+        return 0.0
+    if len(a) < 4 or len(b) < 4:
+        return 0.0
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def same_spot_alert_exists(camera: Camera, class_name: str, bbox: list[Any] | None) -> bool:
+    """An alert of this kind was already raised on this camera at (about) this spot recently.
+
+    A weapon / fire / smoke that stays in place is alerted once, not again every time the
+    detection flickers off and on between polls. Moved → a new alert.
+    """
+    hours = float(getattr(settings, "ALERT_SAME_SPOT_HOURS", 12) or 0)
+    if hours <= 0 or not bbox or len(bbox) < 4:
+        return False
+    since = timezone.now() - timedelta(hours=hours)
+    recent = DetectionEvent.objects.filter(
+        camera=camera, is_alert=True, class_name=class_name, created_at__gte=since
+    ).values_list("bbox", flat=True)[:50]
+    return any(_box_iou(bbox, prev or []) >= 0.3 for prev in recent)
+
+
 def _create_alert_detection_event(
     camera: Camera,
     *,
@@ -453,6 +484,8 @@ def maybe_emit_specialist_alerts(camera: Camera, detections: list[dict[str, Any]
             "smoke": "smoke",
             "weapon": "weapon",
         }.get(key, cls[:80])
+        if same_spot_alert_exists(camera, class_name, det.get("bbox") or []):
+            continue
 
         event = _create_alert_detection_event(
             camera,

@@ -196,6 +196,8 @@ class MotionClip(models.Model):
     clip_height = models.PositiveIntegerField(default=0)
     fps = models.FloatField(default=0.0)
     size_bytes = models.PositiveBigIntegerField(default=0)
+    # "motion" = objects moved; "danger" = weapon / fire / smoke in view (kept longer)
+    trigger = models.CharField(max_length=16, default="motion", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -245,6 +247,10 @@ class ObjectMovement(models.Model):
     # Distance as % of the frame diagonal, so cameras of different resolution compare
     distance_pct = models.FloatField(default=0.0)
     direction = models.CharField(max_length=16, blank=True, default="")
+    # People with pose: net hip move in torso lengths, and posture before / after
+    body_shift = models.FloatField(null=True, blank=True)
+    posture_from = models.CharField(max_length=16, blank=True, default="")
+    posture_to = models.CharField(max_length=16, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

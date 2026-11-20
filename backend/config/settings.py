@@ -419,6 +419,9 @@ OBJECT_ENTER_CONFIRM_POLLS = int(os.getenv("OBJECT_ENTER_CONFIRM_POLLS", "2"))
 OBJECT_ENTER_CONFIRM_SECONDS = float(os.getenv("OBJECT_ENTER_CONFIRM_SECONDS", "1.0"))
 # Stationary memory: same camera + same class group + box overlap ≥ IoU within window → same object
 OBJECT_STATIONARY_IOU = float(os.getenv("OBJECT_STATIONARY_IOU", "0.6"))
+# Or: most of the smaller box inside the other (seated person leaning / partly hidden) and sizes close
+OBJECT_STATIONARY_CONTAIN = float(os.getenv("OBJECT_STATIONARY_CONTAIN", "0.8"))
+OBJECT_STATIONARY_MAX_SCALE = float(os.getenv("OBJECT_STATIONARY_MAX_SCALE", "1.6"))
 OBJECT_STATIONARY_WINDOW_MIN = int(os.getenv("OBJECT_STATIONARY_WINDOW_MIN", "10"))
 # Below this appearance similarity a box in the same spot is a different object (e.g. another car parked there)
 OBJECT_STATIONARY_MIN_REID = float(os.getenv("OBJECT_STATIONARY_MIN_REID", "0.75"))
@@ -427,8 +430,11 @@ OBJECT_STALE_VISIT_MINUTES = int(os.getenv("OBJECT_STALE_VISIT_MINUTES", "10"))
 # Motion clips: ML nodes record 10-30 s video when objects move; background workers collect them
 MOTION_CLIP_PULL_ENABLED = os.getenv("MOTION_CLIP_PULL_ENABLED", "True").lower() in ("true", "1", "yes")
 MOTION_CLIP_PULL_INTERVAL_SEC = float(os.getenv("MOTION_CLIP_PULL_INTERVAL_SEC", "10"))
-# Clips older than this are deleted (0 = keep forever)
-MOTION_CLIP_RETENTION_DAYS = int(os.getenv("MOTION_CLIP_RETENTION_DAYS", "14"))
+# Clips older than this are deleted (0 = keep forever); weapon / fire / smoke clips kept longer
+MOTION_CLIP_RETENTION_DAYS = int(os.getenv("MOTION_CLIP_RETENTION_DAYS", "7"))
+MOTION_CLIP_DANGER_RETENTION_DAYS = int(os.getenv("MOTION_CLIP_DANGER_RETENTION_DAYS", "90"))
+# All clips together stay under this size; oldest normal clips go first (0 = no cap)
+MOTION_CLIP_MAX_GB = float(os.getenv("MOTION_CLIP_MAX_GB", "200"))
 # Crowd: person_count > threshold → one DetectionEvent + realtime alert; clears when ≤ threshold
 CROWD_ALERT_ENABLED = os.getenv("CROWD_ALERT_ENABLED", "true").strip().lower() in ("true", "1", "yes")
 CROWD_ALERT_THRESHOLD = int(os.getenv("CROWD_ALERT_THRESHOLD", "10"))
@@ -436,6 +442,8 @@ CROWD_ALERT_MIN_CONFIDENCE = float(os.getenv("CROWD_ALERT_MIN_CONFIDENCE", "0.25
 # Same episode technique for fire / smoke / weapon alerts (save once + notify once)
 ALERT_EPISODE_ENABLED = os.getenv("ALERT_EPISODE_ENABLED", "true").strip().lower() in ("true", "1", "yes")
 ALERT_EPISODE_MIN_CONFIDENCE = float(os.getenv("ALERT_EPISODE_MIN_CONFIDENCE", "0.25"))
+# Fire / smoke / weapon staying at the same spot on a camera is alerted once per this many hours (0 = off)
+ALERT_SAME_SPOT_HOURS = float(os.getenv("ALERT_SAME_SPOT_HOURS", "12"))
 
 # Attendance — InsightFace recognition + decision engine
 ATTENDANCE_FACE_MIN_CONFIDENCE = float(os.getenv("ATTENDANCE_FACE_MIN_CONFIDENCE", "0.25"))
@@ -666,3 +674,29 @@ SYNC_RPO_DB_MINUTES = int(os.getenv("SYNC_RPO_DB_MINUTES", "15"))
 SYNC_RPO_MEDIA_HOURS = int(os.getenv("SYNC_RPO_MEDIA_HOURS", "24"))
 SYNC_RTO_SERVICE_HOURS = int(os.getenv("SYNC_RTO_SERVICE_HOURS", "8"))
 SYNC_RTO_MEDIA_HOURS = int(os.getenv("SYNC_RTO_MEDIA_HOURS", "48"))
+
+# Errors (with tracebacks) also go to a rotating file, so crashes such as "Login crashed"
+# can be read after the fact, not only in the runserver window. Console output unchanged.
+DJANGO_ERROR_LOG = Path(os.getenv("DJANGO_ERROR_LOG", str(BASE_DIR / "logs_runtime" / "django_errors.log")))
+DJANGO_ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "detailed": {"format": "%(asctime)s %(levelname)s %(process)d %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+        "error_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(DJANGO_ERROR_LOG),
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "encoding": "utf-8",
+            "delay": True,
+            "level": "ERROR",
+            "formatter": "detailed",
+        },
+    },
+    "root": {"handlers": ["console", "error_file"], "level": "WARNING"},
+}

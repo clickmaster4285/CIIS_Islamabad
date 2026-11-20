@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from reid_extractor import extract_reid_embedding
+from reid_extractor import extract_reid_embedding, extract_reid_embeddings  # noqa: F401
 
 VEHICLE_CLASSES = frozenset(
     {
@@ -176,19 +178,54 @@ class LocalTrackBind:
     last_seen: float
 
 
+COUNTER_FILE = Path(
+    os.getenv("ML_IDENTITY_COUNTER_FILE", "").strip()
+    or Path(__file__).resolve().parent / "data" / "identity_counters.json"
+)
+
+
+# First run without a counter file: start above codes handed out before counters were kept
+_FIRST_RUN_START = 1000
+
+
+def _load_counters(path: Path) -> dict[str, int]:
+    if not path.exists():
+        return {"person": _FIRST_RUN_START, "vehicle": _FIRST_RUN_START, "object": _FIRST_RUN_START}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {k: int(v) for k, v in raw.items() if k in ("person", "vehicle", "object")}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def _save_counters(path: Path, counters: dict[str, int]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(counters), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"[identity] Could not save ID counters ({exc}) — codes may repeat after restart")
+
+
 class ObjectIdentityRegistry:
     """In-memory global IDs; PostgreSQL remains the durable source of truth on save."""
 
-    def __init__(self):
+    def __init__(self, counter_file: str | Path | None = None):
         self._lock = threading.Lock()
         self._globals: dict[str, GlobalObjectState] = {}
         self._track_bind: dict[tuple[str, int], LocalTrackBind] = {}
         self._face_index: dict[str, str] = {}  # face_key → global_id
+        # Counters survive restarts so a code (GP12) is never handed out twice: the backend
+        # links movements by this code, and a reused code would merge two different people.
+        self._counter_file = Path(counter_file) if counter_file else COUNTER_FILE
         self._counters = {"person": 0, "vehicle": 0, "object": 0}
+        self._counters.update(_load_counters(self._counter_file))
 
     def _next_code(self, object_type: str) -> str:
         prefix = {"person": "GP", "vehicle": "GV", "object": "GO"}.get(object_type, "GO")
         self._counters[object_type] = self._counters.get(object_type, 0) + 1
+        _save_counters(self._counter_file, self._counters)
         return f"{prefix}{self._counters[object_type]}"
 
     def _prune(self, now: float) -> None:
@@ -292,17 +329,21 @@ class ObjectIdentityRegistry:
         out: list[dict[str, Any]] = []
         active_ids: set[int] = set()
 
+        # Appearance codes for every object in the frame in ONE batch, before taking the
+        # registry lock (the lock is shared by all camera workers; OSNet per object inside
+        # it made every camera wait).
+        ident = [d for d in (detections or []) if is_identity_detection(d)]
+        crops = [_crop(frame, list(d.get("bbox") or [])) for d in ident]
+        codes = extract_reid_embeddings(crops)
+        embedding_for = {id(d): e for d, e in zip(ident, codes)}
+
         with self._lock:
             self._prune(now)
 
             for det in detections or []:
                 if not is_identity_detection(det):
-                    model = str(det.get("model") or det.get("model_tag") or "").strip().lower()
-                    cls = str(det.get("class_name") or det.get("label") or "").strip().lower()
-                    if model in EXCLUDED_MODELS or cls in EXCLUDED_CLASS_NAMES:
-                        continue
-                    if "smoke" in cls or "fire" in cls or "flame" in cls:
-                        continue
+                    # Smoke / fire / weapon: no ReID or global id, but keep them so the
+                    # overlay shows them and the backend raises its fire/weapon alerts.
                     out.append(dict(det))
                     continue
 
@@ -313,8 +354,7 @@ class ObjectIdentityRegistry:
 
                 bbox = enriched.get("bbox") or []
                 bbox_list = bbox if isinstance(bbox, list) else list(bbox)
-                crop = _crop(frame, bbox_list)
-                embedding = extract_reid_embedding(crop) if crop is not None else []
+                embedding = embedding_for.get(id(det)) or []
                 if embedding:
                     enriched["reid_embedding"] = embedding
 

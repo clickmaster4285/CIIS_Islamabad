@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import timedelta
 from typing import Any
@@ -137,6 +138,23 @@ def _class_group(class_name: str) -> str:
     return _STATIONARY_CLASS_GROUPS.get(name, name)
 
 
+def _same_spot_contained(a: list, b: list) -> bool:
+    """Most of the smaller box lies inside the other and sizes are close (same object, box changed)."""
+    if len(a or []) < 4 or len(b or []) < 4:
+        return False
+    a = [float(v) for v in a[:4]]
+    b = [float(v) for v in b[:4]]
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    area_a = max(1.0, (a[2] - a[0]) * (a[3] - a[1]))
+    area_b = max(1.0, (b[2] - b[0]) * (b[3] - b[1]))
+    contain = (ix * iy) / min(area_a, area_b)
+    scale = math.sqrt(max(area_a, area_b) / min(area_a, area_b))
+    return contain >= _setting_number("OBJECT_STATIONARY_CONTAIN", 0.8) and scale <= _setting_number(
+        "OBJECT_STATIONARY_MAX_SCALE", 1.6
+    )
+
+
 def _find_stationary_visit(
     camera: Camera,
     *,
@@ -176,7 +194,10 @@ def _find_stationary_visit(
         if face_key and stored_face and stored_face != face_key:
             continue
         overlap = _iou(bbox, visit.bbox or [])
-        if overlap < best_iou:
+        if overlap < min_iou and _same_spot_contained(bbox, visit.bbox or []):
+            # Seated person leaning / partly hidden: one box sits inside the other
+            overlap = min_iou
+        if overlap < best_iou or (best is not None and overlap == best_iou):
             continue
         # Same spot but clearly different appearance → another object took the place.
         if embedding and obj.reid_embedding and _cosine(embedding, obj.reid_embedding) < min_reid:

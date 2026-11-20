@@ -222,6 +222,9 @@ class ObjectMovementSerializer(serializers.ModelSerializer):
             "distance_px",
             "distance_pct",
             "direction",
+            "body_shift",
+            "posture_from",
+            "posture_to",
         ]
 
 

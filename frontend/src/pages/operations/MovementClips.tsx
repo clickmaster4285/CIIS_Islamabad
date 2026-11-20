@@ -37,6 +37,8 @@ export default function MovementClipsPage() {
   const [objectType, setObjectType] = useState<"all" | ObjectType>("all")
   const [dateFrom, setDateFrom] = useState("")
   const [dateTo, setDateTo] = useState("")
+  const [timeFrom, setTimeFrom] = useState("")
+  const [timeTo, setTimeTo] = useState("")
   const [page, setPage] = useState(1)
   const [playing, setPlaying] = useState<MotionClipRecord | null>(null)
 
@@ -47,7 +49,7 @@ export default function MovementClipsPage() {
 
   useEffect(() => {
     setPage(1)
-  }, [debouncedSearch, camera, objectType, dateFrom, dateTo])
+  }, [debouncedSearch, camera, objectType, dateFrom, dateTo, timeFrom, timeTo])
 
   const camerasQuery = useQuery({
     queryKey: ["movement-clips-cameras"],
@@ -56,7 +58,17 @@ export default function MovementClipsPage() {
   })
 
   const clipsQuery = useQuery({
-    queryKey: ["object-tracking-motion-clips", debouncedSearch, camera, objectType, dateFrom, dateTo, page],
+    queryKey: [
+      "object-tracking-motion-clips",
+      debouncedSearch,
+      camera,
+      objectType,
+      dateFrom,
+      dateTo,
+      timeFrom,
+      timeTo,
+      page,
+    ],
     queryFn: () =>
       fetchMotionClips({
         q: debouncedSearch || undefined,
@@ -64,6 +76,8 @@ export default function MovementClipsPage() {
         object_type: objectType,
         date_from: dateFrom || undefined,
         date_to: dateTo || undefined,
+        time_from: timeFrom || undefined,
+        time_to: timeTo || undefined,
         page,
         page_size: PAGE_SIZE,
       }),
@@ -88,7 +102,7 @@ export default function MovementClipsPage() {
     >
       <div className="space-y-4">
         <Card>
-          <CardContent className="grid gap-3 pt-6 sm:grid-cols-2 lg:grid-cols-5">
+          <CardContent className="grid gap-3 pt-6 sm:grid-cols-2 lg:grid-cols-4">
             <div className="relative lg:col-span-2">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -122,10 +136,46 @@ export default function MovementClipsPage() {
                 <SelectItem value="object">Other objects</SelectItem>
               </SelectContent>
             </Select>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-2">
+              <span className="w-10 shrink-0 text-sm text-muted-foreground">From</span>
               <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} aria-label="From date" />
-              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} aria-label="To date" />
+              <Input
+                type="time"
+                value={timeFrom}
+                onChange={(e) => setTimeFrom(e.target.value)}
+                aria-label="From time"
+                className="w-32 shrink-0"
+              />
             </div>
+            <div className="flex items-center gap-2 sm:col-span-2 lg:col-span-2">
+              <span className="w-10 shrink-0 text-sm text-muted-foreground">To</span>
+              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} aria-label="To date" />
+              <Input
+                type="time"
+                value={timeTo}
+                onChange={(e) => setTimeTo(e.target.value)}
+                aria-label="To time"
+                className="w-32 shrink-0"
+              />
+            </div>
+            <div className="flex items-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!dateFrom && !dateTo && !timeFrom && !timeTo}
+                onClick={() => {
+                  setDateFrom("")
+                  setDateTo("")
+                  setTimeFrom("")
+                  setTimeTo("")
+                }}
+              >
+                Clear date &amp; time
+              </Button>
+            </div>
+            <p className="self-center text-xs text-muted-foreground lg:col-span-3">
+              With a date, the time sets the exact start / end. Time without a date = that window on every day.
+            </p>
           </CardContent>
         </Card>
 

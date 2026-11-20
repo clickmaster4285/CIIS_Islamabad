@@ -141,6 +141,18 @@ class StoreClipTests(MotionClipTestBase):
         )
         self.assertEqual(clip.movements.get().global_object, obj)
 
+    def test_pose_movement_fields_are_stored(self):
+        clip = store_clip(
+            self.meta(clip_id="pose", movements=[self.move(class_name="person", body_shift=4.2,
+                                                         posture_from="sitting", posture_to="standing")]),
+            b"v",
+            None,
+        )
+        mv = clip.movements.get()
+        self.assertEqual((mv.body_shift, mv.posture_from, mv.posture_to), (4.2, "sitting", "standing"))
+        plain = store_clip(self.meta(clip_id="plain"), b"v", None).movements.get()
+        self.assertEqual((plain.body_shift, plain.posture_from), (None, ""))
+
     def test_same_clip_is_stored_once(self):
         self.assertIsNotNone(store_clip(self.meta(), b"v", None))
         self.assertIsNone(store_clip(self.meta(), b"v", None))
@@ -162,6 +174,34 @@ class StoreClipTests(MotionClipTestBase):
         self.assertFalse(os.path.isfile(path))
         self.assertEqual(list(MotionClip.objects.values_list("ml_clip_id", flat=True)), ["new"])
         self.assertEqual(prune_old_clips(days=0), 0)
+
+
+class RetentionTests(MotionClipTestBase):
+    def clip(self, clip_id, *, days_old=0, danger=False, size=100):
+        meta = self.meta(clip_id=clip_id, age=timedelta(days=days_old))
+        if danger:
+            meta["trigger"] = "danger"
+        c = store_clip(meta, b"v" * size, None)
+        return c
+
+    def ids(self):
+        return sorted(MotionClip.objects.values_list("ml_clip_id", flat=True))
+
+    def test_danger_clips_kept_longer(self):
+        self.clip("normal-old", days_old=10)
+        self.clip("danger-old", days_old=10, danger=True)
+        self.clip("danger-ancient", days_old=100, danger=True)
+        self.assertEqual(MotionClip.objects.get(ml_clip_id="danger-old").trigger, "danger")
+        self.assertEqual(prune_old_clips(days=7, danger_days=90, max_gb=0), 2)
+        self.assertEqual(self.ids(), ["danger-old"])
+
+    def test_disk_cap_drops_oldest_normal_first(self):
+        self.clip("danger-1", days_old=3, danger=True, size=400)
+        self.clip("normal-1", days_old=2, size=400)
+        self.clip("normal-2", days_old=1, size=400)
+        cap_gb = 900 / 1024**3  # room for two clips
+        self.assertEqual(prune_old_clips(days=0, danger_days=0, max_gb=cap_gb), 1)
+        self.assertEqual(self.ids(), ["danger-1", "normal-2"])
 
 
 class FakeResponse:
@@ -210,6 +250,75 @@ class PullTests(MotionClipTestBase):
         self.assertFalse(MotionClip.objects.exists())
 
 
+class DangerAlertTests(MotionClipTestBase):
+    def danger_meta(self, cls="gun", clip_id="danger-1"):
+        meta = self.meta(
+            clip_id=clip_id,
+            movements=[self.move(track_id=None, global_object_id="", class_name=cls, danger=True, from_bbox=FROM, to_bbox=FROM)],
+        )
+        meta["trigger"] = "danger"
+        return meta
+
+    def test_gun_clip_raises_weapon_alert_with_poster_and_video(self):
+        from cameras.models import DetectionEvent
+        from object_tracking.motion_clips import raise_danger_alerts
+
+        meta = self.danger_meta()
+        clip = store_clip(meta, b"v", b"poster")
+        self.assertEqual(raise_danger_alerts(clip, meta, b"poster"), 1)
+        ev = DetectionEvent.objects.get()
+        self.assertTrue(ev.is_alert)
+        self.assertEqual(ev.class_name, "weapon")
+        self.assertTrue(ev.label.startswith("Weapon Detected @ Gate"))
+        self.assertTrue(ev.clip)
+        self.assertEqual(ev.video.name, clip.video.name)
+        self.assertIsNone(clip.movements.get().local_track_id)
+
+    def test_no_second_alert_when_poll_already_raised_it(self):
+        from cameras.models import DetectionEvent
+        from object_tracking.motion_clips import raise_danger_alerts
+
+        DetectionEvent.objects.create(
+            camera=self.camera, class_name="fire", label="Fire Detected", confidence=0.9, is_alert=True
+        )
+        meta = self.danger_meta("fire")
+        clip = store_clip(meta, b"v", None)
+        self.assertEqual(raise_danger_alerts(clip, meta, None), 0)
+        self.assertEqual(DetectionEvent.objects.count(), 1)
+
+    def test_same_spot_weapon_alerted_once(self):
+        from cameras.detection_utils import maybe_emit_specialist_alerts
+        from cameras.models import DetectionEvent
+
+        gun = {"class_name": "weapon", "model": "weapon", "confidence": 0.6, "bbox": [587, 303, 720, 434]}
+        self.assertEqual(maybe_emit_specialist_alerts(self.camera, [gun]), 1)
+        self.assertEqual(maybe_emit_specialist_alerts(self.camera, []), 0)  # flicker: gone one poll
+        self.assertEqual(maybe_emit_specialist_alerts(self.camera, [dict(gun, bbox=[586, 307, 719, 435])]), 0)
+        moved = dict(gun, bbox=[100, 100, 200, 200])
+        maybe_emit_specialist_alerts(self.camera, [])
+        self.assertEqual(maybe_emit_specialist_alerts(self.camera, [moved]), 1)
+        self.assertEqual(DetectionEvent.objects.filter(is_alert=True).count(), 2)
+
+    def test_seated_person_box_change_is_same_spot(self):
+        from object_tracking.services import _same_spot_contained
+
+        # Real boxes of one seated person, 27 s apart (IoU 0.58 and 0.46)
+        self.assertTrue(_same_spot_contained([862, 370, 994, 546], [854, 375, 1004, 631]))
+        self.assertTrue(_same_spot_contained([936, 174, 1034, 298], [895, 169, 1025, 345]))
+        # Different spot / very different size → not the same
+        self.assertFalse(_same_spot_contained([111, 231, 174, 317], [85, 294, 179, 405]))
+        self.assertFalse(_same_spot_contained([548, 279, 744, 532], [550, 256, 648, 447]))
+
+    def test_normal_clip_raises_nothing(self):
+        from cameras.models import DetectionEvent
+        from object_tracking.motion_clips import raise_danger_alerts
+
+        meta = self.meta(clip_id="plain")
+        clip = store_clip(meta, b"v", None)
+        self.assertEqual(raise_danger_alerts(clip, meta, None), 0)
+        self.assertFalse(DetectionEvent.objects.exists())
+
+
 class MotionClipApiTests(MotionClipTestBase):
     def setUp(self):
         super().setUp()
@@ -251,6 +360,40 @@ class MotionClipApiTests(MotionClipTestBase):
         self.assertEqual(self.get(date_from=self.now.date().isoformat()), ["GV9"])
         self.assertEqual(self.get(date_from="not-a-date"), ["GV9", "GP3"])
         self.assertEqual(self.get(object=str(self.car.uuid)), ["GV9"])
+
+    def test_time_filters(self):
+        from datetime import datetime as dt
+
+        MotionClip.objects.all().delete()
+        tz = timezone.get_current_timezone()
+        for name, when in (
+            ("m19-1000", dt(2026, 11, 19, 10, 0)),
+            ("m19-1400", dt(2026, 11, 19, 14, 0)),
+            ("m19-2300", dt(2026, 11, 19, 23, 0)),
+            ("m18-1400", dt(2026, 11, 18, 14, 0)),
+        ):
+            meta = self.meta(clip_id=name, movements=[])
+            meta["started_at"] = timezone.make_aware(when, tz).timestamp()
+            meta["ended_at"] = meta["started_at"] + 12
+            store_clip(meta, b"v", None)
+        names = dict(MotionClip.objects.values_list("pk", "ml_clip_id"))
+
+        def ids(**params):
+            res = self.client.get("/api/object-tracking/motion-clips/", params, **self.auth)
+            self.assertEqual(res.status_code, 200)
+            return sorted(names[r["id"]] for r in res.json()["results"])
+
+        # Date + time = exact moments
+        self.assertEqual(ids(date_from="2026-11-19", time_from="09:30", date_to="2026-11-19", time_to="14:00"),
+                         ["m19-1000", "m19-1400"])
+        self.assertEqual(ids(date_from="2026-11-18", time_from="15:00", date_to="2026-11-19", time_to="12:00"),
+                         ["m19-1000"])
+        # Time only = that window on every day
+        self.assertEqual(ids(time_from="13:00", time_to="15:00"), ["m18-1400", "m19-1400"])
+        # Window crossing midnight
+        self.assertEqual(ids(time_from="22:00", time_to="11:00"), ["m19-1000", "m19-2300"])
+        # Bad time ignored
+        self.assertEqual(len(ids(time_from="25:99")), 4)
 
     def test_clip_fields(self):
         res = self.client.get("/api/object-tracking/motion-clips/", **self.auth).json()["results"][0]

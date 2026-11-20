@@ -149,6 +149,14 @@ export function MovementSummary({ movement }: { movement: ObjectMovementRecord }
       <span className="text-muted-foreground">
         {Math.round(movement.distance_px)} px ({movement.distance_pct}% of view)
       </span>
+      {movement.posture_from || movement.posture_to ? (
+        <Badge variant="secondary" className="capitalize">
+          {movement.posture_from || "?"} → walking → {movement.posture_to || "?"}
+        </Badge>
+      ) : null}
+      {movement.body_shift != null ? (
+        <span className="text-muted-foreground">· body moved {movement.body_shift.toFixed(1)}× torso</span>
+      ) : null}
       <span className="text-muted-foreground">· {formatDuration(movement.duration_seconds)}</span>
       {movement.still_moving ? <Badge variant="secondary">Still moving — continues in next clip</Badge> : null}
     </div>

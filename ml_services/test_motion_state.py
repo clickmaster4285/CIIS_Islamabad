@@ -101,5 +101,110 @@ class MotionStateTests(unittest.TestCase):
         self.assertEqual(self.tracker.track_count(), 0)
 
 
+class GroundPointTests(unittest.TestCase):
+    def test_parked_bikes_overlapping_do_not_move(self):
+        tracker = CameraMotionTracker("cam-22", CFG)
+        t, events = 1000.0, []
+        # Real boxes of a parked motorcycle: top edge jumps 313 ↔ 386 (overlap), bottom stays 515
+        for i in range(20):
+            box = [975, 313, 1170, 515] if i % 2 else [976, 386, 1141, 516]
+            events += tracker.update([{"track_id": 1, "global_object_id": "GV1019", "class_name": "motorcycle",
+                                       "bbox": box}], t)
+            t += 10.0
+        self.assertEqual(events, [])
+
+    def test_driven_bike_moves(self):
+        tracker = CameraMotionTracker("cam-22", CFG)
+        t, events = 1000.0, []
+        for x in [975, 975, 975, 900, 800, 700, 600, 600, 600, 600, 600]:
+            events += tracker.update([{"track_id": 1, "global_object_id": "GV1", "class_name": "motorcycle",
+                                       "bbox": [x, 313, x + 195, 515]}], t)
+            t += 1.0
+        self.assertEqual([e["event"] for e in events], ["start", "stop"])
+
+
+def person(hip_x: float, hip_y: float = 300.0, *, sitting: bool = True, wrist_dx: float = 0.0, tid: int = 1,
+           gid: str = "GP1", box_dx: float = 0.0) -> dict:
+    """Person with 17 keypoints: torso 100 px (shoulders 100 px above hips)."""
+    kps = [[0.0, 0.0, 0.0] for _ in range(17)]
+    sh_y, knee_dy = hip_y - 100, 0.0 if sitting else 80.0
+    for i, x in ((5, hip_x - 20), (6, hip_x + 20)):
+        kps[i] = [x, sh_y, 0.9]
+    kps[9] = [hip_x - 40 + wrist_dx, hip_y - 30, 0.9]
+    kps[10] = [hip_x + 40 + wrist_dx, hip_y - 30, 0.9]
+    for i, x in ((11, hip_x - 15), (12, hip_x + 15)):
+        kps[i] = [x, hip_y, 0.9]
+    # Sitting: knees forward (thigh horizontal); standing: knees straight below hips
+    kps[13] = [hip_x - 15 + (0 if not sitting else 80), hip_y + knee_dy + (0 if not sitting else 5), 0.9]
+    kps[14] = [hip_x + 15 + (0 if not sitting else 80), hip_y + knee_dy + (0 if not sitting else 5), 0.9]
+    x1 = hip_x - 60 + box_dx
+    return {"track_id": tid, "global_object_id": gid, "class_name": "person",
+            "bbox": [x1, sh_y - 40, x1 + 120, hip_y + 120], "keypoints": kps}
+
+
+class PoseMotionTests(unittest.TestCase):
+    def setUp(self):
+        self.tracker = CameraMotionTracker("cam-1", CFG)
+        self.t = 1000.0
+        self.events: list[dict] = []
+
+    def step(self, d, dt=1.0):
+        self.events += self.tracker.update([d], self.t)
+        self.t += dt
+        return d
+
+    def kinds(self):
+        return [e["event"] for e in self.events]
+
+    def test_waving_and_leaning_in_chair_is_not_movement(self):
+        for i in range(20):
+            # Hands swing 60 px and the box shifts 40 px (leaning), hips stay put
+            self.step(person(300, wrist_dx=60 * (i % 2), box_dx=40 * (i % 2)))
+        self.assertEqual(self.kinds(), [])
+
+    def test_walking_away_is_movement_with_body_shift_and_posture(self):
+        for _ in range(3):
+            d = self.step(person(300, sitting=True))
+        self.assertEqual(d["posture"], "sitting")
+        for x in range(380, 900, 80):  # stands up and walks 6 torso lengths
+            d = self.step(person(x, sitting=False))
+        self.assertEqual(d["posture"], "walking")
+        for _ in range(5):
+            d = self.step(person(900, sitting=False))
+        self.assertEqual(self.kinds(), ["start", "stop"])
+        stop = self.events[-1]
+        self.assertGreater(stop["body_shift"], 5)
+        self.assertEqual((self.events[0]["posture_from"], stop["posture_to"]), ("sitting", "standing"))
+        self.assertEqual(d["posture"], "standing")
+
+    def test_new_track_id_keeps_the_movement_by_lasting_id(self):
+        for _ in range(3):
+            self.step(person(300, tid=1))
+        self.step(person(400, tid=1))
+        self.step(person(500, tid=2))  # tracker lost him: new local ID, same GP1
+        self.step(person(600, tid=3))
+        for _ in range(5):
+            self.step(person(600, tid=3))
+        self.assertEqual(self.kinds(), ["start", "stop"])
+        self.assertEqual(self.events[-1]["motion_key"], "g:GP1")
+        self.assertEqual(self.events[-1]["track_id"], 3)
+        self.assertEqual(self.tracker.track_count(), 1)
+
+    def test_seated_thigh_pointing_at_high_camera_is_not_standing(self):
+        from motion_state import posture
+
+        d = person(300, sitting=False)
+        self.assertEqual(posture(d["keypoints"]), "standing")
+        d["keypoints"][13][1] = d["keypoints"][14][1] = 330  # thigh vertical but only 30 px (torso 100)
+        self.assertEqual(posture(d["keypoints"]), "sitting")
+
+    def test_slow_camera_does_not_forget_objects_between_frames(self):
+        for _ in range(4):
+            self.step(person(300), dt=20.0)  # one inference every 20 s
+        self.assertGreaterEqual(self.tracker._ttl(), 60.0)
+        self.assertEqual(self.tracker.track_count(), 1)
+        self.assertEqual(self.kinds(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

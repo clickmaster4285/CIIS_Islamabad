@@ -16,7 +16,7 @@ from typing import Any
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import close_old_connections, transaction
-from django.db.models import Q
+from django.db.models import Case, IntegerField, Q, Sum, When
 from django.utils import timezone
 
 from config.db import release_db
@@ -32,6 +32,13 @@ _thread: threading.Thread | None = None
 # How far around a movement we look for the object's track / visit (polls are 30-40 s apart)
 _LINK_SLACK = timedelta(minutes=2)
 _STATIONARY_LINK_IOU = 0.3
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ts(value: Any) -> datetime | None:
@@ -171,6 +178,7 @@ def store_clip(
             clip_height=int(meta.get("clip_height") or 0),
             fps=float(meta.get("fps") or 0.0),
             size_bytes=len(video),
+            trigger="danger" if meta.get("trigger") == "danger" else "motion",
         )
         clip.video.save(f"{clip_id}.mp4", ContentFile(video), save=False)
         if poster:
@@ -207,8 +215,80 @@ def store_clip(
                 distance_px=dist,
                 distance_pct=pct,
                 direction=direction,
+                body_shift=_float_or_none(mv.get("body_shift")),
+                posture_from=str(mv.get("posture_from") or "")[:16],
+                posture_to=str(mv.get("posture_to") or "")[:16],
             )
     return clip
+
+
+_DANGER_TITLES = {"fire": "Fire Detected", "smoke": "Smoke Detected", "weapon": "Weapon Detected"}
+# A poll-based alert for the same camera + kind this close to the clip = already raised
+_DANGER_DEDUP = timedelta(minutes=2)
+
+
+def raise_danger_alerts(clip: MotionClip, meta: dict[str, Any], poster: bytes | None) -> int:
+    """Weapon / fire / smoke seen by ML (even between backend polls) → one alert per kind.
+
+    Skipped when the live poll already raised the same alert on this camera around the
+    clip. The alert gets the clip's poster (frame at first sighting) and its video.
+    """
+    from cameras.detection_utils import _classify_alert_key, same_spot_alert_exists
+    from cameras.models import ClipStatus, DetectionEvent
+
+    camera = clip.camera
+    if camera is None:
+        return 0
+    best: dict[str, dict[str, Any]] = {}
+    for mv in meta.get("movements") or []:
+        if not mv.get("danger"):
+            continue
+        key = _classify_alert_key({"class_name": mv.get("class_name") or ""})
+        if key in _DANGER_TITLES and key not in best:
+            best[key] = mv
+    created = 0
+    for key, mv in best.items():
+        class_name = key
+        if DetectionEvent.objects.filter(
+            camera=camera,
+            is_alert=True,
+            class_name=class_name,
+            created_at__gte=clip.started_at - _DANGER_DEDUP,
+            created_at__lte=clip.ended_at + _DANGER_DEDUP,
+        ).exists():
+            continue
+        if same_spot_alert_exists(camera, class_name, mv.get("from_bbox") or []):
+            continue
+        zone = (camera.zone or "").strip() or "—"
+        cam_name = (camera.name or camera.code or f"cam-{camera.pk}").strip()
+        event = DetectionEvent(
+            camera=camera,
+            class_name=class_name,
+            label=f"{_DANGER_TITLES[key]} @ {cam_name} / {zone}"[:120],
+            employee_name="",
+            personal_number="",
+            confidence=0.0,
+            bbox=[float(v) for v in (mv.get("from_bbox") or [])][:4],
+            infer_frame_width=clip.source_width or None,
+            infer_frame_height=clip.source_height or None,
+            is_alert=True,
+            clip_status=ClipStatus.READY if poster else ClipStatus.SKIPPED,
+            track_event="alert",
+        )
+        if poster:
+            event.clip.save(f"{clip.ml_clip_id}-{key}.jpg", ContentFile(poster), save=False)
+        event.video.name = clip.video.name  # same file as the motion clip
+        event.save()
+        created += 1
+        logger.warning("[motion-clips] %s alert from ML clip %s camera=%s", key, clip.ml_clip_id, cam_name)
+    if created:
+        try:
+            from realtime.sio_app import emit_invalidate
+
+            emit_invalidate(["cameras", "detections", "alerts"], throttle_sec=0.5)
+        except Exception:
+            logger.debug("Alert realtime emit failed", exc_info=True)
+    return created
 
 
 def pull_from_node(base_url: str, *, limit: int = 20) -> int:
@@ -234,8 +314,14 @@ def pull_from_node(base_url: str, *, limit: int = 20) -> int:
             for kind in ("poster", "end"):
                 img = requests.get(f"{base}/live/motion/clips/{clip_id}/{kind}", timeout=30)
                 images[kind] = img.content if img.status_code == 200 else None
-            if store_clip(meta, video.content, images["poster"], images["end"]):
+            clip = store_clip(meta, video.content, images["poster"], images["end"])
+            if clip:
                 stored += 1
+                if meta.get("trigger") == "danger":
+                    try:
+                        raise_danger_alerts(clip, meta, images["poster"])
+                    except Exception:
+                        logger.exception("[motion-clips] %s: danger alert failed", clip_id)
         # Stored (now or before) → the ML node may drop its copy
         requests.delete(f"{base}/live/motion/clips/{clip_id}", timeout=10)
     return stored
@@ -253,22 +339,59 @@ def pull_motion_clips() -> int:
     return stored
 
 
-def prune_old_clips(*, days: int | None = None, batch: int = 200) -> int:
-    """Delete clips (files + rows) older than MOTION_CLIP_RETENTION_DAYS. 0 days = keep forever."""
-    keep = int(days if days is not None else getattr(settings, "MOTION_CLIP_RETENTION_DAYS", 14))
-    if keep <= 0:
-        return 0
-    cutoff = timezone.now() - timedelta(days=keep)
+def _delete_clip(clip: MotionClip) -> None:
+    for f in (clip.video, clip.poster, clip.end_frame):
+        if f:
+            try:
+                f.delete(save=False)
+            except OSError:
+                pass
+    clip.delete()
+
+
+def prune_old_clips(
+    *,
+    days: int | None = None,
+    danger_days: int | None = None,
+    max_gb: float | None = None,
+    batch: int = 1000,
+) -> int:
+    """Delete clips (files + rows) by age and keep the total under a disk cap.
+
+    Normal clips: older than MOTION_CLIP_RETENTION_DAYS. Danger clips (weapon / fire /
+    smoke): older than MOTION_CLIP_DANGER_RETENTION_DAYS. Then, while all clips together
+    are over MOTION_CLIP_MAX_GB, the oldest go first — normal clips before danger clips.
+    0 = no limit for each setting.
+    """
+    keep = int(days if days is not None else getattr(settings, "MOTION_CLIP_RETENTION_DAYS", 7))
+    keep_danger = int(
+        danger_days if danger_days is not None else getattr(settings, "MOTION_CLIP_DANGER_RETENTION_DAYS", 90)
+    )
+    cap_gb = float(max_gb if max_gb is not None else getattr(settings, "MOTION_CLIP_MAX_GB", 200))
+    now = timezone.now()
     removed = 0
-    for clip in MotionClip.objects.filter(started_at__lt=cutoff).order_by("started_at")[:batch]:
-        for f in (clip.video, clip.poster, clip.end_frame):
-            if f:
-                try:
-                    f.delete(save=False)
-                except OSError:
-                    pass
-        clip.delete()
-        removed += 1
+
+    for trigger_q, days_kept in ((~Q(trigger="danger"), keep), (Q(trigger="danger"), keep_danger)):
+        if days_kept <= 0:
+            continue
+        cutoff = now - timedelta(days=days_kept)
+        for clip in MotionClip.objects.filter(trigger_q, started_at__lt=cutoff).order_by("started_at")[:batch]:
+            _delete_clip(clip)
+            removed += 1
+
+    if cap_gb > 0:
+        cap = int(cap_gb * 1024**3)
+        total = MotionClip.objects.aggregate(t=Sum("size_bytes"))["t"] or 0
+        if total > cap:
+            order = MotionClip.objects.annotate(
+                is_danger=Case(When(trigger="danger", then=1), default=0, output_field=IntegerField())
+            ).order_by("is_danger", "started_at")
+            for clip in order[:batch]:
+                if total <= cap:
+                    break
+                total -= clip.size_bytes
+                _delete_clip(clip)
+                removed += 1
     return removed
 
 

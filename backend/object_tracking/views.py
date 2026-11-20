@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 
 from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
@@ -181,8 +182,48 @@ class ObjectTrackingLiveAPIView(APIView):
         )
 
 
+def _parse_time(value: str | None) -> dt_time | None:
+    try:
+        return dt_time.fromisoformat((value or "").strip())
+    except ValueError:
+        return None
+
+
+def _filter_date_time(qs, params, field: str):
+    """date_from / date_to (YYYY-MM-DD) + time_from / time_to (HH:MM), local time.
+
+    With a date, the time sets the exact start / end moment (19 Nov 10:00 → 19 Nov 12:30).
+    Without a date, the time is a window on every day (09:00–17:00 any day; 22:00–06:00
+    crosses midnight).
+    """
+    t_from, t_to = _parse_time(params.get("time_from")), _parse_time(params.get("time_to"))
+    no_dates = not (params.get("date_from") or "").strip() and not (params.get("date_to") or "").strip()
+    if no_dates and t_from and t_to and t_from > t_to:
+        end = t_to.replace(second=59, microsecond=999999)
+        return qs.filter(Q(**{f"{field}__time__gte": t_from}) | Q(**{f"{field}__time__lte": end}))
+    for side in ("from", "to"):
+        try:
+            day = date.fromisoformat((params.get(f"date_{side}") or "").strip())
+        except ValueError:
+            day = None
+        t = _parse_time(params.get(f"time_{side}"))
+        if day is not None:
+            if t is None:
+                t = dt_time.min if side == "from" else dt_time.max
+            elif side == "to":
+                t = t.replace(second=59, microsecond=999999)
+            moment = timezone.make_aware(datetime.combine(day, t), timezone.get_current_timezone())
+            qs = qs.filter(**{f"{field}__gte" if side == "from" else f"{field}__lte": moment})
+        elif t is not None:
+            if side == "to":
+                t = t.replace(second=59, microsecond=999999)
+            qs = qs.filter(**{f"{field}__time__gte" if side == "from" else f"{field}__time__lte": t})
+    return qs
+
+
 class MotionClipListAPIView(generics.ListAPIView):
-    """Motion clips (newest first). Filters: camera, object_type, class_name, object (uuid), q, date_from, date_to."""
+    """Motion clips (newest first). Filters: camera, object_type, class_name, object (uuid), q,
+    date_from, date_to, time_from, time_to."""
 
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MotionClipSerializer
@@ -220,12 +261,7 @@ class MotionClipListAPIView(generics.ListAPIView):
                 | Q(movements__class_name__icontains=q)
                 | Q(camera__name__icontains=q)
             )
-        for name, lookup in (("date_from", "started_at__date__gte"), ("date_to", "started_at__date__lte")):
-            try:
-                day = date.fromisoformat((params.get(name) or "").strip())
-            except ValueError:
-                continue
-            qs = qs.filter(**{lookup: day})
+        qs = _filter_date_time(qs, params, "started_at")
         return qs.distinct().order_by("-started_at")
 
 
