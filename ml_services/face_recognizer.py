@@ -20,6 +20,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from live_metrics import get_live_metrics
+
 MODEL_DIR = Path(__file__).resolve().parent / "models" / "face"
 YUNET_URL = (
     "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -755,14 +757,21 @@ class KnownFaceDB:
             return aligned, feature
 
     def _extract_feature_with_meta(self, image: np.ndarray) -> dict | None:
+        m = get_live_metrics()
+        t0 = time.perf_counter()
         image = self._upscale_if_small(image)
         face = self._largest_face(image)
+        t1 = time.perf_counter()
+        m.record_stage("face.yunet_detect", t1 - t0)
         if face is None:
             return None
         passed, metrics = self._passes_face_quality(image, face)
+        t2 = time.perf_counter()
+        m.record_stage("face.quality_check", t2 - t1)
         if not passed:
             return None
         _aligned, feature = self._align_and_feature(image, face)
+        m.record_stage("face.sface_align_feature", time.perf_counter() - t2)
         return {
             "feature": feature,
             "quality": metrics["quality"],
@@ -870,11 +879,19 @@ class KnownFaceDB:
     def recognize_with_detail(self, image: np.ndarray) -> RecognitionResult:
         if image is None or image.size == 0:
             return RecognitionResult(identity="unknown", score=0.0)
+        t0 = time.perf_counter()
         with self._lock:
-            feature = self._extract_feature(image)
-            if feature is None:
-                return RecognitionResult(identity="unknown", score=0.0)
-            return self.recognize_feature(feature)
+            t1 = time.perf_counter()
+            try:
+                feature = self._extract_feature(image)
+                if feature is None:
+                    return RecognitionResult(identity="unknown", score=0.0)
+                return self.recognize_feature(feature)
+            finally:
+                # Metrics only: one call = YuNet + SFace on one crop under the shared face lock.
+                get_live_metrics().record_model(
+                    "face_recognize", latency=time.perf_counter() - t1, lock_wait=t1 - t0, kind="cpu"
+                )
 
     def recognize_track(
         self,

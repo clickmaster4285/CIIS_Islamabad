@@ -12,6 +12,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from live_metrics import get_live_metrics
+
 from camera_byte_tracker import CameraByteTrackerPool
 from face_recognizer import KnownFaceDB
 from inference_engine import (
@@ -142,7 +144,9 @@ class JourneyCameraPipeline:
             return []
 
         # predict() + local ByteTrack keeps the shared YOLO singleton stable across cameras.
+        t0 = time.perf_counter()
         with gpu_predict_lock():
+            t1 = time.perf_counter()
             results = self._coco.predict(
                 frame,
                 conf=self._conf,
@@ -152,6 +156,7 @@ class JourneyCameraPipeline:
                 classes=[0],
                 verbose=False,
             )
+        get_live_metrics().record_model("journey_coco", latency=time.perf_counter() - t1, lock_wait=t1 - t0)
         dets: list[dict[str, Any]] = []
         if not results:
             return dets
@@ -201,7 +206,9 @@ class JourneyCameraPipeline:
         if model is None:
             return []
         conf = self._weapon_conf if self._weapon is not None else self._conf
+        t0 = time.perf_counter()
         with gpu_predict_lock():
+            t1 = time.perf_counter()
             results = model.predict(
                 frame,
                 conf=conf,
@@ -210,6 +217,7 @@ class JourneyCameraPipeline:
                 device=self._device,
                 verbose=False,
             )
+        get_live_metrics().record_model("journey_weapon", latency=time.perf_counter() - t1, lock_wait=t1 - t0)
         alerts: list[dict[str, Any]] = []
         if not results:
             return alerts

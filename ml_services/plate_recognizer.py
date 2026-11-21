@@ -18,6 +18,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from live_metrics import get_live_metrics
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHTS = (
     BASE_DIR / "runs" / "train" / "stage3_finetune3" / "weights" / "best_number_plate_detection.pt"
@@ -702,8 +704,14 @@ class PlateEngine:
         ordered = [variants[-1], *variants[:-1]] if len(variants) > 1 else variants
         for variant in ordered:
             try:
+                t0 = time.perf_counter()
                 with self._ocr_lock:
+                    t1 = time.perf_counter()
                     raw = self.reader.predict(variant)
+                get_live_metrics().record_model(
+                    "plate_ocr", latency=time.perf_counter() - t1, lock_wait=t1 - t0,
+                    kind="gpu" if str(self.ocr_device).startswith("gpu") else "cpu",
+                )
             except Exception as exc:
                 print(f"[plate] PaddleOCR predict failed: {exc}")
                 continue
@@ -1000,7 +1008,9 @@ class PlateEngine:
         detections: list[dict[str, Any]] = []
         need_vehicle = self.require_vehicle
 
+        t0 = time.perf_counter()
         with self._infer_lock:
+            t1 = time.perf_counter()
             results = self.detector.predict(
                 frame,
                 conf=det_conf_thresh,
@@ -1008,6 +1018,7 @@ class PlateEngine:
                 device=self.device,
                 verbose=False,
             )
+        get_live_metrics().record_model("plate_yolo", latency=time.perf_counter() - t1, lock_wait=t1 - t0)
 
         for result in results:
             if result.boxes is None:

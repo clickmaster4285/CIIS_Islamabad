@@ -395,6 +395,16 @@ def live_timing(reset: bool = False):
     return _live.timing(reset=reset)
 
 
+@app.get("/live/metrics")
+def live_metrics(reset: bool = False, cameras: bool = True):
+    """Per-camera / per-model inference metrics, SLA coverage, GPU/CPU/RAM.
+
+    reset=true clears the rolling counters after returning them (start of a load-test step).
+    cameras=false drops the per-camera list (summary + models + system only).
+    """
+    return _live.metrics(reset=reset, include_cameras=cameras)
+
+
 @app.get("/live/motion/status")
 def live_motion_status():
     return _live.motion_status()

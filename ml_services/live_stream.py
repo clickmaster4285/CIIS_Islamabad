@@ -67,10 +67,11 @@ from inference_engine import (
     resolve_smoke_weights_path,
     resolve_weapon_weights_path,
 )
+from live_metrics import get_live_metrics
 from motion_clips import MotionClipRecorder
 from motion_state import MotionRegistry
 from pose_estimator import POSE_CONF, POSE_IMGSZ, attach_poses, get_pose_model, is_person, parse_pose_result
-from object_identity import get_object_identity_registry
+from object_identity import face_bbox_key, face_result_from_detection, get_object_identity_registry
 from plate_recognizer import PlateEngine, get_plate_engine
 
 
@@ -312,6 +313,7 @@ class CameraStream:
         self.lock = threading.Lock()
         self.frame: np.ndarray | None = None
         self.frame_seq = 0
+        self.frame_ts = 0.0  # wall time the newest frame was stored (metrics: frame age)
         self.running = True
         self.connected = False
         self.cap: cv2.VideoCapture | None = None
@@ -398,6 +400,7 @@ class CameraStream:
                 with self.lock:
                     self.frame = frame
                     self.frame_seq += 1
+                    self.frame_ts = time.time()
                     self.connected = True
                 self._fail_streak = 0
                 continue
@@ -426,6 +429,13 @@ class CameraStream:
                 return None, self.frame_seq
             return self.frame.copy(), self.frame_seq
 
+    def get_latest_meta(self) -> tuple[np.ndarray | None, int, float]:
+        """get_latest() plus the wall time that frame was stored, read under one lock."""
+        with self.lock:
+            if self.frame is None:
+                return None, self.frame_seq, 0.0
+            return self.frame.copy(), self.frame_seq, self.frame_ts
+
     def stop(self):
         self.running = False
         self.thread.join(timeout=2.0)
@@ -449,6 +459,7 @@ class FfmpegCameraStream:
         self.lock = threading.Lock()
         self.frame: np.ndarray | None = None
         self.frame_seq = 0
+        self.frame_ts = 0.0  # wall time the newest frame was stored (metrics: frame age)
         self.running = True
         self.connected = False
         self._proc: subprocess.Popen | None = None
@@ -581,7 +592,9 @@ class FfmpegCameraStream:
                 pass
 
     def _decode_mjpeg_buffer(self, buffer: bytearray) -> np.ndarray | None:
+        metrics = get_live_metrics()
         while True:
+            t0 = time.perf_counter()
             start = buffer.find(b"\xff\xd8")
             end = buffer.find(b"\xff\xd9")
             if start == -1 or end == -1 or end < start:
@@ -589,7 +602,10 @@ class FfmpegCameraStream:
             jpg = bytes(buffer[start : end + 2])
             del buffer[: end + 2]
             arr = np.frombuffer(jpg, dtype=np.uint8)
+            t1 = time.perf_counter()
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            metrics.record_stage("acquire.mjpeg_scan", t1 - t0)
+            metrics.record_stage("acquire.mjpeg_imdecode", time.perf_counter() - t1)
             if frame is not None and CameraStream._valid_frame(frame):
                 return frame
             if not buffer:
@@ -680,6 +696,7 @@ class FfmpegCameraStream:
                     with self.lock:
                         self.frame = frame
                         self.frame_seq += 1
+                        self.frame_ts = time.time()
                         self.connected = True
                     self._fail_streak = 0
 
@@ -704,6 +721,13 @@ class FfmpegCameraStream:
             if self.frame is None:
                 return None, self.frame_seq
             return self.frame.copy(), self.frame_seq
+
+    def get_latest_meta(self) -> tuple[np.ndarray | None, int, float]:
+        """get_latest() plus the wall time that frame was stored, read under one lock."""
+        with self.lock:
+            if self.frame is None:
+                return None, self.frame_seq, 0.0
+            return self.frame.copy(), self.frame_seq, self.frame_ts
 
     def stop(self) -> None:
         self.running = False
@@ -1072,6 +1096,7 @@ class LiveStreamManager:
         self._object_identity = get_object_identity_registry()
         self._motion = MotionRegistry()
         self._timing = _StageTimer()
+        self._metrics = get_live_metrics()
         self._clips = MotionClipRecorder(
             ffmpeg_path=_resolve_ffmpeg_path,
             frame_sources=lambda: {key: s.stream for key, s in list(self._sessions.items())},
@@ -1123,6 +1148,9 @@ class LiveStreamManager:
         # object detection + pose (what movement needs) run on every frame. Between runs the
         # last alarm-model boxes are reused so overlays and alerts do not flicker.
         self._specialist_every = max(1, _env_int("ML_SPECIALIST_EVERY_N", 3))
+        # Stage 2.1: reuse face pass 1 (coco parse) in the identity step instead of running
+        # YuNet + SFace again on the same box inside the shared registry lock. Off = old path.
+        self._face_dedupe = os.getenv("ML_FACE_DEDUPE", "false").strip().lower() in ("1", "true", "yes")
         self._specialist_count: dict[str, int] = {}
         self._last_specialist: dict[str, tuple[list, list, list]] = {}
         # 0 = native 4K passthrough for browser preview (override via ML_LIVE_MAX_WIDTH/HEIGHT).
@@ -1206,6 +1234,7 @@ class LiveStreamManager:
         self._last_plate_dets.pop(key, None)
         self._specialist_count.pop(key, None)
         self._last_specialist.pop(key, None)
+        self._metrics.forget_camera(key)
         if self._plate_engine is not None:
             try:
                 self._plate_engine.clear_camera_tracks(key)
@@ -1496,6 +1525,7 @@ class LiveStreamManager:
                 self._render_thread = threading.Thread(target=self._render_loop, daemon=True, name="live-render")
                 self._render_thread.start()
                 self._clips.start()
+                self._metrics.start_gil_probe()
                 max_label = (
                     "native"
                     if self._max_width <= 0 and self._max_height <= 0
@@ -1749,7 +1779,14 @@ class LiveStreamManager:
         print(f"[live] Bound shared session: {key} ({tag})")
 
     def _predict(
-        self, model, frame: np.ndarray, *, min_conf: float | None = None, classes=None, imgsz: int | None = None
+        self,
+        model,
+        frame: np.ndarray,
+        *,
+        min_conf: float | None = None,
+        classes=None,
+        imgsz: int | None = None,
+        tag: str = "yolo",
     ):
         use_half = self._device != "cpu"
         conf = max(self._conf, min_conf) if min_conf is not None else self._conf
@@ -1768,8 +1805,21 @@ class LiveStreamManager:
         with gpu_predict_lock():
             t1 = time.perf_counter()
             result = model.predict(frame, **kwargs)
+        t2 = time.perf_counter()
         self._timing.add("gpu_lock_wait", t1 - t0)
-        self._timing.add("yolo_predict", time.perf_counter() - t1)
+        self._timing.add("yolo_predict", t2 - t1)
+        self._metrics.record_model(tag, images=1, latency=t2 - t1, lock_wait=t1 - t0)
+        try:
+            sp = getattr(result[0], "speed", None) or {}
+            pre = float(sp.get("preprocess") or 0.0) / 1000.0
+            inf = float(sp.get("inference") or 0.0) / 1000.0
+            post = float(sp.get("postprocess") or 0.0) / 1000.0
+            self._metrics.record_stage(f"yolo.{tag}.1_preprocess", pre)
+            self._metrics.record_stage(f"yolo.{tag}.2_inference", inf)
+            self._metrics.record_stage(f"yolo.{tag}.3_postprocess", post)
+            self._metrics.record_stage(f"yolo.{tag}.4_other_overhead", max(0.0, (t2 - t1) - pre - inf - post))
+        except Exception:
+            pass
         return result
 
     def _clip_pose_batch(self, images: list[np.ndarray]) -> list[list[dict[str, Any]]]:
@@ -1789,6 +1839,9 @@ class LiveStreamManager:
             )
         self._timing.add("gpu_lock_wait", t1 - t0)
         self._timing.add("clip_pose", time.perf_counter() - t1)
+        self._metrics.record_model(
+            "clip_pose", images=len(images), latency=time.perf_counter() - t1, lock_wait=t1 - t0
+        )
         return [parse_pose_result(r) for r in results]
 
     def _clip_vehicle_batch(self, images: list[np.ndarray]) -> list[list[dict[str, Any]]]:
@@ -1810,6 +1863,9 @@ class LiveStreamManager:
             )
         self._timing.add("gpu_lock_wait", t1 - t0)
         self._timing.add("clip_vehicles", time.perf_counter() - t1)
+        self._metrics.record_model(
+            "clip_vehicle", images=len(images), latency=time.perf_counter() - t1, lock_wait=t1 - t0
+        )
         out: list[list[dict[str, Any]]] = []
         for img, r in zip(images, results):
             dets = []
@@ -1915,12 +1971,15 @@ class LiveStreamManager:
         camera_key: str = "",
         run_plates: bool = False,
     ) -> list[dict[str, Any]]:
+        t_prep = time.perf_counter()
         infer_frame, sx, sy = self._prepare_frame(frame)
+        self._metrics.record_stage("pre.prepare_frame_resize", time.perf_counter() - t_prep)
         pipeline = self._purpose_pipeline(camera_key)
         # Caller may force plates off; purpose may force on
         do_plates = bool(run_plates and pipeline.get("plates"))
 
         coco_detections: list[dict[str, Any]] = []
+        face_results: dict[tuple[int, int, int, int], tuple[str, float, list[float]]] = {}
         custom_detections: list[dict[str, Any]] = []
         smoke_detections: list[dict[str, Any]] = []
         weapon_detections: list[dict[str, Any]] = []
@@ -1931,6 +1990,7 @@ class LiveStreamManager:
             nonlocal mark
             now_pc = time.perf_counter()
             self._timing.add(name, now_pc - mark)
+            self._metrics.record_stage(f"step.{name}", now_pc - mark)
             mark = now_pc
 
         if pipeline.get("coco") and self._coco_model is not None:
@@ -1940,7 +2000,8 @@ class LiveStreamManager:
             else:
                 class_filter = frozenset(int(c) for c in coco_classes)
             if class_filter:
-                results = self._predict(self._coco_model, infer_frame, classes=class_filter)
+                results = self._predict(self._coco_model, infer_frame, classes=class_filter, tag="coco")
+                t_parse = time.perf_counter()
                 coco_detections = parse_yolo_result(
                     frame,
                     results[0],
@@ -1951,12 +2012,25 @@ class LiveStreamManager:
                     model_tag="coco",
                     face_db=self._face_db if pipeline.get("recognize_faces") else None,
                 )
+                self._metrics.record_stage(
+                    "post.coco_parse_incl_face", time.perf_counter() - t_parse
+                )
+                if self._face_dedupe and pipeline.get("recognize_faces") and self._face_db is not None:
+                    # parse_yolo_result ran label_detection_detail on every coco person/face box.
+                    for d in coco_detections:
+                        cname = str(d.get("class_name") or "").lower()
+                        if int(d.get("class_id", -1)) in (0, 80) or cname in ("person", "face"):
+                            bkey = face_bbox_key(d.get("bbox") or [])
+                            if bkey is not None:
+                                face_results[bkey] = face_result_from_detection(d)
             _step("coco_and_faces")
 
             # Pose (17 body points) only when this frame has people; other objects have no pose
             if self._pose_model is not None and any(is_person(d) for d in coco_detections):
                 try:
-                    pose_results = self._predict(self._pose_model, infer_frame, min_conf=POSE_CONF, imgsz=POSE_IMGSZ)
+                    pose_results = self._predict(
+                        self._pose_model, infer_frame, min_conf=POSE_CONF, imgsz=POSE_IMGSZ, tag="pose"
+                    )
                     attach_poses(coco_detections, parse_pose_result(pose_results[0], sx=sx, sy=sy))
                 except Exception as exc:
                     print(f"[pose] Pose error [{camera_key}]: {exc}")
@@ -1979,6 +2053,7 @@ class LiveStreamManager:
                 self._custom_model,
                 infer_frame,
                 classes=custom_ids or None,
+                tag="custom",
             )
             custom_detections = keep_custom_classes_only(
                 parse_yolo_result(
@@ -1995,7 +2070,7 @@ class LiveStreamManager:
             _step("custom_model")
 
         if run_specialists and pipeline.get("smoke") and self._smoke_model is not None:
-            results = self._predict(self._smoke_model, infer_frame, min_conf=SMOKE_FIRE_MIN_CONF)
+            results = self._predict(self._smoke_model, infer_frame, min_conf=SMOKE_FIRE_MIN_CONF, tag="smoke")
             smoke_detections = parse_yolo_result(
                 frame,
                 results[0],
@@ -2009,7 +2084,7 @@ class LiveStreamManager:
             _step("smoke_model")
 
         if run_specialists and pipeline.get("weapon") and self._weapon_model is not None:
-            results = self._predict(self._weapon_model, infer_frame, min_conf=WEAPON_MIN_CONF)
+            results = self._predict(self._weapon_model, infer_frame, min_conf=WEAPON_MIN_CONF, tag="weapon")
             weapon_detections = parse_yolo_result(
                 frame,
                 results[0],
@@ -2046,6 +2121,7 @@ class LiveStreamManager:
                 self._plate_frame_counters[camera_key] = counter
             # Plate YOLO every N infer cycles; PaddleOCR PP-OCRv5 runs inside PlateEngine.
             if counter % self._plate_ocr_every == 0:
+                t_plate = time.perf_counter()
                 try:
                     plate_dets = self._plate_engine.detect_and_read(
                         frame,
@@ -2058,6 +2134,9 @@ class LiveStreamManager:
                 except Exception as exc:
                     print(f"[live] Plate OCR error [{camera_key}]: {exc}")
                     detections.extend(self._last_plate_dets.get(camera_key, []))
+                self._metrics.record_model(
+                    "plate_total", images=1, latency=time.perf_counter() - t_plate, kind="mixed"
+                )
             else:
                 # Keep last plate boxes on screen between detect cycles
                 detections.extend(self._last_plate_dets.get(camera_key, []))
@@ -2087,6 +2166,7 @@ class LiveStreamManager:
             frame,
             detections,
             face_db=self._face_db,
+            face_results=face_results or None,
         )
         _step("identity_reid")
         detections = assign_overlay_ids(detections)
@@ -2122,6 +2202,44 @@ class LiveStreamManager:
 
     def timing(self, reset: bool = False) -> dict[str, Any]:
         return self._timing.snapshot(reset=reset)
+
+    def sla_sec(self) -> float:
+        """Max allowed time between inferences for a healthy camera (ML_LIVE_SLA_SEC)."""
+        try:
+            return max(0.1, float(os.getenv("ML_LIVE_SLA_SEC", "") or max(1.0, 2.0 * self._infer_interval)))
+        except (TypeError, ValueError):
+            return max(1.0, 2.0 * self._infer_interval)
+
+    def metrics(self, reset: bool = False, include_cameras: bool = True) -> dict[str, Any]:
+        """Per-camera / per-model / system inference metrics (observation only)."""
+        with self._lock:
+            sessions = dict(self._sessions)
+            purposes = {k: self._purposes_for(k) for k in sessions}
+        meta = {
+            key: {"connected": bool(getattr(s.stream, "connected", False)), "purposes": purposes.get(key, [])}
+            for key, s in sessions.items()
+        }
+        snap = self._metrics.snapshot(
+            cameras=meta,
+            sla_sec=self.sla_sec(),
+            target_interval_sec=self._infer_interval,
+        )
+        snap["config"] = {
+            "running": self._running,
+            "device": str(self._device),
+            "infer_workers": self._infer_workers,
+            "infer_interval_sec": self._infer_interval,
+            "specialist_every_n": self._specialist_every,
+            "plate_ocr_every": self._plate_ocr_every,
+            "imgsz": self._imgsz,
+            "stream_fps": self._stream_fps,
+            "offline_pause": self._offline_pause,
+        }
+        if not include_cameras:
+            snap.pop("cameras", None)
+        if reset:
+            self._metrics.reset()
+        return snap
 
     def motion_status(self) -> dict[str, Any]:
         return {**self._motion.status(), "clips": self._clips.status()}
@@ -2172,25 +2290,41 @@ class LiveStreamManager:
             if (now - session.last_infer_at) < self._infer_interval:
                 return
 
+        frame_ts = 0.0
+        meta_getter = getattr(session.stream, "get_latest_meta", None)
         getter = getattr(session.stream, "get_latest", None)
-        if callable(getter):
+        if callable(meta_getter):
+            t_get = time.perf_counter()
+            frame, seq, frame_ts = meta_getter()
+            self._metrics.record_stage("acquire.latest_frame_copy", time.perf_counter() - t_get)
+        elif callable(getter):
             frame, seq = getter()
         else:
             frame = session.stream.get_frame()
             seq = session.infer_seq_done + 1 if frame is not None else session.infer_seq_done
         if frame is None:
+            self._metrics.record_camera_skip(session.ip, "no_frame")
             return
 
+        prev_seq = 0
         with session.infer_lock:
             if session.infer_busy:
                 return
-            if seq <= session.infer_seq_done:
-                return
             if (now - session.last_infer_at) < self._infer_interval:
                 return
-            session.infer_busy = True
-            session.last_infer_at = now
+            stalled = seq <= session.infer_seq_done
+            if not stalled:
+                session.infer_busy = True
+                session.last_infer_at = now
+                prev_seq = session.infer_seq_done
+        if stalled:
+            # Due for inference but the reader has no newer frame (stream frozen / slow).
+            self._metrics.record_camera_skip(session.ip, "no_new_frame")
+            return
 
+        ok = False
+        err = ""
+        started_wall = time.time()
         try:
             t_infer = time.perf_counter()
             detections = self._infer_frame(
@@ -2203,16 +2337,38 @@ class LiveStreamManager:
             for det in detections:
                 det["frame_width"] = int(fw)
                 det["frame_height"] = int(fh)
+            t_m = time.perf_counter()
             motion_events = self._motion.update(session.ip, detections, now)
+            t_p = time.perf_counter()
             self._publish_results(session.ip, detections, frame=frame)
+            t_c = time.perf_counter()
             self._clips.submit(session.ip, detections, motion_events, now)
+            t_e = time.perf_counter()
+            self._metrics.record_stage("event.motion_update", t_p - t_m)
+            self._metrics.record_stage("event.publish_incl_evidence_jpeg", t_c - t_p)
+            self._metrics.record_stage("event.clip_submit", t_e - t_c)
             with session.infer_lock:
                 session.infer_seq_done = seq
+            ok = True
         except Exception as exc:
+            err = str(exc)
             print(f"[live] Inference error [{session.ip}]: {exc}")
         finally:
             with session.infer_lock:
                 session.infer_busy = False
+            try:
+                self._metrics.record_camera_inference(
+                    session.ip,
+                    started_at=started_wall,
+                    finished_at=time.time(),
+                    frame_ts=frame_ts,
+                    seq=seq,
+                    prev_seq=prev_seq,
+                    ok=ok,
+                    error=err,
+                )
+            except Exception:
+                pass
 
     def _infer_shard_loop(self, worker_id: int) -> None:
         """
@@ -2291,6 +2447,7 @@ class LiveStreamManager:
             with self._lock:
                 sessions = list(self._sessions.values())
             for session in sessions:
+                t_g = time.perf_counter()
                 live = session.stream.get_frame()
                 if live is None:
                     continue
@@ -2298,10 +2455,17 @@ class LiveStreamManager:
                     boxes = list(self._detections.get(session.ip, []))
                 if self._osd_enrolled_staff_only:
                     boxes = filter_enrolled_staff_detections(boxes)
+                t_d = time.perf_counter()
                 # draw_detections copies when there are boxes; otherwise just resize+encode.
                 framed = draw_detections(live, boxes) if boxes else live
+                t_e = time.perf_counter()
                 jpeg = encode_jpeg(self._limit_size(framed), self._jpeg_quality)
+                t_s = time.perf_counter()
                 session.set_frame(jpeg, boxes)
+                self._metrics.record_stage("render.frame_copy", t_d - t_g)
+                self._metrics.record_stage("render.draw", t_e - t_d)
+                self._metrics.record_stage("render.jpeg_encode", t_s - t_e)
+            self._metrics.record_stage("render.loop_all_cams", time.time() - loop_start)
             elapsed = time.time() - loop_start
             wait = self._frame_interval - elapsed
             if wait > 0:

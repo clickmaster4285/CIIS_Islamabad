@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 
+from live_metrics import get_live_metrics
 from reid_extractor import extract_reid_embedding, extract_reid_embeddings  # noqa: F401
 
 VEHICLE_CLASSES = frozenset(
@@ -132,6 +133,26 @@ def _normalize_face_key(identity: str | None) -> str:
     if low == "unknown":
         return ""
     return f"face:{low}"
+
+
+def face_bbox_key(bbox: Any) -> tuple[int, int, int, int] | None:
+    """Exact-box key for reusing a face result within one frame (ByteTrack keeps boxes)."""
+    try:
+        return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def face_result_from_detection(det: dict[str, Any]) -> tuple[str, float, list[float]]:
+    """
+    (face_key, score, face_embedding) from a detection that already went through
+    KnownFaceDB.label_detection_detail in parse_yolo_result. Mirrors what
+    _resolve_face_identity returns for the same crop, without recomputing it.
+    """
+    identity = str(det.get("label") or "")
+    score = float(det.get("face_match_score") or 0.0)
+    emb = det.get("face_embedding") or []
+    return _normalize_face_key(identity), score, list(emb) if isinstance(emb, list) else []
 
 
 def _resolve_face_identity(face_db: Any, frame: np.ndarray, bbox: list, class_name: str) -> tuple[str, float, list[float]]:
@@ -322,8 +343,13 @@ class ObjectIdentityRegistry:
         frame: np.ndarray,
         detections: list[dict[str, Any]],
         face_db: Any = None,
+        face_results: dict[tuple[int, int, int, int], tuple[str, float, list[float]]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Add reid_embedding, face keys, object_type, global_object_id."""
+        """Add reid_embedding, face keys, object_type, global_object_id.
+
+        face_results: {bbox: (face_key, score, embedding)} already computed for this frame
+        (face pass 1 in parse_yolo_result). Those boxes skip face recognition here.
+        """
         now = time.time()
         cam = (camera_key or "").strip()
         out: list[dict[str, Any]] = []
@@ -334,10 +360,14 @@ class ObjectIdentityRegistry:
         # it made every camera wait).
         ident = [d for d in (detections or []) if is_identity_detection(d)]
         crops = [_crop(frame, list(d.get("bbox") or [])) for d in ident]
+        t_reid = time.perf_counter()
         codes = extract_reid_embeddings(crops)
+        get_live_metrics().record_stage("track.reid_osnet_batch", time.perf_counter() - t_reid)
         embedding_for = {id(d): e for d, e in zip(ident, codes)}
 
+        t_wait = time.perf_counter()
         with self._lock:
+            t_hold = time.perf_counter()
             self._prune(now)
 
             for det in detections or []:
@@ -361,9 +391,21 @@ class ObjectIdentityRegistry:
                 face_key = ""
                 face_score = 0.0
                 if object_type == "person":
-                    face_key, face_score, face_emb = _resolve_face_identity(
-                        face_db, frame, bbox_list, class_name
-                    )
+                    reused = None
+                    if face_results:
+                        bkey = face_bbox_key(bbox_list)
+                        reused = face_results.get(bkey) if bkey is not None else None
+                    if reused is not None:
+                        face_key, face_score, face_emb = reused
+                        get_live_metrics().record_stage("face.reused_from_pass1", 0.0)
+                    else:
+                        t_face = time.perf_counter()
+                        face_key, face_score, face_emb = _resolve_face_identity(
+                            face_db, frame, bbox_list, class_name
+                        )
+                        get_live_metrics().record_stage(
+                            "face.call_from_identity_lock", time.perf_counter() - t_face
+                        )
                     if face_key:
                         enriched["face_identity_key"] = face_key
                         enriched["face_match_score"] = face_score
@@ -458,7 +500,11 @@ class ObjectIdentityRegistry:
                 out.append(enriched)
 
             self._close_inactive_tracks(cam, active_ids, now)
+            held = time.perf_counter() - t_hold
 
+        get_live_metrics().record_model(
+            "identity_registry", images=len(out), latency=held, lock_wait=t_hold - t_wait, kind="cpu"
+        )
         return out
 
 

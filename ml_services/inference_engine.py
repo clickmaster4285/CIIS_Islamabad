@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+
+from live_metrics import get_live_metrics
 from pathlib import Path
 from typing import Any
 
@@ -881,7 +884,9 @@ def parse_yolo_result(
         face_meta: dict[str, Any] | None = None
 
         if not smoke_model and not weapon_model and recognize_faces and face_db is not None:
+            _t_face = time.perf_counter()
             face_meta = face_db.label_detection_detail(frame, cls_id, yolo_name, tuple(bbox))
+            get_live_metrics().record_stage("face.call_from_coco_parse", time.perf_counter() - _t_face)
             label = face_meta["label"]
         elif not smoke_model and not weapon_model and cls_id == 0 and not recognize_faces:
             label = "unknown"
