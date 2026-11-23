@@ -6,9 +6,7 @@ import {
   PieChart, 
   LineChart, 
   TrendingUp, 
-  AlertTriangle, 
   Users, 
-  GitBranch, 
   Download, 
   Calendar, 
   Filter, 
@@ -22,9 +20,6 @@ import {
   Activity,
   Shield,
   Car,
-  Thermometer,
-  Camera,
-  Bell,
   Zap
 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -36,7 +31,6 @@ import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
 import { Progress } from "@/components/ui/progress"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import {
   DropdownMenu,
   DropdownMenuContent,

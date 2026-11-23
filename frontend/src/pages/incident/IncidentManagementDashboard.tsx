@@ -24,7 +24,6 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ROUTES, getIncidentDetailPath } from "@/routes/config"
-import { useToast } from "@/hooks/use-toast"
 
 // Mock data - replace with actual API calls
 interface Incident {

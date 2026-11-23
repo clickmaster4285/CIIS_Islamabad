@@ -1,8 +1,14 @@
-"""Silent-Face MiniFASNet liveness. Missing weights do not block attendance."""
+"""Silent-Face MiniFASNet liveness.
+
+Missing weights are logged as an ERROR. CCTV keeps running on the moire check alone, but phone selfie punches
+and the identify API refuse to mark attendance without a real liveness model unless
+RECOGNITION_REQUIRE_LIVENESS is False (see liveness_required()).
+"""
 
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import cv2
@@ -15,10 +21,16 @@ WEBCAM_LIVENESS_THRESHOLD = 0.50
 CCTV_LIVENESS_THRESHOLD = 0.40
 MOIRE_FAIL = 0.62
 
+# (name, crop scale, accepted file names). The V1SE weight ships as "4_0_0_..." in some releases.
 _MODELS = (
-    ("MiniFASNetV2", 2.7, "2.7_80x80_MiniFASNetV2.onnx"),
-    ("MiniFASNetV1SE", 4.0, "4.0_80x80_MiniFASNetV1SE.onnx"),
+    ("MiniFASNetV2", 2.7, ("2.7_80x80_MiniFASNetV2.onnx", "2_7_80x80_MiniFASNetV2.onnx")),
+    ("MiniFASNetV1SE", 4.0, ("4.0_80x80_MiniFASNetV1SE.onnx", "4_0_0_80x80_MiniFASNetV1SE.onnx")),
 )
+
+
+def liveness_required() -> bool:
+    """Fail closed: refuse a selfie / identify punch when no liveness model could run."""
+    return bool(getattr(settings, "RECOGNITION_REQUIRE_LIVENESS", True))
 
 
 def _weight_dirs() -> list[Path]:
@@ -32,11 +44,14 @@ def _weight_dirs() -> list[Path]:
     return dirs
 
 
-def _find_model(filename: str) -> Path | None:
+def _find_model(filenames) -> Path | None:
+    if isinstance(filenames, str):
+        filenames = (filenames,)
     for folder in _weight_dirs():
-        path = folder / filename
-        if path.is_file():
-            return path
+        for filename in filenames:
+            path = folder / filename
+            if path.is_file():
+                return path
     return None
 
 
@@ -47,26 +62,44 @@ class AntiSpoofChecker:
         self._sessions: list[tuple[str, float, object]] = []
         self._loaded = False
         self._missing_logged = False
+        self._load_lock = threading.Lock()
 
     def _ensure(self) -> bool:
         if self._loaded:
             return bool(self._sessions)
-        self._loaded = True
+        with self._load_lock:
+            if self._loaded:
+                return bool(self._sessions)
+            ok = self._load()
+            self._loaded = True
+            return ok
+
+    def _load(self) -> bool:
         try:
             import onnxruntime as ort
         except ImportError:
-            logger.warning("Anti-spoof skipped: onnxruntime is not installed")
+            logger.error("Anti-spoof unavailable: onnxruntime is not installed")
             return False
-        for name, scale, filename in _MODELS:
-            path = _find_model(filename)
+        missing = []
+        for name, scale, filenames in _MODELS:
+            path = _find_model(filenames)
             if path is None:
+                missing.append(f"{name} ({' or '.join(filenames)})")
                 continue
-            session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+            try:
+                session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+            except Exception:
+                logger.exception("Anti-spoof model %s failed to load from %s", name, path)
+                missing.append(name)
+                continue
             self._sessions.append((name, scale, session))
         if len(self._sessions) < 2:
             if not self._missing_logged:
-                logger.warning(
-                    "Anti-spoof weights not found (MiniFASNetV2 / MiniFASNetV1SE). Liveness is skipped."
+                logger.error(
+                    "Anti-spoof weights missing: %s (searched %s). Liveness cannot run; selfie/identify "
+                    "punches are refused while RECOGNITION_REQUIRE_LIVENESS is on.",
+                    ", ".join(missing) or "unknown",
+                    [str(d) for d in _weight_dirs()],
                 )
                 self._missing_logged = True
             self._sessions = []
@@ -109,6 +142,9 @@ class AntiSpoofChecker:
         if not scores:
             return 1.0
         return float(sum(scores) / len(scores))
+
+    def available(self) -> bool:
+        return self._ensure()
 
     def evaluate(self, image: np.ndarray, face, *, source: str = "webcam") -> dict:
         from recognition.services.preprocess import screen_moire_score

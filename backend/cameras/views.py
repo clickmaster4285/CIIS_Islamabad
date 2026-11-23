@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import StreamingHttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -20,13 +24,22 @@ from ml.client import (
     ml_detect_image,
     ml_live_detections_for_camera,
     ml_service_enabled,
+    public_error_message,
 )
 
-from .clip_capture import schedule_detection_clip
-from .detection_utils import filter_detections_for_camera, resolve_staff_identity
-from .detection_utils import save_detection_batch
+from .access import (
+    acquire_preview_slot,
+    camera_location_scope,
+    camera_scope_q,
+    detection_scope_q,
+    is_camera_admin,
+    release_preview_slot,
+    site_in_scope,
+    site_scope_q,
+)
+from .detection_utils import filter_detections_for_camera, save_detection_batch, save_manual_detections
 from .search_utils import apply_detection_search
-from .models import Camera, CameraPurpose, ClipStatus, DetectionEvent, Nvr, Site
+from .models import Camera, ClipStatus, DetectionEvent, Nvr, Site
 from .rtsp_utils import build_rtsp_url_for_preview
 from .serializers import (
     BulkCameraCreateSerializer,
@@ -84,6 +97,75 @@ def _capture_stream_url(camera: Camera) -> str | None:
     return camera.effective_stream_url() or None
 
 
+logger = logging.getLogger(__name__)
+
+_DELETE_BATCH_SIZE = 500
+
+
+def _ml_error_response(exc: MLServiceError, what: str) -> Response:
+    """Generic client message; the (already redacted) detail goes to the server log only."""
+    logger.warning("%s failed: %s", what, exc)
+    return Response(
+        {"detail": public_error_message(exc)},
+        status=exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _int_param(params, name: str) -> int | None:
+    """Optional integer query/body param; a non-integer value is a 400, not a silent 500."""
+    raw = params.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise ValidationError({name: "Must be an integer."}) from None
+
+
+def _delete_events_batched(qs) -> int:
+    """Delete detection events in chunks of 500 and remove their snapshot / video files.
+
+    Files still referenced by object-tracking snapshots are kept (those rows copy the path).
+    """
+    from django.core.files.storage import default_storage
+
+    deleted = 0
+    while True:
+        rows = list(qs.order_by("pk").values_list("pk", "clip", "video")[:_DELETE_BATCH_SIZE])
+        if not rows:
+            break
+        ids = [r[0] for r in rows]
+        files = {name for _pk, clip, video in rows for name in (clip, video) if name}
+        _count, per_model = DetectionEvent.objects.filter(pk__in=ids).delete()
+        deleted += int(per_model.get(DetectionEvent._meta.label, 0))
+        if files:
+            try:
+                from object_tracking.models import GlobalObject, ObjectVisit
+
+                files -= set(
+                    GlobalObject.objects.filter(snapshot_path__in=files).values_list("snapshot_path", flat=True)
+                )
+                files -= set(
+                    ObjectVisit.objects.filter(snapshot_path__in=files).values_list("snapshot_path", flat=True)
+                )
+            except Exception:
+                logger.debug("Snapshot reference check skipped", exc_info=True)
+            for name in files:
+                try:
+                    default_storage.delete(name)
+                except Exception:
+                    logger.debug("Could not delete detection media %s", name, exc_info=True)
+        if len(rows) < _DELETE_BATCH_SIZE:
+            break
+    return deleted
+
+
+def _scoped_site_check(user, site) -> None:
+    scope = camera_location_scope(user)
+    if scope and not site_in_scope(site, scope):
+        raise PermissionDenied("You can only manage NVRs and cameras of your own site.")
+
+
 class SiteViewSet(viewsets.ModelViewSet):
     queryset = Site.objects.all()
     serializer_class = SiteSerializer
@@ -92,6 +174,30 @@ class SiteViewSet(viewsets.ModelViewSet):
     filterset_fields = ["is_active"]
     search_fields = ["code", "name"]
     ordering_fields = ["name", "code", "created_at"]
+
+    def get_queryset(self):
+        qs = super().get_queryset().annotate(
+            _nvr_count=Count("nvrs", filter=Q(nvrs__is_active=True), distinct=True),
+            _camera_count=Count("nvrs__cameras", filter=Q(nvrs__cameras__is_active=True), distinct=True),
+        )
+        return qs.filter(site_scope_q(camera_location_scope(self.request.user)))
+
+    def _check_scope(self, serializer):
+        data = serializer.validated_data
+        instance = serializer.instance
+        candidate = SimpleNamespace(
+            code=data.get("code", getattr(instance, "code", "")),
+            name=data.get("name", getattr(instance, "name", "")),
+        )
+        _scoped_site_check(self.request.user, candidate)
+
+    def perform_create(self, serializer):
+        self._check_scope(serializer)
+        serializer.save()
+
+    def perform_update(self, serializer):
+        self._check_scope(serializer)
+        serializer.save()
 
 
 class NvrViewSet(viewsets.ModelViewSet):
@@ -102,6 +208,21 @@ class NvrViewSet(viewsets.ModelViewSet):
     filterset_fields = ["site", "brand", "is_active"]
     search_fields = ["name", "ip_address", "site__code", "site__name"]
     ordering_fields = ["name", "ip_address", "created_at"]
+
+    def get_queryset(self):
+        qs = super().get_queryset().annotate(
+            _camera_count=Count("cameras", filter=Q(cameras__is_active=True), distinct=True)
+        )
+        return qs.filter(site_scope_q(camera_location_scope(self.request.user), "site__"))
+
+    def perform_create(self, serializer):
+        _scoped_site_check(self.request.user, serializer.validated_data.get("site"))
+        serializer.save()
+
+    def perform_update(self, serializer):
+        site = serializer.validated_data.get("site", serializer.instance.site)
+        _scoped_site_check(self.request.user, site)
+        serializer.save()
 
     @action(detail=False, methods=["get"], url_path="brands")
     def brands(self, request):
@@ -156,7 +277,7 @@ class CameraViewSet(viewsets.ModelViewSet):
     ordering_fields = ["name", "channel", "location", "created_at"]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().filter(camera_scope_q(camera_location_scope(self.request.user)))
         allocated = str(self.request.query_params.get("allocated", "")).strip().lower()
         if allocated in ("1", "true", "yes"):
             qs = qs.filter(ml_server_id__isnull=False)
@@ -170,6 +291,8 @@ class CameraViewSet(viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        nvr = serializer.validated_data.get("nvr")
+        _scoped_site_check(request.user, getattr(nvr, "site", None))
         cam = serializer.save()
         return Response(CameraSerializer(cam).data, status=status.HTTP_201_CREATED)
 
@@ -178,6 +301,8 @@ class CameraViewSet(viewsets.ModelViewSet):
         cam = self.get_object()
         serializer = self.get_serializer(cam, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
+        nvr = serializer.validated_data.get("nvr", cam.nvr)
+        _scoped_site_check(request.user, getattr(nvr, "site", None))
         cam = serializer.save()
         return Response(CameraSerializer(cam).data)
 
@@ -203,25 +328,24 @@ class CameraViewSet(viewsets.ModelViewSet):
             .filter(is_deleted=False)
             .order_by("-created_at", "-id")
         )
+        qs = qs.filter(detection_scope_q(camera_location_scope(request.user)))
         qs = apply_source_location_filter(qs, request.user, request.query_params.get("source_location"))
-        camera_id = request.query_params.get("camera")
-        if camera_id:
+        params = request.query_params
+        camera_id = _int_param(params, "camera")
+        if camera_id is not None:
             qs = qs.filter(camera_id=camera_id)
-        site_code = request.query_params.get("site")
+        site_code = params.get("site")
         if site_code:
             qs = qs.filter(camera__nvr__site__code__iexact=site_code.strip())
-        site_id = request.query_params.get("site_id")
-        if site_id:
+        site_id = _int_param(params, "site_id")
+        if site_id is not None:
             qs = qs.filter(camera__nvr__site_id=site_id)
-        nvr_id = request.query_params.get("nvr")
-        if nvr_id:
+        nvr_id = _int_param(params, "nvr")
+        if nvr_id is not None:
             qs = qs.filter(camera__nvr_id=nvr_id)
-        channel = request.query_params.get("channel")
-        if channel:
-            try:
-                qs = qs.filter(camera__channel=int(channel))
-            except (TypeError, ValueError):
-                pass
+        channel = _int_param(params, "channel")
+        if channel is not None:
+            qs = qs.filter(camera__channel=channel)
         zone = request.query_params.get("zone")
         if zone and zone.strip():
             qs = qs.filter(camera__zone__iexact=zone.strip())
@@ -383,7 +507,7 @@ class CameraViewSet(viewsets.ModelViewSet):
                 {"detail": "No valid detection event IDs provided."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        deleted, _ = DetectionEvent.objects.filter(id__in=ids).delete()
+        deleted = _delete_events_batched(DetectionEvent.objects.filter(id__in=ids))
         return Response({"ok": True, "deleted": deleted})
 
     @action(
@@ -401,19 +525,18 @@ class CameraViewSet(viewsets.ModelViewSet):
             )
         qs = DetectionEvent.objects.all()
         data = request.data if isinstance(request.data, dict) else {}
-        camera_id = data.get("camera") or request.query_params.get("camera")
-        if camera_id:
-            try:
-                qs = qs.filter(camera_id=int(camera_id))
-            except (TypeError, ValueError):
-                pass
+        camera_id = _int_param(data, "camera")
+        if camera_id is None:
+            camera_id = _int_param(request.query_params, "camera")
+        if camera_id is not None:
+            qs = qs.filter(camera_id=camera_id)
         class_name = (data.get("class_name") or request.query_params.get("class_name") or "").strip()
         if class_name:
             qs = qs.filter(class_name__iexact=class_name)
         alerts_only = data.get("is_alert")
         if alerts_only is True or str(alerts_only).lower() in ("1", "true", "yes"):
             qs = qs.filter(is_alert=True)
-        deleted, _ = qs.delete()
+        deleted = _delete_events_batched(qs)
         return Response({"ok": True, "deleted": deleted})
 
     @action(
@@ -432,8 +555,8 @@ class CameraViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Detection event not found."}, status=status.HTTP_404_NOT_FOUND)
 
         if request.method == "DELETE":
-            event.delete()
-            return Response({"ok": True, "deleted": 1})
+            deleted = _delete_events_batched(DetectionEvent.objects.filter(pk=event.pk))
+            return Response({"ok": True, "deleted": deleted})
 
         data = request.data
         files = request.FILES
@@ -678,22 +801,25 @@ class CameraViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"], url_path="detection-summary")
     def detection_summary(self, request):
         today = timezone.localdate()
-        qs = DetectionEvent.objects.filter(created_at__date=today)
-        alert_count = qs.filter(is_alert=True).count()
-        classes = qs.values_list("class_name", flat=True).distinct()
+        qs = DetectionEvent.objects.filter(created_at__date=today, is_deleted=False).filter(
+            detection_scope_q(camera_location_scope(request.user))
+        )
+        totals = qs.aggregate(
+            detections_today=Count("id"),
+            alerts_today=Count("id", filter=Q(is_alert=True)),
+            classes_tracked=Count("class_name", distinct=True),
+        )
         return Response(
             {
-                "detections_today": qs.count(),
-                "classes_tracked": len(set(classes)),
-                "alerts_today": alert_count,
+                "detections_today": totals["detections_today"] or 0,
+                "classes_tracked": totals["classes_tracked"] or 0,
+                "alerts_today": totals["alerts_today"] or 0,
             }
         )
 
     @action(detail=False, methods=["get"], url_path="plate-captures")
     def plate_captures(self, request):
-        """Saved ANPR plate records: crop image, scene image, and OCR plate number."""
-        import inspect
-
+        """Saved ANPR plate records: crop image, scene image, and OCR plate number (read-only)."""
         from .plate_captures import load_plate_captures, plate_capture_summary
 
         try:
@@ -709,31 +835,46 @@ class CameraViewSet(viewsets.ModelViewSet):
         plate_number = (request.query_params.get("plate_number") or "").strip()
         date_from = (request.query_params.get("date_from") or "").strip()
         date_to = (request.query_params.get("date_to") or "").strip()
-        cleanup = str(request.query_params.get("cleanup", "false")).lower() in ("1", "true", "yes")
-
-        # Pass only kwargs supported by the installed load_plate_captures()
-        # (avoids 500 if an older plate_captures.py is still on the server).
-        kwargs = {
-            "page": page,
-            "page_size": page_size,
-            "camera_key": camera_key,
-            "q": q,
-            "plate_number": plate_number,
-            "date_from": date_from,
-            "date_to": date_to,
-            "cleanup": cleanup,
-        }
-        accepted = set(inspect.signature(load_plate_captures).parameters)
-        if plate_number and "plate_number" not in accepted and "q" in accepted:
-            # Older loader: fold plate filter into generic search.
-            kwargs["q"] = plate_number if not q else q
-        payload = load_plate_captures(**{k: v for k, v in kwargs.items() if k in accepted})
+        # ?cleanup= is ignored: a GET never rewrites captures.csv or deletes images
+        # (admins use POST plate-captures/archive/).
+        payload = load_plate_captures(
+            page=page,
+            page_size=page_size,
+            camera_key=camera_key,
+            q=q,
+            plate_number=plate_number,
+            date_from=date_from,
+            date_to=date_to,
+        )
         return Response(
             {
                 **payload,
                 "summary": plate_capture_summary(),
             }
         )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="plate-captures/archive",
+        permission_classes=[IsAuthenticated, IsGlobalAdmin],
+    )
+    def plate_captures_archive(self, request):
+        """Super Admin only — move never-displayed junk OCR rows to captures_archive.csv.
+
+        Nothing is deleted: rows are archived and every image file is kept.
+        """
+        from .locks import FileLockTimeout
+        from .plate_captures import archive_unusable_plate_rows
+
+        try:
+            result = archive_unusable_plate_rows()
+        except FileLockTimeout:
+            return Response(
+                {"detail": "Plate capture file is busy (ML is writing). Try again."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response({"ok": True, **result})
 
     @action(detail=False, methods=["get"], url_path="vehicle-journeys")
     def vehicle_journeys(self, request):
@@ -812,18 +953,22 @@ class CameraViewSet(viewsets.ModelViewSet):
                         purposes=camera.purpose_list(),
                     )
                 except MLServiceError as retry_exc:
-                    return Response(
-                        {"detail": str(retry_exc)},
-                        status=retry_exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE,
-                    )
+                    return _ml_error_response(retry_exc, f"Live detections camera={camera.pk}")
             else:
-                return Response({"detail": str(exc)}, status=exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE)
+                return _ml_error_response(exc, f"Live detections camera={camera.pk}")
 
         detections = result.get("detections") or []
         detections = filter_detections_for_camera(camera, detections)
-        save_param = request.query_params.get("save", "true").lower()
+        # Viewing never writes: the detection worker persists live readings. ?save=true is a
+        # camera-admin debugging aid only (the UI always sends save=false).
+        save_param = str(request.query_params.get("save", "false")).lower()
         saved_count = 0
         if save_param in ("true", "1", "yes"):
+            if not is_camera_admin(request.user):
+                return Response(
+                    {"detail": "Only camera administrators may save live detections."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
             saved_count = save_detection_batch(camera, detections)
 
         return Response(
@@ -862,7 +1007,8 @@ class CameraViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        frame = capture_jpeg_frame(stream)
+        # Synchronous on purpose, but bounded: a dead NVR / busy ML must not pin a web worker.
+        frame = capture_jpeg_frame(stream, timeout=float(getattr(settings, "CAMERA_DETECT_FRAME_TIMEOUT", 8)))
         if not frame:
             return Response(
                 {"detail": "Could not capture a frame from the camera stream. Check NVR credentials and ffmpeg."},
@@ -870,30 +1016,17 @@ class CameraViewSet(viewsets.ModelViewSet):
             )
 
         try:
-            result = ml_detect_image(frame, filename=f"{camera.code}.jpg", recognize_faces=True)
+            result = ml_detect_image(
+                frame,
+                filename=f"{camera.code}.jpg",
+                recognize_faces=True,
+                timeout=(3.0, float(getattr(settings, "CAMERA_DETECT_ML_TIMEOUT", 20))),
+            )
         except MLServiceError as exc:
-            return Response({"detail": str(exc)}, status=exc.status_code or status.HTTP_503_SERVICE_UNAVAILABLE)
+            return _ml_error_response(exc, f"Detect on camera={camera.pk}")
 
         detections = filter_detections_for_camera(camera, result.get("detections") or [])
-        saved = []
-        clip_enabled = bool(getattr(settings, "DETECTION_CLIP_ENABLED", True))
-        for det in detections:
-            class_name = str(det.get("class_name", ""))
-            label = str(det.get("label", det.get("class_name", "")))
-            employee_name, personal_number = resolve_staff_identity(label, class_name)
-            event = DetectionEvent.objects.create(
-                camera=camera,
-                class_name=class_name,
-                label=label,
-                employee_name=employee_name,
-                personal_number=personal_number,
-                confidence=float(det.get("confidence", 0)),
-                bbox=det.get("bbox") or [],
-                is_alert=bool(det.get("alert")),
-                clip_status=ClipStatus.PENDING if clip_enabled else ClipStatus.SKIPPED,
-            )
-            schedule_detection_clip(camera.pk, event.pk)
-            saved.append(event)
+        saved = save_manual_detections(camera, detections)
 
         return Response(
             {
@@ -932,6 +1065,7 @@ class CameraStreamListView(APIView):
             "yes",
         )
         qs = Camera.objects.filter(is_active=True).select_related("nvr", "nvr__site", "ml_server")
+        qs = qs.filter(camera_scope_q(camera_location_scope(user)))
         if allocated_only:
             qs = qs.filter(ml_server_id__isnull=False)
         for cam in qs.order_by("nvr__site__name", "nvr__name", "channel"):
@@ -972,15 +1106,46 @@ class CameraStreamListView(APIView):
         )
 
 
+class _PreviewStream:
+    """Iterator for StreamingHttpResponse that always frees its preview slot.
+
+    Django registers ``close`` as a resource closer, so it runs on client disconnect even if
+    iteration never started; closing the inner generator kills the ffmpeg process.
+    """
+
+    def __init__(self, frames, user_id):
+        self._frames = frames
+        self._user_id = user_id
+        self._closed = False
+
+    def __iter__(self):
+        return iter(self._frames)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._frames.close()
+        finally:
+            release_preview_slot(self._user_id)
+
+
 class CameraPreviewMjpegView(APIView):
-    """Live MJPEG preview for an NVR channel before saving a camera row."""
+    """Live MJPEG preview for an NVR channel before saving a camera row (camera admins only)."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
-        if not _request_has_valid_auth(request):
+        user = _request_user(request)
+        if user is None:
             return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+        if not is_camera_admin(user):
+            return Response(
+                {"detail": "Only camera administrators may open NVR previews."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         nvr_id = request.query_params.get("nvr_id")
         channel = request.query_params.get("channel", "1")
@@ -994,17 +1159,24 @@ class CameraPreviewMjpegView(APIView):
             )
 
         try:
-            nvr = Nvr.objects.get(pk=int(nvr_id), is_active=True)
+            nvr = Nvr.objects.select_related("site").get(pk=int(nvr_id), is_active=True)
             ch = max(1, int(channel))
-        except (Nvr.DoesNotExist, ValueError):
+        except (Nvr.DoesNotExist, ValueError, TypeError):
+            return Response({"detail": "NVR not found or invalid channel."}, status=status.HTTP_404_NOT_FOUND)
+        scope = camera_location_scope(user)
+        if scope and not site_in_scope(nvr.site, scope):
             return Response({"detail": "NVR not found or invalid channel."}, status=status.HTTP_404_NOT_FOUND)
 
         stream_url = build_rtsp_url_for_preview(nvr, ch)
         if not stream_url:
             return Response({"detail": "Could not build RTSP URL."}, status=status.HTTP_400_BAD_REQUEST)
 
+        refusal = acquire_preview_slot(user.pk)
+        if refusal:
+            return Response({"detail": refusal}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
         response = StreamingHttpResponse(
-            generate_mjpeg_frames(stream_url),
+            _PreviewStream(generate_mjpeg_frames(stream_url), user.pk),
             content_type="multipart/x-mixed-replace; boundary=frame",
         )
         response["Cache-Control"] = "no-cache, no-store, must-revalidate"

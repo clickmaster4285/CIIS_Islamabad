@@ -19,10 +19,21 @@ class Migration(migrations.Migration):
             ],
             database_operations=[
                 migrations.RunSQL(
-                    sql=(
-                        "ALTER TABLE detentions_detentionmemo "
-                        "ADD COLUMN IF NOT EXISTS disposition_status varchar(80) NOT NULL DEFAULT ''"
-                    ),
+                    sql=[
+                        # The table pre-dates Django on long-running databases. On a fresh
+                        # database (new site, test DB) create the minimal table here; 0002
+                        # switches the model to managed and 0003+ add the remaining columns.
+                        (
+                            "CREATE TABLE IF NOT EXISTS detentions_detentionmemo ("
+                            "id uuid PRIMARY KEY, "
+                            "disposition_status varchar(80) NOT NULL DEFAULT ''"
+                            ")"
+                        ),
+                        (
+                            "ALTER TABLE detentions_detentionmemo "
+                            "ADD COLUMN IF NOT EXISTS disposition_status varchar(80) NOT NULL DEFAULT ''"
+                        ),
+                    ],
                     reverse_sql=migrations.RunSQL.noop,
                 ),
             ],

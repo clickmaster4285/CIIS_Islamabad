@@ -4,9 +4,14 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from rest_framework.authtoken.models import Token
+from rest_framework.exceptions import PermissionDenied
+
+from config.media_views import clear_media_auth_cookie
 from logs.enforcement import (
     DeviceRevoked,
     SessionRevoked,
+    assert_staff_in_scope,
     can_acknowledge_alerts,
     can_manage_mobile_devices,
     can_view_mobile_devices,
@@ -231,6 +236,10 @@ class MobileAlertAcknowledgeView(APIView):
         alert = MobileAlert.objects.select_related("user").filter(pk=pk).first()
         if not alert:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            assert_staff_in_scope(request.user, alert.user)
+        except PermissionDenied:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         from django.utils import timezone
 
         alert.acknowledged_at = timezone.now()
@@ -241,7 +250,18 @@ class MobileAlertAcknowledgeView(APIView):
         return Response({"ok": True})
 
 
+def _truthy(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes")
+
+
 class LogoutView(APIView):
+    """POST /api/auth/logout/ — end the mobile session and cancel the API token.
+
+    The token is deleted so a copied token stops working. A client that must keep its
+    token (e.g. it also holds a web session on the same token) can send
+    ?keep_token=1 (or "keep_token": true) to only end the mobile session.
+    """
+
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -252,4 +272,11 @@ class LogoutView(APIView):
         if event_id:
             remember_event_id(request.user, event_id, "LOGOUT")
         end_mobile_session(request.user, session, request=request)
-        return Response({"ok": True})
+        keep = _truthy(request.query_params.get("keep_token")) or _truthy(
+            request.data.get("keep_token") if hasattr(request.data, "get") else None
+        )
+        if keep:
+            return Response({"ok": True, "token_revoked": False})
+        if isinstance(request.auth, Token):
+            request.auth.delete()
+        return clear_media_auth_cookie(Response({"ok": True, "token_revoked": True}))

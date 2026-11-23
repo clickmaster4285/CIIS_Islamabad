@@ -1,6 +1,7 @@
 """Shared YOLO + face inference for API and scripts."""
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -156,6 +157,10 @@ _warmup_done = False
 _custom_class_ids_cache: list[int] | None = None
 _custom_class_names_cache: dict[int, str] | None = None
 _PREDICT_LOCK = threading.Lock()
+# One lock per model getter so concurrent first calls load the weights only once.
+_model_load_locks = {name: threading.Lock() for name in ("coco", "custom", "smoke", "weapon")}
+_cuda_status_cache: tuple[float, dict[str, Any]] | None = None
+_cuda_status_lock = threading.Lock()
 
 
 def gpu_predict_lock() -> threading.Lock:
@@ -254,6 +259,28 @@ def _list_gpus_nvidia_smi() -> list[dict[str, Any]]:
 
 
 def get_cuda_status() -> dict[str, Any]:
+    """CUDA / GPU info for /health. Cached for ML_CUDA_STATUS_TTL_SEC (default 10 s).
+
+    torch is only asked about the device this process uses (it used to enumerate every
+    visible GPU and call mem_get_info on each, on every /health). The host-wide list in
+    "gpus" still comes from one nvidia-smi call so the admin UI sees GPU 0 + GPU 1.
+    """
+    global _cuda_status_cache
+    try:
+        ttl = max(0.0, float(os.getenv("ML_CUDA_STATUS_TTL_SEC", "10")))
+    except ValueError:
+        ttl = 10.0
+    now = time.monotonic()
+    with _cuda_status_lock:
+        cached = _cuda_status_cache
+        if cached is not None and now - cached[0] < ttl:
+            return copy.deepcopy(cached[1])
+        info = _query_cuda_status()
+        _cuda_status_cache = (now, info)
+        return copy.deepcopy(info)
+
+
+def _query_cuda_status() -> dict[str, Any]:
     device = resolve_ml_device()
     info: dict[str, Any] = {
         "ml_device": device,
@@ -262,46 +289,35 @@ def get_cuda_status() -> dict[str, Any]:
         "cuda_device_count": 0,
         "gpus": [],
     }
-    # Prefer host-wide inventory so admin UI sees GPU 0 + GPU 1 even when
-    # this process is pinned with CUDA_VISIBLE_DEVICES.
     host_gpus = _list_gpus_nvidia_smi()
     try:
         import torch
 
         info["cuda_available"] = bool(torch.cuda.is_available())
-        torch_count = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+        torch_count = int(torch.cuda.device_count()) if info["cuda_available"] else 0
         torch_gpus: list[dict[str, Any]] = []
-        for idx in range(torch_count):
-            props = torch.cuda.get_device_properties(idx)
-            total_mb = int(getattr(props, "total_memory", 0) or 0) // (1024 * 1024)
-            free_mb = None
-            try:
-                free_b, _total_b = torch.cuda.mem_get_info(idx)
-                free_mb = int(free_b) // (1024 * 1024)
-            except Exception:
-                free_mb = None
-            torch_gpus.append(
-                {
-                    "index": idx,
-                    "name": torch.cuda.get_device_name(idx),
-                    "total_memory_mb": total_mb or None,
-                    "free_memory_mb": free_mb,
-                }
-            )
-        gpus = host_gpus or torch_gpus
-        info["gpus"] = gpus
-        info["cuda_device_count"] = len(gpus) if gpus else torch_count
-        if torch.cuda.is_available() and device != "cpu":
+        if info["cuda_available"] and device != "cpu":
             idx = int(device) if isinstance(device, int) else 0
             if 0 <= idx < torch_count:
-                info["cuda_device_name"] = torch.cuda.get_device_name(idx)
-            elif gpus:
-                # Map visible torch index → host name when possible
-                match = next((g for g in gpus if g.get("index") == idx), None)
-                info["cuda_device_name"] = (match or gpus[0]).get("name")
-        elif gpus and not info["cuda_device_name"]:
+                props = torch.cuda.get_device_properties(idx)
+                total_mb = int(getattr(props, "total_memory", 0) or 0) // (1024 * 1024)
+                free_mb = None
+                try:
+                    free_b, _total_b = torch.cuda.mem_get_info(idx)
+                    free_mb = int(free_b) // (1024 * 1024)
+                except Exception:
+                    free_mb = None
+                name = torch.cuda.get_device_name(idx)
+                info["cuda_device_name"] = name
+                torch_gpus.append(
+                    {"index": idx, "name": name, "total_memory_mb": total_mb or None, "free_memory_mb": free_mb}
+                )
+        gpus = host_gpus or torch_gpus
+        info["gpus"] = gpus
+        info["cuda_device_count"] = len(host_gpus) if host_gpus else torch_count
+        if not info["cuda_device_name"] and gpus:
             info["cuda_device_name"] = gpus[0].get("name")
-            info["cuda_available"] = True
+            info["cuda_available"] = info["cuda_available"] or bool(host_gpus)
     except Exception as exc:
         info["cuda_error"] = str(exc)
         if host_gpus:
@@ -309,11 +325,6 @@ def get_cuda_status() -> dict[str, Any]:
             info["cuda_device_count"] = len(host_gpus)
             info["cuda_available"] = True
             info["cuda_device_name"] = host_gpus[0].get("name")
-    if not info["gpus"] and host_gpus:
-        info["gpus"] = host_gpus
-        info["cuda_device_count"] = len(host_gpus)
-        info["cuda_available"] = True
-        info["cuda_device_name"] = info["cuda_device_name"] or host_gpus[0].get("name")
     return info
 
 
@@ -446,63 +457,76 @@ def get_yolo_coco_model():
     global _yolo_coco
     if _yolo_coco is not None:
         return _yolo_coco
-    weights = resolve_coco_weights_path()
-    if not weights:
-        return None
-    try:
-        _yolo_coco = _load_yolo(weights)
-        return _yolo_coco
-    except Exception as exc:
-        print(f"[ml] COCO YOLO load failed ({weights}): {exc}")
-        return None
+    with _model_load_locks["coco"]:
+        if _yolo_coco is not None:
+            return _yolo_coco
+        weights = resolve_coco_weights_path()
+        if not weights:
+            return None
+        try:
+            _yolo_coco = _load_yolo(weights)
+            return _yolo_coco
+        except Exception as exc:
+            print(f"[ml] COCO YOLO load failed ({weights}): {exc}")
+            return None
 
 
 def get_yolo_custom_model():
     global _yolo_custom
     if _yolo_custom is not None:
         return _yolo_custom
-    weights = resolve_custom_weights_path()
-    if not weights:
-        return None
-    try:
-        _yolo_custom = _load_yolo(weights)
-        custom_names = custom_only_class_names(_yolo_custom)
-        custom_only_class_ids(_yolo_custom)
-        print(f"[ml] best.pt custom-only classes ({len(custom_names)}): {custom_names}")
-        return _yolo_custom
-    except Exception as exc:
-        print(f"[ml] custom YOLO load failed ({weights}): {exc}")
-        return None
+    with _model_load_locks["custom"]:
+        if _yolo_custom is not None:
+            return _yolo_custom
+        weights = resolve_custom_weights_path()
+        if not weights:
+            return None
+        try:
+            model = _load_yolo(weights)
+            custom_names = custom_only_class_names(model)
+            custom_only_class_ids(model)
+            print(f"[ml] best.pt custom-only classes ({len(custom_names)}): {custom_names}")
+            _yolo_custom = model
+            return _yolo_custom
+        except Exception as exc:
+            print(f"[ml] custom YOLO load failed ({weights}): {exc}")
+            return None
 
 
 def get_yolo_smoke_model():
     global _yolo_smoke
     if _yolo_smoke is not None:
         return _yolo_smoke
-    weights = resolve_smoke_weights_path()
-    if not weights:
-        return None
-    try:
-        _yolo_smoke = _load_yolo(weights)
-        return _yolo_smoke
-    except Exception as exc:
-        print(f"[ml] smoke YOLO load failed ({weights}): {exc}")
-        return None
+    with _model_load_locks["smoke"]:
+        if _yolo_smoke is not None:
+            return _yolo_smoke
+        weights = resolve_smoke_weights_path()
+        if not weights:
+            return None
+        try:
+            _yolo_smoke = _load_yolo(weights)
+            return _yolo_smoke
+        except Exception as exc:
+            print(f"[ml] smoke YOLO load failed ({weights}): {exc}")
+            return None
 
 
 def get_yolo_weapon_model():
     global _yolo_weapon
     if _yolo_weapon is not None:
         return _yolo_weapon
-    weights = resolve_weapon_weights_path()
-    if not weights:
-        return None
-    try:
-        _yolo_weapon = _load_yolo(weights)
-        return _yolo_weapon
-    except Exception as exc:
-        print(f"[ml] weapon YOLO load failed ({weights}): {exc}")
-        return None
+    with _model_load_locks["weapon"]:
+        if _yolo_weapon is not None:
+            return _yolo_weapon
+        weights = resolve_weapon_weights_path()
+        if not weights:
+            return None
+        try:
+            _yolo_weapon = _load_yolo(weights)
+            return _yolo_weapon
+        except Exception as exc:
+            print(f"[ml] weapon YOLO load failed ({weights}): {exc}")
+            return None
 
 
 def get_yolo_general_model():
@@ -526,8 +550,13 @@ def get_face_db() -> KnownFaceDB:
 
 def reload_face_db(db_embeddings: list[dict] | None = None) -> int:
     db = get_face_db()
-    db.reload()
-    db.apply_db_embeddings(db_embeddings or [])
+    if hasattr(db, "replace_embeddings"):
+        # New gallery is built off to the side and swapped in at once: live recognition
+        # never sees an empty gallery while the backend pushes a reload.
+        db.replace_embeddings(db_embeddings or [])
+    else:
+        db.reload()
+        db.apply_db_embeddings(db_embeddings or [])
     return len(db.known)
 
 
@@ -1023,25 +1052,6 @@ def run_triple_detection(
     merged = merge_triple_detections(coco_detections, custom_detections, smoke_detections)
     merged.extend(weapon_detections)
     return merged
-
-
-def run_dual_detection(
-    image: np.ndarray,
-    *,
-    conf: float = 0.25,
-    iou: float = 0.45,
-    img_size: int = 640,
-    recognize_faces: bool = True,
-    half: bool = False,
-) -> list[dict[str, Any]]:
-    return run_triple_detection(
-        image,
-        conf=conf,
-        iou=iou,
-        img_size=img_size,
-        recognize_faces=recognize_faces,
-        half=half,
-    )
 
 
 def health_status() -> dict[str, Any]:

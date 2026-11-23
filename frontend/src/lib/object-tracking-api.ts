@@ -291,6 +291,11 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${sec}s`
 }
 
+/** Seconds elapsed from `iso` until now (never negative). Reads the clock. */
+export function secondsSince(iso: string): number {
+  return Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+}
+
 export function objectTypeLabel(type: string): string {
   if (type === "person") return "Person"
   if (type === "vehicle") return "Vehicle"

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 import math
-import re
+import threading
+import time
 from datetime import timedelta
 from typing import Any
 
 import numpy as np
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import BigIntegerField, Max
+from django.db.models.functions import Cast, Substr
 from django.utils import timezone
 
 from cameras.models import Camera
@@ -18,6 +21,7 @@ from cameras.models import Camera
 from .models import (
     GlobalObject,
     ObjectCameraTrack,
+    ObjectCodeCounter,
     ObjectType,
     ObjectVisit,
     TrackStatus,
@@ -226,19 +230,32 @@ def _code_prefix(object_type: str) -> str:
     }.get(object_type, "GO")
 
 
+def _max_code_suffix(prefix: str) -> int:
+    """Largest numeric suffix among existing <prefix><digits> codes (one DB aggregate). Only
+    used once per prefix, to seed the counter on a database that predates it."""
+    agg = (
+        GlobalObject.objects.filter(code__iregex=rf"^{prefix}[0-9]{{1,18}}$")
+        .annotate(n=Cast(Substr("code", len(prefix) + 1), BigIntegerField()))
+        .aggregate(m=Max("n"))
+    )
+    return int(agg["m"] or 0)
+
+
 def _next_code(object_type: str) -> str:
-    """Allocate next GP/GV/GO code from the max numeric suffix (not latest id)."""
+    """Allocate the next GP/GV/GO code from a per-prefix counter row (locked while in use)."""
     prefix = _code_prefix(object_type)
-    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$", re.IGNORECASE)
-    max_n = 0
-    for code in GlobalObject.objects.filter(code__istartswith=prefix).values_list("code", flat=True).iterator():
-        match = pattern.match(str(code or "").strip())
-        if match:
+    with transaction.atomic():
+        counter = ObjectCodeCounter.objects.select_for_update().filter(prefix=prefix).first()
+        if counter is None:
             try:
-                max_n = max(max_n, int(match.group(1)))
-            except ValueError:
-                continue
-    return f"{prefix}{max_n + 1}"
+                with transaction.atomic():
+                    ObjectCodeCounter.objects.create(prefix=prefix, value=_max_code_suffix(prefix))
+            except IntegrityError:
+                pass  # another worker seeded it first
+            counter = ObjectCodeCounter.objects.select_for_update().get(prefix=prefix)
+        counter.value += 1
+        counter.save(update_fields=["value"])
+        return f"{prefix}{counter.value}"
 
 
 def _create_global_object(
@@ -254,8 +271,10 @@ def _create_global_object(
     """
     Insert a GlobalObject with a unique code.
 
-    Returns (object, created). On a concurrent code race, returns the existing
-    compatible row with created=False instead of raising IntegrityError.
+    Returns (object, created). created=False only when the ML-assigned preferred code
+    already belongs to a compatible object. On a code collision (concurrent insert, or a
+    code the ML minted out of band) it retries with a fresh code: two different detections
+    are never merged into one identity just because they raced for the same number.
     """
     preferred = (preferred_code or "").strip()
     last_error: Exception | None = None
@@ -301,13 +320,6 @@ def _create_global_object(
                 return obj, True
         except IntegrityError as exc:
             last_error = exc
-            raced = GlobalObject.objects.filter(code=code).first()
-            if (
-                raced is not None
-                and raced.object_type == object_type
-                and _same_identity_class(raced.class_name or "", class_name)
-            ):
-                return raced, False
             logger.debug(
                 "GlobalObject code conflict on %s (attempt %s); retrying",
                 code,
@@ -340,25 +352,85 @@ def _match_by_face(face_key: str) -> GlobalObject | None:
     )
 
 
+# Parsed, normalised ReID vectors per object: pk -> (expires_monotonic, updated_at, vector).
+# Re-parsed when the row changes (updated_at) or after the TTL.
+_EMB_CACHE: dict[int, tuple[float, Any, np.ndarray | None]] = {}
+_EMB_CACHE_LOCK = threading.Lock()
+_EMB_CACHE_TTL = 300.0
+_EMB_CACHE_MAX = 5000
+
+
+def _reid_lookback() -> timedelta:
+    return timedelta(hours=max(1.0, _setting_number("OBJECT_REID_LOOKBACK_HOURS", 24)))
+
+
+def _unit_vector(raw) -> np.ndarray | None:
+    if not raw:
+        return None
+    try:
+        vec = np.asarray(raw, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    norm = float(np.linalg.norm(vec))
+    return vec / norm if norm > 0 else None
+
+
+def _cached_vectors(rows: list[tuple[int, Any]]) -> dict[int, np.ndarray | None]:
+    """Vectors for (pk, updated_at) rows; one query fetches only the stale / missing ones."""
+    now = time.monotonic()
+    out: dict[int, np.ndarray | None] = {}
+    missing: dict[int, Any] = {}
+    with _EMB_CACHE_LOCK:
+        for pk, updated_at in rows:
+            hit = _EMB_CACHE.get(pk)
+            if hit is not None and hit[0] > now and hit[1] == updated_at:
+                out[pk] = hit[2]
+            else:
+                missing[pk] = updated_at
+    if missing:
+        fetched = dict(GlobalObject.objects.filter(pk__in=list(missing)).values_list("pk", "reid_embedding"))
+        with _EMB_CACHE_LOCK:
+            if len(_EMB_CACHE) > _EMB_CACHE_MAX:
+                for key in [k for k, v in _EMB_CACHE.items() if v[0] <= now] or list(_EMB_CACHE):
+                    _EMB_CACHE.pop(key, None)
+            for pk, updated_at in missing.items():
+                vec = _unit_vector(fetched.get(pk))
+                _EMB_CACHE[pk] = (now + _EMB_CACHE_TTL, updated_at, vec)
+                out[pk] = vec
+    return out
+
+
 def _match_by_reid(
     object_type: str,
     class_name: str,
     embedding: list[float],
 ) -> tuple[GlobalObject | None, float]:
-    if not embedding:
+    """Best ReID match among objects of this type seen in the last OBJECT_REID_LOOKBACK_HOURS."""
+    query = _unit_vector(embedding)
+    if query is None:
         return None, 0.0
     threshold = _reid_threshold(object_type)
-    qs = GlobalObject.objects.filter(object_type=object_type).order_by("-last_seen_at")[:400]
-    best: GlobalObject | None = None
+    rows = list(
+        GlobalObject.objects.filter(
+            object_type=object_type, last_seen_at__gte=timezone.now() - _reid_lookback()
+        )
+        .order_by("-last_seen_at")
+        .values_list("pk", "class_name", "updated_at")[:400]
+    )
+    # Never merge different classes under one global ID (car ≠ motorcycle ≠ person).
+    rows = [(pk, updated_at) for pk, cls, updated_at in rows if _same_identity_class(cls or "", class_name)]
+    best_pk: int | None = None
     best_score = threshold
-    for obj in qs:
-        # Never merge different classes under one global ID (car ≠ motorcycle ≠ person).
-        if not _same_identity_class(obj.class_name or "", class_name):
+    for pk, vec in _cached_vectors(rows).items():
+        if vec is None or vec.shape != query.shape:
             continue
-        score = _cosine(embedding, obj.reid_embedding or [])
+        score = float(np.dot(query, vec))
         if score >= best_score:
             best_score = score
-            best = obj
+            best_pk = pk
+    if best_pk is None:
+        return None, 0.0
+    best = GlobalObject.objects.filter(pk=best_pk).first()
     return best, (best_score if best is not None else 0.0)
 
 
@@ -388,9 +460,19 @@ def _close_visit(visit: ObjectVisit, *, exited_at=None) -> None:
         ]
     )
     obj = visit.global_object
-    obj.exit_at = visit.exit_at
-    obj.last_seen_at = visit.last_seen_at
+    # Still present elsewhere (another camera's visit is ACTIVE) → not an exit for the object.
+    if not _has_other_active_visit(obj, visit):
+        obj.exit_at = visit.exit_at
+    if not obj.last_seen_at or (visit.last_seen_at and visit.last_seen_at > obj.last_seen_at):
+        obj.last_seen_at = visit.last_seen_at
     obj.save(update_fields=["exit_at", "last_seen_at", "updated_at"])
+
+
+def _has_other_active_visit(obj: GlobalObject, visit: ObjectVisit | None = None) -> bool:
+    qs = ObjectVisit.objects.filter(global_object=obj, status=VisitStatus.ACTIVE)
+    if visit is not None and visit.pk is not None:
+        qs = qs.exclude(pk=visit.pk)
+    return qs.exists()
 
 
 def _finish_track(track: ObjectCameraTrack, *, ended_at=None) -> None:
@@ -454,7 +536,7 @@ def _end_visit(visit: ObjectVisit, *, exited_at) -> None:
     visit.delete()
     if obj.first_detection_event_id is None and not ObjectVisit.objects.filter(global_object=obj).exists():
         obj.delete()
-    else:
+    elif not _has_other_active_visit(obj):
         obj.exit_at = exited_at
         obj.save(update_fields=["exit_at", "updated_at"])
 

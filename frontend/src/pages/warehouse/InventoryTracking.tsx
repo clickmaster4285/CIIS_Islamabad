@@ -66,13 +66,9 @@ function saveRows(rows: InventoryRow[]) {
 const STATUSES = ["In Stock", "Low Stock", "Reorder"]
 
 export default function InventoryTrackingPage() {
-  const [rows, setRows] = useState<InventoryRow[]>([])
+  const [rows, setRows] = useState<InventoryRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ QR_Code: "", product: "", wh: "Peshawar", loc: "", qty: 0, status: "In Stock" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

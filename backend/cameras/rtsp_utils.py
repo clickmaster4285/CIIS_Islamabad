@@ -19,7 +19,11 @@ def nvr_stream_path(nvr: Nvr, channel: int) -> str:
     ch = int(channel)
     template = (nvr.stream_path_template or "").strip()
     if template:
-        return template.format(channel=ch)
+        try:
+            return template.format(channel=ch)
+        except (KeyError, IndexError, ValueError, AttributeError):
+            # Bad template saved before validation existed — fall back to the brand default.
+            pass
 
     brand = nvr.brand
 
@@ -52,40 +56,21 @@ def build_rtsp_url_from_nvr(nvr: Nvr, channel: int) -> str:
     return f"rtsp://{user_enc}:{pass_enc}@{ip}:{port}{path}"
 
 
+def validate_stream_path_template(template: str) -> str:
+    """Raise ValueError unless the template formats with only {channel} into a URL path."""
+    text = (template or "").strip()
+    if not text:
+        return ""
+    if any(ch.isspace() for ch in text) or "@" in text or "://" in text:
+        raise ValueError("Path template must be a URL path (no spaces, credentials or scheme).")
+    try:
+        rendered = text.format(channel=1)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        raise ValueError("Path template may only use the {channel} placeholder.") from None
+    if not rendered.startswith("/"):
+        text = f"/{text}"
+    return text
+
+
 def build_rtsp_url_for_preview(nvr: Nvr, channel: int) -> str:
     return build_rtsp_url_from_nvr(nvr, channel)
-
-
-def nvr_substream_path(nvr: Nvr, channel: int) -> str:
-    """Lower-bandwidth substream path (separate RTSP session from ML main stream)."""
-    ch = int(channel)
-    brand = nvr.brand
-
-    if brand == NvrBrand.HIKVISION:
-        stream_id = ch if ch >= 100 else ch * 100 + 2
-        if ch >= 100 and ch % 100 == 1:
-            stream_id = ch + 1
-        return f"/Streaming/Channels/{stream_id}"
-
-    if brand == NvrBrand.DAHUA:
-        logical = ch if ch <= 64 else ch
-        return f"/cam/realmonitor?channel={logical}&subtype=1"
-
-    if brand == NvrBrand.UNIVIEW:
-        logical = ch if ch <= 64 else ch
-        return f"/media/video{logical}/substream"
-
-    stream_id = ch if ch >= 100 else ch * 100 + 2
-    return f"/Streaming/Channels/{stream_id}"
-
-
-def build_rtsp_substream_url_from_nvr(nvr: Nvr, channel: int) -> str:
-    ip = (nvr.ip_address or "").strip()
-    if not ip:
-        return ""
-    user_enc, pass_enc = _encode_credentials(nvr.username, nvr.password)
-    port = int(nvr.port or 554)
-    path = nvr_substream_path(nvr, channel)
-    if not path.startswith("/"):
-        path = f"/{path}"
-    return f"rtsp://{user_enc}:{pass_enc}@{ip}:{port}{path}"

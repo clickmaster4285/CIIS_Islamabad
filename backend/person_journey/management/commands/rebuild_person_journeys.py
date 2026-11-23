@@ -19,6 +19,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
+from city_sync.identity import local_rows_q
 from person_journey.models import (
     CameraTrack,
     JourneyEvent,
@@ -79,8 +80,9 @@ class Command(BaseCommand):
         now = timezone.now()
         since = now - timedelta(hours=opts["hours"])
         persons = list(
+            # This server's own people only; HQ copies of city journeys are rebuilt on the city.
             JourneyPerson.objects.filter(
-                person_type=PersonType.UNKNOWN, status=PersonStatus.ACTIVE, tracks__started_at__gte=since
+                local_rows_q(), person_type=PersonType.UNKNOWN, status=PersonStatus.ACTIVE, tracks__started_at__gte=since
             ).distinct()
         )
         if not persons:
@@ -163,6 +165,8 @@ class Command(BaseCommand):
         with transaction.atomic():
             original = {p.pk: p for p in persons}
             used_originals: set[int] = set()
+            # Where each original person's earliest rebuilt tracklet went (for retiring emptied originals).
+            moved_to: dict[int, tuple] = {}
             created = 0
             for cluster in clusters:
                 first = min(cluster.tracks, key=lambda t: t["start"])
@@ -188,9 +192,34 @@ class Command(BaseCommand):
                 person.face_embedding = [float(v) for v in cluster.face[-1]] if cluster.face else person.face_embedding
                 person.save()
                 track_ids = [t["id"] for t in cluster.tracks]
+                for t in cluster.tracks:
+                    prev = moved_to.get(t["journey_person_id"])
+                    if prev is None or t["start"] < prev[0]:
+                        moved_to[t["journey_person_id"]] = (t["start"], person)
                 CameraTrack.objects.filter(id__in=track_ids).update(journey_person=person)
                 PersonObservation.objects.filter(tracklet_id__in=track_ids).update(journey_person=person)
                 JourneyEvent.objects.filter(track_id__in=track_ids).update(journey_person=person)
             # Hops between cameras were computed for the wrong identities; drop them (new ones are recorded live).
             PersonTransition.objects.filter(journey_person_id__in=person_ids, entry_time__gte=since).delete()
-        self.stdout.write(self.style.SUCCESS(f"Applied: {len(clusters)} people ({created} new PJ codes)."))
+
+            # Originals whose every tracklet moved to another person are now empty shells: retire them so they
+            # stop showing as live people (their remaining untracked events follow them to the survivor page).
+            retired = 0
+            for pk, person in original.items():
+                if pk in used_originals or CameraTrack.objects.filter(journey_person_id=pk).exists():
+                    continue
+                survivor = moved_to.get(pk, (None, None))[1]
+                if survivor is not None and survivor.pk != pk:
+                    JourneyEvent.objects.filter(journey_person_id=pk).update(journey_person=survivor)
+                    person.status = PersonStatus.MERGED
+                    person.merged_into = survivor
+                else:
+                    person.status = PersonStatus.FINISHED
+                person.metadata = {**(person.metadata or {}), "rebuilt_empty_at": now.isoformat()}
+                person.save(update_fields=["status", "merged_into", "metadata", "updated_at"])
+                retired += 1
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Applied: {len(clusters)} people ({created} new PJ codes, {retired} emptied original(s) retired)."
+            )
+        )

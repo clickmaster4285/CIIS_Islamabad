@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 import cv2
 
+from face_recognizer import is_unknown_label
 from inference_engine import (
     ALLOWED_COCO_CLASS_IDS,
     SMOKE_FIRE_MIN_CONF,
@@ -60,6 +62,11 @@ GENERIC_PERSON = frozenset({"person", "face", "unknown", ""})
 MAX_DURATION_SEC = float(os.getenv("ML_VIDEO_ANALYZE_MAX_DURATION", "7200"))
 DETECT_IMG_SIZE = int(os.getenv("ML_VIDEO_ANALYZE_IMG_SIZE", "416"))
 OUTPUT_MAX_WIDTH = int(os.getenv("ML_VIDEO_ANALYZE_MAX_WIDTH", "960"))
+# Offline work shares the GPU with live cameras (live inference is NOT paused): after every
+# sampled frame yield briefly, and after each batch of BATCH_FRAMES samples pause longer.
+YIELD_SEC = max(0.0, float(os.getenv("ML_VIDEO_ANALYZE_YIELD_SEC", "0.02")))
+BATCH_FRAMES = max(1, int(os.getenv("ML_VIDEO_ANALYZE_BATCH_FRAMES", "8")))
+BATCH_PAUSE_SEC = max(0.0, float(os.getenv("ML_VIDEO_ANALYZE_BATCH_PAUSE_SEC", "0.25")))
 _PERSON_COCO_IDS = frozenset({0})
 _VEHICLE_COCO_IDS = frozenset({2, 3, 5, 7, 1})
 
@@ -102,11 +109,48 @@ def _is_vehicle(det: dict[str, Any]) -> bool:
 def _is_known_staff(det: dict[str, Any]) -> bool:
     label = str(det.get("label") or "").strip()
     cls = _norm(det.get("class_name") or "")
-    if not label:
+    if not label or is_unknown_label(label):  # "unknown", "unknown:U0007", "person", "face"
         return False
     if _norm(label) in GENERIC_PERSON:
         return False
     return cls in PERSON_CLASSES or bool(label)
+
+
+class OfflineThrottle:
+    """Cooperative GPU sharing for offline jobs: short sleep per sample, longer per batch."""
+
+    def __init__(
+        self,
+        *,
+        yield_sec: float = YIELD_SEC,
+        batch_frames: int = BATCH_FRAMES,
+        batch_pause_sec: float = BATCH_PAUSE_SEC,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.yield_sec = max(0.0, float(yield_sec))
+        self.batch_frames = max(1, int(batch_frames))
+        self.batch_pause_sec = max(0.0, float(batch_pause_sec))
+        self._sleep = sleep
+        self._count = 0
+
+    def step(self) -> None:
+        self._count += 1
+        if self._count % self.batch_frames == 0:
+            if self.batch_pause_sec > 0:
+                self._sleep(self.batch_pause_sec)
+        elif self.yield_sec > 0:
+            self._sleep(self.yield_sec)
+
+
+class _OfflineFaceDB:
+    """Shared gallery, but no live temporary-unknown IDs: offline video must not mint or touch
+    the live ``unknown:Uxxxx`` cache (it would leak foreign faces into live tracking)."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def label_detection_detail(self, frame, cls_id, yolo_name, bbox):
+        return self._db.label_detection_detail(frame, cls_id, yolo_name, bbox, use_unknown_cache=False)
 
 
 def _shrink(frame, max_w: int = OUTPUT_MAX_WIDTH):
@@ -141,7 +185,7 @@ def detect_selected(
             if vehicle:
                 classes |= _VEHICLE_COCO_IDS
             class_ids = sorted(cid for cid in classes if cid in ALLOWED_COCO_CLASS_IDS)
-            face_db = get_face_db() if person and match_staff else None
+            face_db = _OfflineFaceDB(get_face_db()) if person and match_staff else None
             for result in _predict_model(
                 coco,
                 frame,
@@ -336,6 +380,7 @@ def analyze_video_path(
     plate: bool = False,
     sample_fps: float = 0.5,
     progress_cb: Callable[[int, str], None] | None = None,
+    throttle: OfflineThrottle | None = None,
 ) -> dict[str, Any]:
     if not any([person, vehicle, weapon, fire, plate]):
         raise ValueError("Select at least one detection type.")
@@ -424,6 +469,8 @@ def analyze_video_path(
         if progress_cb:
             progress_cb(max(1, min(99, pct)), message)
 
+    if throttle is None:
+        throttle = OfflineThrottle()
     report(4, "Opening video")
     try:
         while True:
@@ -502,6 +549,7 @@ def analyze_video_path(
             frames_written += 1
             scanned += 1
             index += 1
+            throttle.step()  # let live cameras use the GPU between samples
             report(
                 5 + int(90 * scanned / report_frames),
                 f"Tagging {scanned} samples ({t:.0f}s / {duration:.0f}s)",

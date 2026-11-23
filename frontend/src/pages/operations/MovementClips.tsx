@@ -47,9 +47,13 @@ export default function MovementClipsPage() {
     return () => window.clearTimeout(timer)
   }, [search])
 
-  useEffect(() => {
+  // Back to page 1 whenever a filter changes (adjust state during render).
+  const filterKey = JSON.stringify([debouncedSearch, camera, objectType, dateFrom, dateTo, timeFrom, timeTo])
+  const [pageFilterKey, setPageFilterKey] = useState(filterKey)
+  if (pageFilterKey !== filterKey) {
+    setPageFilterKey(filterKey)
     setPage(1)
-  }, [debouncedSearch, camera, objectType, dateFrom, dateTo, timeFrom, timeTo])
+  }
 
   const camerasQuery = useQuery({
     queryKey: ["movement-clips-cameras"],

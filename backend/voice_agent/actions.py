@@ -499,7 +499,7 @@ ACTIONS: dict[str, Action] = {
                _visitor_decide(True)),
         Action("visitor.deny", "Deny a visitor (revokes their pass).", "visitors.write", "visitors",
                {"reason": _REASON}, _visitor_decide(False)),
-        Action("visitor_alert.acknowledge", "Acknowledge a visitor security alert.", "alerts.write",
+        Action("visitor_alert.acknowledge", "Acknowledge a visitor security alert.", "visitor_alerts.write",
                "visitor_security_alerts", {},
                _post("/api/security/alerts/{pk}/acknowledge/", lambda u, v: {"acknowledged_by": _who(u)})),
         Action("leave.request", "File a leave request for a staff member.", "leave.write", None,
@@ -540,7 +540,7 @@ ACTIONS: dict[str, Action] = {
                _post("/api/infra/alerts/{pk}/acknowledge/")),
         Action("infra_alert.resolve", "Resolve an infrastructure alert.", "alerts.write", "infra_alerts", {},
                _post("/api/infra/alerts/{pk}/resolve/")),
-        Action("destruction_alert.acknowledge", "Acknowledge a goods-destruction alert.", "alerts.write",
+        Action("destruction_alert.acknowledge", "Acknowledge a goods-destruction alert.", "destruction_alerts.write",
                "destruction_alerts", {}, _post("/api/warehouse/destruction-alerts/{pk}/acknowledge/")),
     ]
 }

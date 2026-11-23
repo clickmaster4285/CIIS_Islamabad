@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Users, UserPlus, Mail, Search, Eye, Edit, Trash2, ChevronLeft, ChevronRight } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -82,11 +82,12 @@ export default function EmployeesPage() {
     }
   }
 
+  const matchesLocation = locations.matches
   const filtered = useMemo(
     () =>
       staff.filter(
         (s) =>
-          locations.matches(s.location_code, sourceLocation) &&
+          matchesLocation(s.location_code, sourceLocation) &&
           (!search.trim() ||
           s.full_name?.toLowerCase().includes(search.toLowerCase()) ||
           s.father_name?.toLowerCase().includes(search.toLowerCase()) ||
@@ -99,19 +100,21 @@ export default function EmployeesPage() {
           s.transferred_from?.toLowerCase().includes(search.toLowerCase()) ||
           s.transferred_to?.toLowerCase().includes(search.toLowerCase()))
       ),
-    [staff, search, sourceLocation, locations.matches]
+    [staff, search, sourceLocation, matchesLocation]
   )
 
-  useEffect(() => {
+  // Back to page 1 when the search or location filter changes (adjusted during render).
+  const [prevFilters, setPrevFilters] = useState({ search, sourceLocation })
+  if (prevFilters.search !== search || prevFilters.sourceLocation !== sourceLocation) {
+    setPrevFilters({ search, sourceLocation })
     setPage(1)
-  }, [search, sourceLocation])
+  }
 
   const count = filtered.length
   const totalPages = Math.max(1, Math.ceil(count / pageSize))
 
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages)
-  }, [page, totalPages])
+  // Clamp the page when the list shrinks (adjusted during render).
+  if (page > totalPages) setPage(totalPages)
 
   const pagedStaff = useMemo(
     () => filtered.slice((page - 1) * pageSize, page * pageSize),

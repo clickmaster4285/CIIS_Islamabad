@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertTriangle, Plus } from "lucide-react"
+import { Plus } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -55,13 +55,9 @@ function saveRows(rows: ExpiryRow[]) {
 const PRIORITIES = ["High", "Medium", "Low"]
 
 export default function ExpiryTrackingPage() {
-  const [rows, setRows] = useState<ExpiryRow[]>([])
+  const [rows, setRows] = useState<ExpiryRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ itemId: "", desc: "", expiry: "", days: 0, priority: "Medium" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

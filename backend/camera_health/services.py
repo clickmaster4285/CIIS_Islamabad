@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
 import io
 import json
 import logging
 import sys
+import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 from django.conf import settings
+from django.db import close_old_connections
+from django.db.models import Count, Max, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from cameras.models import Camera
@@ -24,6 +30,21 @@ from ml.client import (
 from .models import CameraHealthAlert, CameraHealthSnapshot, HealthStatus
 
 logger = logging.getLogger(__name__)
+
+# One scan-all at a time per process (worker loop and API-triggered scans share it).
+scan_lock = threading.Lock()
+
+
+def _redact_url(url: str) -> str:
+    """scheme://host[:port]/path only — the query (rtsp_url=... with NVR login) is dropped."""
+    try:
+        parts = urlsplit(url or "")
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return f"{parts.scheme}://{host}{parts.path}" + ("?<redacted>" if parts.query else "")
+    except Exception:
+        return "<url>"
 
 
 def _ml_services_on_path() -> None:
@@ -100,6 +121,7 @@ def _analyze_via_ml(
         data=data,
         files=files or None,
         timeout=timeout,
+        headers=ml_auth_headers(),
     )
     if res.status_code >= 400:
         raise MLServiceError(f"Camera health analyze failed ({res.status_code})", res.status_code)
@@ -133,11 +155,16 @@ def _fetch_frame_bytes(camera: Camera) -> tuple[bytes | None, bool]:
             continue
         seen.add(url)
         try:
-            res = requests.get(url, timeout=(3.0, 12.0))
+            res = requests.get(url, timeout=(3.0, 12.0), headers=ml_auth_headers())
             if res.status_code == 200 and res.content and len(res.content) > 100:
                 return res.content, True
         except requests.RequestException as exc:
-            logger.debug("[camera-health] jpeg fetch failed cam=%s url=%s: %s", camera.pk, url, exc)
+            logger.debug(
+                "[camera-health] jpeg fetch failed cam=%s url=%s: %s",
+                camera.pk,
+                _redact_url(url),
+                type(exc).__name__,
+            )
     return None, False
 
 
@@ -354,8 +381,10 @@ def _upsert_alerts(camera: Camera, snap: CameraHealthSnapshot, alerts: list[dict
     ).exclude(alert_type="healthy").update(resolved=True, resolved_at=now)
 
 
-def scan_all_cameras(*, limit: int | None = None) -> dict[str, Any]:
-    qs = Camera.objects.filter(is_active=True).select_related("nvr", "nvr__site")
+def scan_all_cameras(*, limit: int | None = None, camera_ids: list[int] | None = None) -> dict[str, Any]:
+    qs = Camera.objects.filter(is_active=True).select_related("nvr", "nvr__site").order_by("id")
+    if camera_ids is not None:
+        qs = qs.filter(id__in=camera_ids)
     if limit:
         qs = qs[: int(limit)]
     ok = 0
@@ -372,14 +401,78 @@ def scan_all_cameras(*, limit: int | None = None) -> dict[str, Any]:
     return {"ok": ok, "failed": failed, "snapshot_ids": snapshots}
 
 
-def latest_summaries() -> list[dict[str, Any]]:
-    cameras = Camera.objects.filter(is_active=True).select_related("nvr", "nvr__site")
+def start_background_scan(*, camera_ids: list[int] | None = None, limit: int | None = None) -> bool:
+    """
+    Run scan_all_cameras in a background thread. Returns False (nothing started) when a
+    scan is already running in this process, so scans never pile up.
+    """
+    if not scan_lock.acquire(blocking=False):
+        return False
+
+    def _run() -> None:
+        close_old_connections()
+        try:
+            result = scan_all_cameras(limit=limit, camera_ids=camera_ids)
+            logger.info("[camera-health] manual scan ok=%s failed=%s", result.get("ok"), result.get("failed"))
+        except Exception:
+            logger.exception("[camera-health] manual scan failed")
+        finally:
+            close_old_connections()
+            scan_lock.release()
+
+    try:
+        threading.Thread(target=_run, name="camera-health-scan", daemon=True).start()
+    except Exception:
+        scan_lock.release()
+        raise
+    return True
+
+
+def prune_old_snapshots() -> int:
+    """
+    Delete snapshots older than CAMERA_HEALTH_SNAPSHOT_RETENTION_DAYS (default 7; 0 = keep
+    all), in batches. The newest snapshot of every camera is always kept.
+    """
+    from infrastructure_monitoring.retention import prune_queryset
+
+    try:
+        days = int(getattr(settings, "CAMERA_HEALTH_SNAPSHOT_RETENTION_DAYS", 7))
+    except (TypeError, ValueError):
+        days = 7
+    if days <= 0:
+        return 0
+    cutoff = timezone.now() - timedelta(days=days)
+    latest_ids = (
+        CameraHealthSnapshot.objects.values("camera_id").annotate(m=Max("id")).values("m")
+    )
+    qs = CameraHealthSnapshot.objects.filter(timestamp__lt=cutoff).exclude(id__in=Subquery(latest_ids))
+    return prune_queryset(qs)
+
+
+def latest_summaries(cameras=None) -> list[dict[str, Any]]:
+    """
+    One row per active camera (optionally a pre-scoped Camera queryset) with its latest
+    snapshot and open-alert count — fixed number of queries, no per-camera lookups.
+    """
+    if cameras is None:
+        cameras = Camera.objects.all()
+    latest_snap = (
+        CameraHealthSnapshot.objects.filter(camera=OuterRef("pk")).order_by("-timestamp", "-id").values("id")[:1]
+    )
+    cameras = list(
+        cameras.filter(is_active=True)
+        .select_related("nvr", "nvr__site")
+        .annotate(
+            latest_snapshot_id=Subquery(latest_snap),
+            open_alert_count=Count("health_alerts", filter=Q(health_alerts__resolved=False), distinct=True),
+        )
+    )
+    snap_ids = [c.latest_snapshot_id for c in cameras if c.latest_snapshot_id]
+    snaps = {s.id: s for s in CameraHealthSnapshot.objects.filter(id__in=snap_ids)}
     rows = []
     for cam in cameras:
-        latest = (
-            CameraHealthSnapshot.objects.filter(camera=cam).order_by("-timestamp").first()
-        )
-        open_alerts = CameraHealthAlert.objects.filter(camera=cam, resolved=False).count()
+        latest = snaps.get(cam.latest_snapshot_id)
+        open_alerts = cam.open_alert_count or 0
         top_rec = ""
         if latest and isinstance(latest.recommendations, list) and latest.recommendations:
             first = latest.recommendations[0]

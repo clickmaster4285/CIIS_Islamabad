@@ -583,7 +583,7 @@ export function WalkInStep1VisitorDetails({
         "cnic-required",
         "CNIC number is required",
         function (obj) {
-          const v = obj as any
+          const v = obj as { cnicNumber?: string | number | null } | undefined
           const cnic = (v?.cnicNumber || "").toString().trim()
           return Boolean(cnic)
         }

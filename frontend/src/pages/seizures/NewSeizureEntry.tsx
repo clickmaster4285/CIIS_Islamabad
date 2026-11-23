@@ -72,20 +72,19 @@ function getDefaultForm(): SeizureRegistrationForm {
 type StoredSeizure = SeizureRegistrationForm & { id: string }
 
 export default function NewSeizureEntryPage() {
-  const [entries, setEntries] = useState<StoredSeizure[]>([])
-  const [showModal, setShowModal] = useState(false)
-  const [showFlow, setShowFlow] = useState(false)
-  const [formData, setFormData] = useState<SeizureRegistrationForm>(getDefaultForm())
-
-  useEffect(() => {
+  const [entries, setEntries] = useState<StoredSeizure[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY)
       if (stored) {
         const parsed = JSON.parse(stored)
-        if (Array.isArray(parsed)) setEntries(parsed)
+        if (Array.isArray(parsed)) return parsed
       }
     } catch {}
-  }, [])
+    return []
+  })
+  const [showModal, setShowModal] = useState(false)
+  const [showFlow, setShowFlow] = useState(false)
+  const [formData, setFormData] = useState<SeizureRegistrationForm>(getDefaultForm())
 
   useEffect(() => {
     if (entries.length > 0) localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))

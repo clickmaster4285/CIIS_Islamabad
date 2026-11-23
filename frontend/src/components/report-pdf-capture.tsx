@@ -11,7 +11,9 @@ type ReportPdfCaptureProps = {
 export function ReportPdfCapture({ filename, children, onDone }: ReportPdfCaptureProps) {
   const ref = useRef<HTMLDivElement>(null)
   const onDoneRef = useRef(onDone)
-  onDoneRef.current = onDone
+  useEffect(() => {
+    onDoneRef.current = onDone
+  })
 
   useEffect(() => {
     const el = ref.current

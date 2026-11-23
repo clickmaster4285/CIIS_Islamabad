@@ -72,8 +72,10 @@ def recover_frames(src_path: str, work_dir: str) -> dict[str, Any]:
             num = int(base.replace("frame_", "").replace(".jpg", ""))
             indices.append(num)
         if indices:
+            # Numbers absent from the sequence; bad (undecodable) frames are counted
+            # separately and are not missing.
             expected = max(indices) - min(indices) + 1
-            missing_count = max(0, expected - len(valid_frames))
+            missing_count = max(0, expected - len(extracted))
 
     return {
         "total_extracted": len(extracted),

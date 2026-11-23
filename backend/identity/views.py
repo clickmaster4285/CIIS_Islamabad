@@ -1,3 +1,8 @@
+import logging
+import threading
+
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import close_old_connections, connection
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -9,6 +14,7 @@ from identity.models import (
     ClusterStatus,
     FaceGalleryEntry,
     IdentityDecision,
+    IdentityProfile,
     PersonObservation,
     ReviewStatus,
     UnknownCluster,
@@ -27,6 +33,7 @@ from identity.serializers import (
 from identity.services.attendance_policy import (
     approve_decision,
     automatic_readiness,
+    default_mode,
     get_profile,
     reject_decision,
 )
@@ -34,6 +41,19 @@ from identity.services.clustering import assign_cluster, run_unknown_clustering
 from identity.services.gallery import INSIGHTFACE_MODEL, SFACE_MODEL, get_gallery_index
 from users.models import Staff
 from users.permissions import IsAdminOrHR
+
+
+logger = logging.getLogger(__name__)
+
+
+def peek_profile(staff) -> IdentityProfile:
+    """The staff member's profile without writing: an unsaved default when none exists yet.
+
+    GET requests must not create rows (get_profile does get_or_create)."""
+    try:
+        return staff.identity_profile
+    except ObjectDoesNotExist:
+        return IdentityProfile(staff=staff, recognition_mode=default_mode())
 
 
 def _int(value, default: int) -> int:
@@ -64,8 +84,8 @@ def _profile_data(profile, sizes: dict, pending: int | None = None) -> dict:
     return data
 
 
-def _profile_payload(staff: Staff) -> dict:
-    return _profile_data(get_profile(staff), _gallery_sizes([staff.pk]))
+def _profile_payload(staff: Staff, profile=None) -> dict:
+    return _profile_data(profile or peek_profile(staff), _gallery_sizes([staff.pk]))
 
 
 class IdentityProfileListView(APIView):
@@ -74,9 +94,11 @@ class IdentityProfileListView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def get(self, request):
-        staff_qs = Staff.objects.filter(
-            Q(face_enrollment__is_trained=True) | Q(face_gallery__is_active=True)
-        ).distinct()
+        staff_qs = (
+            Staff.objects.filter(Q(face_enrollment__is_trained=True) | Q(face_gallery__is_active=True))
+            .distinct()
+            .select_related("identity_profile", "identity_profile__mode_changed_by")
+        )
         sizes = _gallery_sizes()
         pending = dict(
             IdentityDecision.objects.filter(review_status=ReviewStatus.PENDING)
@@ -86,7 +108,7 @@ class IdentityProfileListView(APIView):
         )
         rows = []
         for staff in staff_qs.order_by("full_name"):
-            rows.append(_profile_data(get_profile(staff), sizes, pending.get(staff.pk, 0)))
+            rows.append(_profile_data(peek_profile(staff), sizes, pending.get(staff.pk, 0)))
         loaded = {}
         for model in (INSIGHTFACE_MODEL, SFACE_MODEL):
             index = get_gallery_index(model)
@@ -127,7 +149,7 @@ class StaffModeView(APIView):
         profile.mode_changed_by = request.user if request.user.is_authenticated else None
         profile.mode_changed_at = timezone.now()
         profile.save(update_fields=["recognition_mode", "mode_changed_by", "mode_changed_at", "updated_at"])
-        return Response(_profile_payload(staff))
+        return Response(_profile_payload(staff, profile))
 
 
 class GalleryEntryView(APIView):
@@ -268,6 +290,13 @@ class ClusterDetailView(APIView):
             ),
             pk=cluster_id,
         )
+        members = list(cluster.members.all())
+        obs_counts = dict(
+            PersonObservation.objects.filter(journey_person_id__in=[m.journey_person_id for m in members])
+            .values("journey_person_id")
+            .annotate(n=Count("id"))
+            .values_list("journey_person_id", "n")
+        )
         data = UnknownClusterSerializer(cluster).data
         data["members"] = [
             {
@@ -277,9 +306,9 @@ class ClusterDetailView(APIView):
                 "latest_camera": getattr(m.journey_person.latest_camera, "name", None),
                 "latest_seen_at": m.journey_person.latest_seen_at,
                 "snapshot_url": _media_url(journey_person_latest_snapshot_url(m.journey_person) or ""),
-                "observations": m.journey_person.observations.count(),
+                "observations": obs_counts.get(m.journey_person_id, 0),
             }
-            for m in cluster.members.all()
+            for m in members
         ]
         obs = (
             PersonObservation.objects.filter(journey_person__unknown_cluster_membership__cluster=cluster)
@@ -339,8 +368,50 @@ class ClusterDismissView(APIView):
         return Response({"status": cluster.status})
 
 
+_cluster_lock = threading.Lock()
+_cluster_state: dict = {"running": False, "last": None, "error": None}
+_EMPTY_STATS = {"unknown_persons": 0, "clusters": 0, "multi_person_clusters": 0, "candidates_suggested": 0}
+
+
+def _cluster_in_background() -> None:
+    close_old_connections()
+    try:
+        stats = run_unknown_clustering()
+        with _cluster_lock:
+            _cluster_state.update(last=stats, error=None)
+    except Exception as exc:
+        logger.exception("[identity] background clustering failed")
+        with _cluster_lock:
+            _cluster_state["error"] = str(exc)
+    finally:
+        with _cluster_lock:
+            _cluster_state["running"] = False
+        connection.close()
+
+
 class ClusterRunView(APIView):
+    """Start unknown-person clustering on a background thread (it compares every unknown
+    face with every other and can take minutes). One run at a time. Returns 202 with the
+    previous run's numbers; GET shows whether a run is in progress."""
+
     permission_classes = [IsAdminOrHR]
 
+    def _payload(self, started: bool) -> dict:
+        with _cluster_lock:
+            last = _cluster_state["last"] or _EMPTY_STATS
+            return {**last, "running": _cluster_state["running"], "started": started, "error": _cluster_state["error"]}
+
+    def get(self, request):
+        return Response(self._payload(False))
+
     def post(self, request):
-        return Response(run_unknown_clustering())
+        with _cluster_lock:
+            if _cluster_state["running"]:
+                busy = True
+            else:
+                busy = False
+                _cluster_state["running"] = True
+        if busy:
+            return Response(self._payload(False), status=status.HTTP_409_CONFLICT)
+        threading.Thread(target=_cluster_in_background, name="identity-clustering", daemon=True).start()
+        return Response(self._payload(True), status=status.HTTP_202_ACCEPTED)

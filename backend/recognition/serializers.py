@@ -7,6 +7,8 @@ class FaceEnrollmentDetailSerializer(serializers.ModelSerializer):
     staff_id = serializers.IntegerField(source="staff.id", read_only=True)
     employee_id = serializers.CharField(source="staff.employee_id", read_only=True, allow_null=True)
     staff_name = serializers.CharField(source="staff.full_name", read_only=True)
+    department = serializers.CharField(source="staff.department", read_only=True)
+    images_required = serializers.SerializerMethodField()
 
     class Meta:
         model = FaceEnrollment
@@ -15,15 +17,22 @@ class FaceEnrollmentDetailSerializer(serializers.ModelSerializer):
             "staff_id",
             "employee_id",
             "staff_name",
+            "department",
             "is_enrolled",
             "is_trained",
             "total_images",
+            "images_required",
             "model_version",
             "dataset_folder",
             "profile_image",
             "created_at",
             "updated_at",
         ]
+
+    def get_images_required(self, obj):
+        from recognition.services.training import min_enrollment_images
+
+        return min_enrollment_images()
 
 
 class DetectionSnapshotSerializer(serializers.ModelSerializer):

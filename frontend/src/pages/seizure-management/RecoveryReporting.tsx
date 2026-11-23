@@ -27,7 +27,6 @@ export default function RecoveryReportingPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
     fetchRecoveryMemos()
       .then(setRows)
       .catch(() => setRows([]))

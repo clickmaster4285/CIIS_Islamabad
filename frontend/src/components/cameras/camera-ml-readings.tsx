@@ -28,7 +28,7 @@ type CameraMlReadingsProps = {
 }
 
 export function CameraMlReadings({
-  camera,
+  camera: _camera,
   readings,
   lastScanAt,
   scanning,

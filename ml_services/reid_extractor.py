@@ -1,17 +1,22 @@
 """Appearance ReID feature extraction.
 
 Default: OSNet-inspired multi-part (stripe) embedding — no external weights.
-Optional: load a Torch OSNet checkpoint if ML_REID_BACKEND=osnet and weights exist.
+Optional: Torch OSNet when ML_REID_BACKEND=osnet (strict: [] if it cannot load, unless
+ML_REID_ALLOW_HANDCRAFTED_FALLBACK=1) or ML_REID_BACKEND=auto (OSNet if it loads).
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 REID_DIM = 512
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,6 +24,8 @@ BASE_DIR = Path(__file__).resolve().parent
 _osnet_model: Any = None
 _osnet_device: str | None = None
 _osnet_failed = False
+_osnet_error = ""
+_osnet_load_lock = threading.Lock()
 
 
 def _env_backend() -> str:
@@ -113,88 +120,134 @@ def _torchreid_available() -> bool:
     return importlib.util.find_spec("torchreid") is not None
 
 
-def _try_osnet_embedding(person_crop: np.ndarray) -> list[float]:
-    """Optional Torch OSNet via torchreid if installed + weights present."""
+def _allow_handcrafted_fallback() -> bool:
+    """Explicit opt-in: may a requested-but-broken OSNet silently degrade to handcrafted vectors?"""
+    return (os.getenv("ML_REID_ALLOW_HANDCRAFTED_FALLBACK", "0") or "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _osnet_requested() -> bool:
+    return _env_backend() in ("osnet", "torchreid", "auto")
+
+
+def _strict_osnet() -> bool:
+    """``osnet`` / ``torchreid`` = OSNet explicitly required; ``auto`` = OSNet if possible."""
+    return _env_backend() in ("osnet", "torchreid")
+
+
+def _report_osnet_failure(reason: str) -> None:
+    global _osnet_error
+    _osnet_error = reason
+    policy = (
+        "falling back to handcrafted part-based ReID (ML_REID_ALLOW_HANDCRAFTED_FALLBACK=1)"
+        if (_allow_handcrafted_fallback() or not _strict_osnet())
+        else "ReID embeddings DISABLED (returning []). Fix the weights/torch install, or set "
+        "ML_REID_ALLOW_HANDCRAFTED_FALLBACK=1 to accept handcrafted vectors (different vector "
+        "space: never mix them with OSNet galleries)"
+    )
+    msg = f"[reid] ERROR: OSNet requested (ML_REID_BACKEND={_env_backend()}) but unavailable: {reason} — {policy}"
+    logger.error(msg)
+    print(msg, flush=True)
+
+
+def _load_osnet() -> bool:
+    """Load OSNet once (double-checked under a lock). True when the model is ready."""
     global _osnet_model, _osnet_device, _osnet_failed
+    if _osnet_model is not None:
+        return True
     if _osnet_failed:
-        return []
-    if person_crop is None or person_crop.size == 0:
-        return []
+        return False
+    with _osnet_load_lock:
+        if _osnet_model is not None:
+            return True
+        if _osnet_failed:
+            return False
 
-    weights = _resolve_osnet_weights()
-    if weights is None:
-        return []
+        weights = _resolve_osnet_weights()
+        if weights is None:
+            _osnet_failed = True
+            _report_osnet_failure("no OSNet weights found (ML_REID_WEIGHTS / runs/reid/*.pth)")
+            return False
 
-    try:
-        import torch
-        import torch.nn.functional as F
-    except Exception:
-        _osnet_failed = True
-        return []
+        try:
+            import torch
+        except Exception as exc:
+            _osnet_failed = True
+            _report_osnet_failure(f"torch import failed ({exc})")
+            return False
 
-    if _osnet_model is None and not _torchreid_available():
-        # torchreid is not installed (needs a C compiler on Windows): same network, bundled
         try:
             from inference_engine import resolve_ml_device
-            from osnet import load_osnet_x1_0
 
             device = "cpu" if resolve_ml_device() == "cpu" else "cuda"
-            _osnet_model = load_osnet_x1_0(str(weights), device)
-            _osnet_device = device
-            print(f"[reid] OSNet loaded from {weights} ({device}, bundled osnet.py, all tensors matched)")
-        except Exception as exc:
-            print(f"[reid] OSNet unavailable ({exc}) — using part-based ReID")
-            _osnet_failed = True
-            return []
+        except Exception:
+            device = "cpu"
 
-    if _osnet_model is None:
+        if not _torchreid_available():
+            # torchreid is not installed (needs a C compiler on Windows): same network, bundled
+            try:
+                from osnet import load_osnet_x1_0
+
+                model = load_osnet_x1_0(str(weights), device)
+                _osnet_device = device
+                _osnet_model = model
+                print(f"[reid] OSNet loaded from {weights} ({device}, bundled osnet.py, all tensors matched)")
+                return True
+            except Exception as exc:
+                _osnet_failed = True
+                _report_osnet_failure(f"bundled OSNet load failed ({exc})")
+                return False
+
         try:
             import torchreid  # type: ignore
 
-            from inference_engine import resolve_ml_device
+            from osnet import load_checkpoint_state
 
-            resolved = resolve_ml_device()
-            device = "cpu" if resolved == "cpu" else "cuda"
             model = torchreid.models.build_model(
                 name="osnet_x1_0",
                 num_classes=1,
                 pretrained=False,
                 use_gpu=device != "cpu",
             )
-            state = torch.load(str(weights), map_location="cpu")
-            if isinstance(state, dict) and "state_dict" in state:
-                state = state["state_dict"]
+            state = load_checkpoint_state(str(weights))
             # strict=False only skips missing/unexpected keys — it still raises on a
             # shape mismatch for a key present in both. The checkpoint's classifier
             # head is sized for its own training classes (e.g. 751 for Market1501),
             # which never matches num_classes=1 here; we only need the 512-d backbone
             # embedding anyway, so drop any tensor whose shape doesn't match ours.
+            state = {k.removeprefix("module."): v for k, v in state.items()}
             model_state = model.state_dict()
             filtered = {k: v for k, v in state.items() if k in model_state and v.shape == model_state[k].shape}
             skipped = [k for k in state if k not in filtered]
             model.load_state_dict(filtered, strict=False)
             model.eval()
             model = model.to(device)
-            _osnet_model = model
             _osnet_device = device
+            _osnet_model = model
             print(
                 f"[reid] OSNet loaded from {weights} ({device}); "
                 f"matched {len(filtered)}/{len(model_state)} tensors (skipped {skipped or 'none'})"
             )
+            return True
         except Exception as exc:
-            print(f"[reid] OSNet unavailable ({exc}) — using part-based ReID")
             _osnet_failed = True
-            return []
+            _report_osnet_failure(f"torchreid OSNet load failed ({exc})")
+            return False
 
+
+def _try_osnet_embedding(person_crop: np.ndarray) -> list[float]:
+    """OSNet vector for one crop, or [] (model unavailable or this crop failed)."""
+    if person_crop is None or person_crop.size == 0:
+        return []
+    if not _load_osnet():
+        return []
     try:
         import torch
 
-        img = cv2.resize(person_crop, (128, 256), interpolation=cv2.INTER_LINEAR)
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        rgb = (rgb - mean) / std
-        tensor = torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0).to(_osnet_device)
+        tensor = torch.from_numpy(_osnet_preprocess(person_crop)).unsqueeze(0).to(_osnet_device)
         with torch.no_grad():
             feat = _osnet_model(tensor)
             if isinstance(feat, (tuple, list)):
@@ -206,26 +259,47 @@ def _try_osnet_embedding(person_crop: np.ndarray) -> list[float]:
         else:
             vec = vec[:REID_DIM]
         return [float(v) for v in vec]
-    except Exception:
+    except Exception as exc:
+        logger.warning("[reid] OSNet inference failed for one crop: %s", exc)
         return []
+
+
+def reid_model_name() -> str:
+    """Which vector space ``extract_reid_embedding`` currently produces.
+
+    "osnet" | "handcrafted" | "" (no embeddings: OSNet required but unavailable). Vectors from
+    different spaces must never be compared — tag stored galleries with this.
+    """
+    if not _osnet_requested():
+        return "handcrafted"
+    if _osnet_model is not None or _load_osnet():
+        return "osnet"
+    if _allow_handcrafted_fallback() or not _strict_osnet():
+        return "handcrafted"
+    return ""
+
+
+def extract_reid_embedding_tagged(person_crop: np.ndarray) -> tuple[list[float], str]:
+    """``(vector, model)`` — same vector as ``extract_reid_embedding`` plus its backend tag."""
+    vec = extract_reid_embedding(person_crop)
+    return vec, (reid_model_name() if vec else "")
 
 
 def extract_reid_embedding(person_crop: np.ndarray) -> list[float]:
     """
     Extract a normalized appearance embedding from a person/vehicle crop.
 
-    Backend:
-      - parts (default): multi-stripe OSNet-inspired features
-      - osnet: Torch OSNet when weights + torchreid are available, else parts
+    Backend (ML_REID_BACKEND):
+      - parts (default): multi-stripe OSNet-inspired handcrafted features
+      - osnet / torchreid: Torch OSNet. If OSNet cannot load, returns [] (logged as ERROR) —
+        unless ML_REID_ALLOW_HANDCRAFTED_FALLBACK=1, then handcrafted vectors are returned.
+      - auto: OSNet when it loads, otherwise handcrafted.
+    Never mixes the two spaces silently: once OSNet is loaded a failed crop gives [].
     """
-    backend = _env_backend()
-    if backend in ("osnet", "torchreid", "auto"):
-        vec = _try_osnet_embedding(person_crop)
-        if vec:
-            return vec
-        if _osnet_model is not None:
-            # OSNet is loaded but this crop failed: skip it. A handcrafted vector lives in a different
-            # space and would corrupt the person's gallery (cosine between the two is meaningless).
+    if _osnet_requested():
+        if _load_osnet():
+            return _try_osnet_embedding(person_crop)
+        if _strict_osnet() and not _allow_handcrafted_fallback():
             return []
     return _part_embedding(person_crop)
 
@@ -243,10 +317,14 @@ def extract_reid_embeddings(crops: list[np.ndarray | None]) -> list[list[float]]
     valid = [i for i, c in enumerate(crops) if c is not None and getattr(c, "size", 0)]
     if not valid:
         return out
-    if _env_backend() in ("osnet", "torchreid", "auto"):
-        if _osnet_model is None and not _osnet_failed:
-            out[valid[0]] = _try_osnet_embedding(crops[valid[0]])  # loads the model
-            valid = valid[1:]
+    if _osnet_requested():
+        # Load first (without consuming a crop), so every crop goes through the same path.
+        if not _load_osnet():
+            if _strict_osnet() and not _allow_handcrafted_fallback():
+                return out
+            for i in valid:
+                out[i] = _part_embedding(crops[i])
+            return out
         if _osnet_model is not None:
             try:
                 import torch

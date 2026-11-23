@@ -359,6 +359,20 @@ def render_xlsx(report: AgentReport) -> bytes:
                 sh.cell(row=r + 2, column=1, value=f"Showing {len(section['rows'])} of {section['total']} records.")
         elif not section["total"]:
             sh.cell(row=r, column=1, value="No records matched.")
+    _neutralise_formulas(wb)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralise_formulas(wb) -> None:
+    """CSV/Excel formula injection: record text such as '=HYPERLINK(...)' must stay plain text."""
+    for sheet in wb.worksheets:
+        for row in sheet.iter_rows():
+            for cell in row:
+                value = cell.value
+                if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+                    cell.value = "'" + value

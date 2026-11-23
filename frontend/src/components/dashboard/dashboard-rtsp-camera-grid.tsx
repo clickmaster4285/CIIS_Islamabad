@@ -17,10 +17,7 @@ import { MlSystemStatus } from "@/components/cameras/ml-system-status"
 import { LOCATION_OPTIONS } from "@/lib/locations"
 import { zoneLabel } from "@/lib/warehouse-zones"
 import { fetchCameras, isCameraAllocated, type CameraRecord } from "@/lib/cameras-api"
-import {
-  ALL_CITIES_CAMERAS_EVENT,
-  getAllCitiesCameras,
-} from "@/lib/all-cities-cameras"
+import { ALL_CITIES_CAMERAS_EVENT } from "@/lib/all-cities-cameras"
 
 const ALL_LOCATIONS = "all"
 const ALL_ZONES = "all"
@@ -44,7 +41,6 @@ export function DashboardRtspCameraGrid() {
         setCameraId(ALL_CAMERAS)
       }
     }
-    if (getAllCitiesCameras()) setLocation(ALL_LOCATIONS)
     window.addEventListener(ALL_CITIES_CAMERAS_EVENT, onAllCities)
     return () => window.removeEventListener(ALL_CITIES_CAMERAS_EVENT, onAllCities)
   }, [])
@@ -63,6 +59,7 @@ export function DashboardRtspCameraGrid() {
   }, [])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount; sets the "refreshing" flag before the async request
     reloadCameras({ blocking: false })
     const onCustom = () => reloadCameras()
     window.addEventListener("camera-integration-updated", onCustom)
@@ -96,12 +93,10 @@ export function DashboardRtspCameraGrid() {
     return [...list].sort((a, b) => a.name.localeCompare(b.name))
   }, [camerasForLocation, zone])
 
-  useEffect(() => {
-    if (cameraId === ALL_CAMERAS) return
-    if (!camerasForZone.some((c) => String(c.id) === cameraId)) {
-      setCameraId(ALL_CAMERAS)
-    }
-  }, [cameraId, camerasForZone])
+  // Drop a camera selection that is no longer in the zone list (adjusted during render).
+  if (cameraId !== ALL_CAMERAS && !camerasForZone.some((c) => String(c.id) === cameraId)) {
+    setCameraId(ALL_CAMERAS)
+  }
 
   const feeds = useMemo(() => {
     let list = allocatedCameras.filter((c) => c.is_active && c.status === "Online")

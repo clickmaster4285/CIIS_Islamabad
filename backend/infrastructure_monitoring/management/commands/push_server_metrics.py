@@ -5,18 +5,28 @@ Run ON the monitored server (e.g. 192.168.190.137):
 
   python manage.py push_server_metrics --device-id 10 --api-base http://<ciis-host>:8000 --token <jwt>
 
-Or serve a pull endpoint for the poller:
+The token can come from the INFRA_AGENT_TOKEN environment variable instead of
+--token (keeps it out of the process list / shell history).
 
-  python manage.py push_server_metrics --serve --port 9410
+Or serve a pull endpoint for the poller. It binds 127.0.0.1 by default; to let the
+CIIS poller pull it over the network pass --bind 0.0.0.0 AND set a shared secret
+(--secret or INFRA_AGENT_SECRET). The poller sends the same secret (settings /
+environment INFRA_AGENT_SECRET, or metadata.agent_secret on the server device) in
+the X-Infra-Agent-Secret header:
 
-Serve + push loop:
+  set INFRA_AGENT_SECRET=<random>
+  python manage.py push_server_metrics --serve --bind 0.0.0.0 --port 9410
 
-  python manage.py push_server_metrics --device-id 10 --api-base http://... --token ... --loop 30 --serve
+Serve + push loop (push errors are logged and the loop keeps running):
+
+  python manage.py push_server_metrics --device-id 10 --api-base http://... --loop 30 --serve
 """
 
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -37,22 +47,40 @@ class Command(BaseCommand):
             default="",
             help="CIIS API base, e.g. http://192.168.190.132:8000",
         )
-        parser.add_argument("--token", type=str, default="", help="JWT / Bearer token")
+        parser.add_argument(
+            "--token",
+            type=str,
+            default="",
+            help="JWT / Bearer token (default: INFRA_AGENT_TOKEN environment variable)",
+        )
         parser.add_argument("--loop", type=int, default=0, help="Repeat every N seconds (0 = once)")
         parser.add_argument("--serve", action="store_true", help="Expose /infra-agent/metrics")
         parser.add_argument("--port", type=int, default=9410)
-        parser.add_argument("--bind", type=str, default="0.0.0.0")
+        parser.add_argument(
+            "--bind",
+            type=str,
+            default="127.0.0.1",
+            help="Address for --serve (default 127.0.0.1; use 0.0.0.0 for poller pulls + set --secret)",
+        )
+        parser.add_argument(
+            "--secret",
+            type=str,
+            default="",
+            help="Shared secret required in X-Infra-Agent-Secret for --serve "
+            "(default: INFRA_AGENT_SECRET environment variable)",
+        )
 
     def handle(self, *args, **options):
         from infrastructure_monitoring.server_health import collect_local_server_metrics
 
         device_id = options["device_id"]
         api_base = (options["api_base"] or "").rstrip("/")
-        token = options["token"] or ""
+        token = options["token"] or os.environ.get("INFRA_AGENT_TOKEN", "")
         loop_sec = int(options["loop"] or 0)
         serve = bool(options["serve"])
         port = int(options["port"])
         bind = options["bind"]
+        secret = (options["secret"] or os.environ.get("INFRA_AGENT_SECRET", "")).strip()
 
         cache: dict = {"metrics": collect_local_server_metrics()}
 
@@ -86,6 +114,13 @@ class Command(BaseCommand):
                 raise CommandError(f"Push failed: {exc}") from exc
 
         if serve:
+            if bind not in ("127.0.0.1", "localhost", "::1") and not secret:
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"Serving on {bind} WITHOUT a shared secret: anyone on the network can "
+                        "read this host's metrics and logs. Set --secret / INFRA_AGENT_SECRET."
+                    )
+                )
 
             class Handler(BaseHTTPRequestHandler):
                 def do_GET(self):  # noqa: N802
@@ -93,6 +128,12 @@ class Command(BaseCommand):
                         self.send_response(404)
                         self.end_headers()
                         return
+                    if secret:
+                        sent = self.headers.get("X-Infra-Agent-Secret") or ""
+                        if not hmac.compare_digest(sent.encode(), secret.encode()):
+                            self.send_response(401)
+                            self.end_headers()
+                            return
                     data = json.dumps(cache.get("metrics") or {}).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -109,12 +150,18 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"Agent listening on {bind}:{port}"))
 
         if device_id and api_base:
-            while True:
-                push_once()
-                if loop_sec <= 0:
-                    break
-                time.sleep(loop_sec)
-                refresh()
+            if loop_sec <= 0:
+                push_once()  # single push: report failure via exit code
+            else:
+                while True:
+                    try:
+                        push_once()
+                    except CommandError as exc:
+                        # Keep the agent alive through CIIS restarts / network blips.
+                        self.stderr.write(self.style.ERROR(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {exc}"))
+                    except Exception as exc:  # noqa: BLE001
+                        self.stderr.write(self.style.ERROR(f"Collect/push error: {exc}"))
+                    time.sleep(loop_sec)
         elif serve:
             self.stdout.write("Serving metrics only (Ctrl+C to stop). Refreshing every 15s…")
             while True:

@@ -6,8 +6,8 @@ import hashlib
 import logging
 from datetime import date, timedelta
 
-from django.apps import apps
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 
 from city_sync.audit import audit
 from city_sync.identity import location_code
@@ -22,7 +22,20 @@ def _hash_pairs(pairs: list[tuple[str, int]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def city_entity_summary(entity_type: str, day: date | None = None) -> tuple[int, str, list[str]]:
+def _day_field(model) -> str | None:
+    """The field a "day" filter uses for this model: date, else created_at, else none."""
+    names = {f.name for f in model._meta.concrete_fields}
+    if "date" in names:
+        return "date"
+    if "created_at" in names:
+        return "created_at"
+    return None
+
+
+def city_entity_summary(
+    entity_type: str, day: date | None = None, loc: str | None = None
+) -> tuple[int, str, list[str]]:
+    """(count, hash, sorted entity ids) of live rows of one type, for one location and day."""
     label = SYNCED_ENTITY_TYPES.get(entity_type)
     if not label:
         return 0, "", []
@@ -31,41 +44,67 @@ def city_entity_summary(entity_type: str, day: date | None = None) -> tuple[int,
     except LookupError:
         return 0, "", []
 
-    qs = model.objects.all()
-    if hasattr(model, "is_deleted"):
+    names = {f.name for f in model._meta.concrete_fields}
+    qs = model._base_manager.all()
+    if "is_deleted" in names:
         qs = qs.filter(is_deleted=False)
     qs = qs.exclude(entity_id__isnull=True)
+    # At HQ the business table also holds HQ's own rows and every other city's copies.
+    if loc and "location_code" in names:
+        codes = [loc.upper()]
+        if loc.upper() == location_code():
+            codes.append("")  # this server's own untagged (legacy) rows
+        qs = qs.filter(location_code__in=codes)
 
-    # Optional day filter when model has date/created_at
-    if day is not None:
-        if hasattr(model, "date"):
-            qs = qs.filter(date=day)
-        elif hasattr(model, "created_at"):
-            qs = qs.filter(created_at__date=day)
+    day_field = _day_field(model)
+    if day is not None and day_field == "date":
+        qs = qs.filter(date=day)
+    elif day is not None and day_field == "created_at":
+        qs = qs.filter(created_at__date=day)
 
-    rows = qs.order_by("entity_id").values_list("entity_id", "version")
-    pairs = [(str(eid), int(ver or 1)) for eid, ver in rows]
+    pairs = [
+        (str(eid), int(ver or 1))
+        for eid, ver in qs.order_by("entity_id").values_list("entity_id", "version").iterator(chunk_size=2000)
+    ]
+    pairs.sort(key=lambda x: x[0])
     return len(pairs), _hash_pairs(pairs), [p[0] for p in pairs]
 
 
+def _payload_day(payload: dict, day_field: str | None) -> date | None:
+    raw = (payload or {}).get(day_field) if day_field else None
+    if not raw:
+        return None
+    if day_field == "date":
+        return parse_date(str(raw)[:10])
+    dt = parse_datetime(str(raw))
+    if dt is None:
+        return parse_date(str(raw)[:10])
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return timezone.localtime(dt).date()
+
+
 def hq_entity_summary(loc: str, entity_type: str, day: date | None = None) -> tuple[int, str, list[str]]:
+    """Same summary from HQ's replica rows of one city (streamed; payloads only read for a day filter)."""
     qs = HqReplicaRow.objects.filter(
         location_code=loc.upper(),
         entity_type=entity_type,
         is_deleted=False,
     )
     pairs: list[tuple[str, int]] = []
-    for row in qs.order_by("entity_id"):
-        if day is not None:
-            payload = row.payload or {}
-            payload_date = str(payload.get("date") or "")[:10]
-            created = str(payload.get("created_at") or "")[:10]
-            if payload_date and payload_date != day.isoformat():
-                if not created or created != day.isoformat():
-                    continue
-            elif created and created != day.isoformat() and not payload_date:
+    if day is None:
+        for eid, ver in qs.values_list("entity_id", "entity_version").iterator(chunk_size=2000):
+            pairs.append((str(eid), int(ver)))
+    else:
+        label = SYNCED_ENTITY_TYPES.get(entity_type)
+        try:
+            day_field = _day_field(resolve_model(label)) if label else None
+        except LookupError:
+            day_field = None
+        for row in qs.only("entity_id", "entity_version", "payload").iterator(chunk_size=500):
+            if day_field is not None and _payload_day(row.payload, day_field) != day:
                 continue
-        pairs.append((str(row.entity_id), int(row.entity_version)))
+            pairs.append((str(row.entity_id), int(row.entity_version)))
     pairs.sort(key=lambda x: x[0])
     return len(pairs), _hash_pairs(pairs), [p[0] for p in pairs]
 
@@ -77,14 +116,18 @@ def run_reconcile_for_location(loc: str, day: date | None = None) -> list[Reconc
     all_ok = True
 
     for entity_type in sorted(SYNCED_ENTITY_TYPES.keys()):
-        city_count, city_hash, city_ids = city_entity_summary(entity_type, day=None)
-        hq_count, hq_hash, hq_ids = hq_entity_summary(loc, entity_type, day=None)
+        # One type at a time; nothing of the previous type stays in memory.
+        city_count, city_hash, city_ids = city_entity_summary(entity_type, day=day, loc=loc)
+        hq_count, hq_hash, hq_ids = hq_entity_summary(loc, entity_type, day=day)
         # Skip empty-empty (entity never used)
         if city_count == 0 and hq_count == 0:
             continue
         ok = city_count == hq_count and city_hash == hq_hash
-        missing = sorted(set(city_ids) - set(hq_ids))
-        extra = sorted(set(hq_ids) - set(city_ids))
+        city_set, hq_set = set(city_ids), set(hq_ids)
+        del city_ids, hq_ids
+        missing = sorted(city_set - hq_set)
+        extra = sorted(hq_set - city_set)
+        del city_set, hq_set
         total_mismatch += len(missing) + len(extra)
         all_ok = all_ok and ok
         reports.append(

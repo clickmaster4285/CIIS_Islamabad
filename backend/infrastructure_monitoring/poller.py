@@ -7,9 +7,32 @@ import socket
 import struct
 import subprocess
 import sys
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Keys derived during a probe. They are dropped before every re-probe so a value from
+# an earlier cycle can never keep a device FAULT/DEGRADED after the condition cleared.
+DERIVED_METRIC_KEYS = ("battery_low",)
+# Fault flags an external agent pushes via update_metrics. They only count while the
+# push is fresh; a modbus register map re-reads them on every poll anyway.
+PUSHED_FAULT_KEYS = ("inverter_fault",)
+PUSH_FRESH_SEC = 600
+
+
+def strip_stale_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Copy of ``metrics`` without derived keys and without stale pushed fault flags."""
+    out = {k: v for k, v in (metrics or {}).items() if k not in DERIVED_METRIC_KEYS}
+    pushed_at = out.get("metrics_pushed_at")
+    try:
+        fresh = pushed_at is not None and (time.time() - float(pushed_at)) <= PUSH_FRESH_SEC
+    except (TypeError, ValueError):
+        fresh = False
+    if not fresh:
+        for key in PUSHED_FAULT_KEYS:
+            out.pop(key, None)
+    return out
 
 
 def ping_host(ip: str, timeout_sec: float = 2.0) -> bool:
@@ -30,7 +53,13 @@ def ping_host(ip: str, timeout_sec: float = 2.0) -> bool:
             text=True,
             timeout=timeout_sec + 2,
         )
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            return False
+        if sys.platform == "win32":
+            # Windows ping exits 0 on "Destination host unreachable" replies from a
+            # gateway; only a real echo reply carries "TTL=".
+            return "TTL=" in (proc.stdout or "").upper()
+        return True
     except Exception as exc:
         logger.debug("ping %s failed: %s", ip, exc)
         return False
@@ -148,7 +177,7 @@ def probe_device(device) -> dict[str, Any]:
     from .models import DeviceStatus, DeviceType, ProtocolType
 
     ip = (device.ip_address or "").strip() if device.ip_address else ""
-    metrics: dict[str, Any] = dict(device.last_metrics or {})
+    metrics: dict[str, Any] = strip_stale_metrics(device.last_metrics or {})
     error = ""
     reachable = False
     protocol_ok = False
@@ -288,7 +317,8 @@ def probe_device(device) -> dict[str, Any]:
         try:
             from .nvr_health import enrich_nvr_metrics
 
-            metrics.update(enrich_nvr_metrics(device))
+            # Reachable now: give the enrich the new status, not last cycle's.
+            metrics.update(enrich_nvr_metrics(device, status=DeviceStatus.ONLINE))
             protocol_ok = True
         except Exception as exc:
             logger.debug("NVR enrich failed: %s", exc)

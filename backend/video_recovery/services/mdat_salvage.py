@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mmap
 import os
 import re
 from typing import Any
@@ -11,13 +12,13 @@ from .ffmpeg_utils import run_ffmpeg
 _NAL_START = re.compile(b"\x00\x00(?:00\x01|01)")
 
 
-def _read_file(path: str) -> bytes:
-    with open(path, "rb") as fh:
-        return fh.read()
+_WRITE_CHUNK = 8 * 1024 * 1024
 
 
-def extract_mdat_payload(data: bytes) -> bytes | None:
-    """Return mdat box payload; handles truncated files (box extends past EOF)."""
+def _mdat_bounds(data) -> tuple[int, int] | None:
+    """(start, end) of the mdat payload; handles truncated files (box extends past EOF).
+
+    Works on bytes or an mmap, so a multi-GB upload is never read into RAM."""
     offset = 0
     file_len = len(data)
     while offset + 8 <= file_len:
@@ -32,16 +33,22 @@ def extract_mdat_payload(data: bytes) -> bytes | None:
         payload_start = offset + header
         if box_type == b"mdat":
             if size == 0 or offset + size > file_len:
-                return data[payload_start:file_len]
-            return data[payload_start : offset + size]
+                return payload_start, file_len
+            return payload_start, offset + size
         if size == 0:
             break
         offset += size
     # Fallback: search for mdat marker when box structure is broken
     idx = data.find(b"mdat")
     if idx >= 8:
-        return data[idx + 8 : file_len]
+        return idx + 8, file_len
     return None
+
+
+def extract_mdat_payload(data: bytes) -> bytes | None:
+    """Return mdat box payload bytes (small in-memory inputs; see _mdat_bounds)."""
+    bounds = _mdat_bounds(data)
+    return data[bounds[0] : bounds[1]] if bounds else None
 
 
 def find_avcc_offset(payload: bytes) -> int:
@@ -78,11 +85,14 @@ def _looks_like_avcc_nal(data: bytes, pos: int) -> bool:
     return nal_type in (1, 5, 6, 7, 8, 9)
 
 
-def avcc_to_annex_b(payload: bytes) -> bytes:
-    """Convert length-prefixed NAL units (MP4 mdat) to Annex-B start codes."""
+def avcc_to_annex_b(payload: bytes, out=None):
+    """Convert length-prefixed NAL units (MP4 mdat) to Annex-B start codes.
+
+    With ``out`` (a binary file) the result is streamed there and the NAL count returned;
+    without it the converted bytes are returned (b"" when nothing was found)."""
     start = find_avcc_offset(payload)
     data = payload[start:]
-    out = bytearray()
+    buf = bytearray()
     i = 0
     length = len(data)
     valid_nals = 0
@@ -103,13 +113,20 @@ def avcc_to_annex_b(payload: bytes) -> bytes:
 
         nal_len = int.from_bytes(data[i : i + 4], "big")
         i += 4
-        out.extend(b"\x00\x00\x00\x01")
-        out.extend(data[i : i + nal_len])
+        buf.extend(b"\x00\x00\x00\x01")
+        buf.extend(data[i : i + nal_len])
         i += nal_len
         valid_nals += 1
+        if out is not None and len(buf) >= _WRITE_CHUNK:
+            out.write(buf)
+            buf.clear()
 
+    if out is not None:
+        if buf:
+            out.write(buf)
+        return valid_nals
     if valid_nals >= 1:
-        return bytes(out)
+        return bytes(buf)
     return b""
 
 
@@ -120,36 +137,67 @@ def scan_annex_b(payload: bytes) -> bytes:
     return b""
 
 
+def _count_start_codes(mm, start: int, end: int) -> int:
+    count, pos = 0, mm.find(b"\x00\x00\x00\x01", start, end)
+    while pos != -1:
+        count += 1
+        pos = mm.find(b"\x00\x00\x00\x01", pos + 4, end)
+    return count
+
+
+def _write_annex_b(mm, raw_path: str) -> tuple[int, int]:
+    """Write the mdat's H.264/H.265 stream to raw_path. Returns (nal_count, bytes_written);
+    nal_count is -1 when the file has no usable mdat. Views into the mmap are released on
+    return, so the caller can close the mapping."""
+    bounds = _mdat_bounds(mm)
+    if not bounds or bounds[1] - bounds[0] < 256:
+        return -1, 0
+    view = memoryview(mm)
+    try:
+        payload = view[bounds[0] : bounds[1]]
+        try:
+            with open(raw_path, "wb") as fh:
+                nals = avcc_to_annex_b(payload, out=fh)
+            if nals < 1 and _NAL_START.search(payload[:4096]):
+                # Already Annex-B: copy the payload as-is, in chunks.
+                with open(raw_path, "wb") as fh:
+                    for pos in range(0, len(payload), _WRITE_CHUNK):
+                        fh.write(payload[pos : pos + _WRITE_CHUNK])
+                nals = max(1, _count_start_codes(mm, bounds[0], bounds[1]))
+            written = os.path.getsize(raw_path) if nals >= 1 else 0
+            return nals, written
+        finally:
+            payload.release()
+    finally:
+        view.release()
+
+
 def salvage_mdat_stream(src_path: str, work_dir: str) -> dict[str, Any]:
     """
     Extract decodable H.264 from truncated MP4 when moov/index is missing.
     Re-encodes to a playable MP4.
     """
     os.makedirs(work_dir, exist_ok=True)
-    data = _read_file(src_path)
-    mdat = extract_mdat_payload(data)
-    if not mdat or len(mdat) < 256:
+    raw_h264 = os.path.join(work_dir, "salvaged.h264")
+    out_mp4 = os.path.join(work_dir, "salvaged.mp4")
+    if os.path.getsize(src_path) == 0:
+        nal_count, written = -1, 0
+    else:
+        # Memory-mapped: the OS pages the file in as needed instead of loading it all.
+        with open(src_path, "rb") as src, mmap.mmap(src.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            nal_count, written = _write_annex_b(mm, raw_h264)
+    if nal_count < 0:
         return {
             "success": False,
             "method": "mdat_salvage",
             "error": "No mdat payload found in file",
         }
-
-    annex_b = avcc_to_annex_b(mdat)
-    if not annex_b:
-        annex_b = scan_annex_b(mdat)
-    nal_count = annex_b.count(b"\x00\x00\x00\x01") if annex_b else 0
-    if not annex_b or len(annex_b) < 128:
+    if nal_count < 1 or written < 128:
         return {
             "success": False,
             "method": "mdat_salvage",
             "error": "Could not extract NAL units from mdat (file may be too severely truncated)",
         }
-
-    raw_h264 = os.path.join(work_dir, "salvaged.h264")
-    out_mp4 = os.path.join(work_dir, "salvaged.mp4")
-    with open(raw_h264, "wb") as fh:
-        fh.write(annex_b)
 
     proc = None
     for attempt, extra in enumerate(

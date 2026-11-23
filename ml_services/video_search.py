@@ -148,19 +148,26 @@ def _ffprobe_duration(video_path: str) -> float:
     return 0.0
 
 
-def _video_meta(video_path: str) -> tuple[float, float]:
+def _video_meta(video_path: str) -> tuple[float, float, float, bool]:
+    """(fps, scan_duration, source_duration, duration_estimated).
+
+    ``scan_duration`` is capped at MAX_DURATION_SEC; ``source_duration`` is the real length so
+    the caller can report a truncated scan instead of claiming full coverage.
+    """
     cap = cv2.VideoCapture(video_path)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 25.0
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = frame_count / fps if frame_count > 0 else 0.0
     cap.release()
+    estimated = False
     if duration <= 0:
         duration = _ffprobe_duration(video_path)
     if duration <= 0:
         # Last resort: estimate from file size (~4 Mbps CCTV ≈ 0.5 MB/s).
         size_mb = os.path.getsize(video_path) / (1024 * 1024)
-        duration = min(MAX_DURATION_SEC, max(60.0, size_mb / 0.5))
-    return fps, min(duration, MAX_DURATION_SEC)
+        duration = max(60.0, size_mb / 0.5)
+        estimated = True
+    return fps, min(duration, MAX_DURATION_SEC), duration, estimated
 
 
 def _resize_for_search(frame: np.ndarray, *, max_width: int) -> np.ndarray:
@@ -337,10 +344,10 @@ def _score_person_crop(
         reid_score = _cosine(query.get("reid_embedding"), extract_reid_embedding(crop) or [])
 
     if query.get("has_face") and face_score >= face_threshold:
-        if not query.get("has_reid") or face_score >= reid_score:
-            return face_score, "face"
-        if face_score >= face_threshold - 0.04 and reid_score >= reid_threshold:
-            return max(face_score, reid_score), "face+appearance"
+        # Face matches always report the FACE score (segment thresholds are on the face scale);
+        # appearance agreement only upgrades the label.
+        if query.get("has_reid") and reid_score >= reid_threshold:
+            return face_score, "face+appearance"
         return face_score, "face"
     if query.get("has_reid") and reid_score >= reid_threshold:
         return reid_score, "appearance"
@@ -582,7 +589,7 @@ def search_video_path(
     if not query["has_face"] and not query["has_reid"]:
         raise ValueError("Could not extract a face or appearance signature from the image.")
 
-    fps, duration = _video_meta(video_path)
+    fps, duration, source_duration, duration_estimated = _video_meta(video_path)
     chosen_fps = float(sample_fps or 0)
     if chosen_fps <= 0:
         chosen_fps = auto_sample_fps(duration)
@@ -591,9 +598,14 @@ def search_video_path(
     is_person_query = bool(set(query["target_class_ids"]) & PERSON_CLASS_IDS)
     if callable(progress_cb):
         mode = "person match" if is_person_query else "object match"
+        cap_note = (
+            f"; only the first {duration / 60:.0f} of {source_duration / 60:.0f} min will be searched"
+            if source_duration > MAX_DURATION_SEC + 0.5
+            else ""
+        )
         progress_cb(
             5,
-            f"Prepared {duration / 60:.0f} min recording ({mode}, every {1 / chosen_fps:.0f}s)",
+            f"Prepared {duration / 60:.0f} min recording ({mode}, every {1 / chosen_fps:.0f}s{cap_note})",
         )
 
     cap = None
@@ -677,6 +689,7 @@ def search_video_path(
         merge_gap = max(2.0, clip_seconds * 1.1)
         if duration <= 0 and last_t:
             duration = last_t
+        truncated = source_duration > MAX_DURATION_SEC + 0.5
         segments = _cluster_hits(
             hits,
             duration=max(duration, 0.0),
@@ -695,6 +708,11 @@ def search_video_path(
             },
             "video": {
                 "duration_sec": round(duration, 2),
+                "source_duration_sec": round(source_duration, 2),
+                "scanned_duration_sec": round(min(duration, last_t + 1.0 / chosen_fps) if frames_scanned else 0.0, 2),
+                "duration_estimated": bool(duration_estimated),
+                "truncated": bool(truncated),
+                "max_duration_sec": MAX_DURATION_SEC,
                 "fps": round(fps, 2),
                 "frames_scanned": frames_scanned,
                 "sample_fps": chosen_fps,
@@ -707,6 +725,13 @@ def search_video_path(
             },
             "hit_count": len(hits),
             "segments": segments,
+            "truncated": bool(truncated),
+            "warning": (
+                f"Only the first {MAX_DURATION_SEC / 60:.0f} min of a "
+                f"{source_duration / 60:.0f} min recording were searched."
+                if truncated
+                else ""
+            ),
         }
     finally:
         if cap is not None:

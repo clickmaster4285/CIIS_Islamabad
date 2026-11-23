@@ -118,13 +118,9 @@ function generateCaseId(): string {
 }
 
 export default function CaseFileCreationPage() {
-  const [rows, setRows] = useState<StoredCase[]>([])
+  const [rows, setRows] = useState<StoredCase[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<CaseFileForm>(emptyForm())
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

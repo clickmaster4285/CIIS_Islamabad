@@ -200,13 +200,15 @@ def apply_hq_control(control: dict) -> None:
     )
 
     request_id = state.full_history_request_id
-    if request_id and request_id != state.full_history_done_id and not state.full_history_running:
+    if request_id and request_id != state.full_history_done_id and not full_history_active(state):
         _start_full_history(request_id)
 
     target = int(control.get("downlink_seq") or 0)
     if target > state.downlink_seq and not state.is_paused:
         from city_sync.downlink import pull_downlink
 
+        # pull_downlink stops after SYNC_DOWNLINK_MAX_SECONDS, so a big backlog never holds
+        # the heartbeat loop for long; the next heartbeat carries on from the cursor.
         try:
             result = pull_downlink(target)
             logger.info("HQ changes applied: %s", result)
@@ -216,22 +218,55 @@ def apply_hq_control(control: dict) -> None:
 
 _full_history_lock = threading.Lock()
 
+# A run that has not reported progress for this long is treated as dead (crashed process).
+FULL_HISTORY_STALE_SEC = 30 * 60
+
+
+def _full_history_stale_before():
+    from datetime import timedelta
+
+    stale = int(getattr(settings, "SYNC_FULL_HISTORY_STALE_SEC", FULL_HISTORY_STALE_SEC))
+    return timezone.now() - timedelta(seconds=stale)
+
+
+def full_history_active(state: CityControlState) -> bool:
+    """running=True only counts while its heartbeat is fresh (a killed process leaves it set)."""
+    if not state.full_history_running:
+        return False
+    beat = state.full_history_heartbeat_at or state.full_history_started_at
+    return beat is not None and beat >= _full_history_stale_before()
+
 
 def _start_full_history(request_id: str) -> None:
-    # Claim the run in the DB so a second heartbeat (or process) does not start it again.
-    claimed = CityControlState.objects.filter(pk=1, full_history_running=False).update(
-        full_history_running=True
+    # Claim the run in the DB so a second heartbeat (or process) does not start it again;
+    # a run whose heartbeat went stale may be taken over.
+    from django.db.models import Q
+
+    now = timezone.now()
+    stale_before = _full_history_stale_before()
+    claimed = (
+        CityControlState.objects.filter(pk=1)
+        .filter(
+            Q(full_history_running=False)
+            | Q(full_history_heartbeat_at__lt=stale_before)
+            | Q(full_history_heartbeat_at__isnull=True, full_history_started_at__lt=stale_before)
+            | Q(full_history_heartbeat_at__isnull=True, full_history_started_at__isnull=True)
+        )
+        .update(full_history_running=True, full_history_started_at=now, full_history_heartbeat_at=now)
     )
     if not claimed:
         return
+
+    def beat() -> None:
+        CityControlState.objects.filter(pk=1).update(full_history_heartbeat_at=timezone.now())
 
     def run():
         close_old_connections()
         try:
             with _full_history_lock:
-                total = bootstrap_outbox(log=lambda m: logger.info("full history: %s", m))
+                total = bootstrap_outbox(log=lambda m: logger.info("full history: %s", m), on_progress=beat)
             CityControlState.objects.filter(pk=1).update(
-                full_history_done_id=request_id, full_history_running=False
+                full_history_done_id=request_id, full_history_running=False, full_history_heartbeat_at=timezone.now()
             )
             logger.info("Full history %s finished: %s rows queued", request_id, total)
         except Exception:  # noqa: BLE001
@@ -281,6 +316,8 @@ def bootstrap_outbox(
     limit: int = 0,
     dry_run: bool = False,
     log: Callable[[str], None] = print,
+    on_progress: Callable[[], None] | None = None,
+    progress_every: int = 500,
 ) -> int:
     """Queue every existing synced row (and its media files) for upload to HQ. City only."""
     if not is_city():
@@ -333,7 +370,11 @@ def bootstrap_outbox(
                 )
             media += _enqueue_existing_media(obj, entity_type)
             count += 1
+            if on_progress is not None and count % progress_every == 0:
+                on_progress()
         total += count
+        if on_progress is not None:
+            on_progress()
         log(f"{entity_type}: {count} rows, {media} media files")
     log(f"Bootstrap complete rows={total} dry_run={dry_run}")
     return total

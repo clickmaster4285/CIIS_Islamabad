@@ -68,7 +68,6 @@ import {
   type NoteSheetRecord,
 } from "@/lib/seizure-management-api"
 
-const DETENTION_TYPES = ["Claimed", "Un-Claimed"] as const
 const REASONS = [
   "Verification of Documents",
   "Inability to pay duty and taxes",
@@ -448,7 +447,6 @@ export default function DetentionMemoCreatePage() {
         }
       })
       .catch(() => setAvailableNoteSheets([]))
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once on mount / noteSheetIdParam
   }, [noteSheetIdParam])
 
   const addGoodsLine = () => setGoodsItems((prev) => [...prev, emptyGoodsItem()])

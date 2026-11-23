@@ -1,7 +1,7 @@
 // src/pages/operations/VehicleDatabaseDetail.tsx
 "use client"
 
-import { useState, useEffect } from "react"
+import { useMemo, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
-import { Progress } from "@/components/ui/progress"
 import {
   Car,
   Truck,
@@ -26,20 +25,12 @@ import {
   Shield,
   AlertTriangle,
   CheckCircle,
-  XCircle,
   History,
   Camera as CameraIcon,
   Building2,
   Download,
   Calendar,
-  Fuel,
-  Wrench,
-  Gauge,
-  Palette,
-  Hash,
-  Users,
   Activity,
-  QrCode,
   Printer,
   Copy,
   Edit,
@@ -415,34 +406,32 @@ const StatusBadge = ({ status }: { status: string }) => {
   )
 }
 
+function loadVehicleById(id: string | undefined): Vehicle | null {
+  // Load from localStorage or use sample data
+  const stored = localStorage.getItem("customs-vehicle-database")
+  let vehicles: Vehicle[] = []
+
+  if (stored) {
+    vehicles = JSON.parse(stored)
+  } else {
+    vehicles = sampleVehicles
+    localStorage.setItem("customs-vehicle-database", JSON.stringify(sampleVehicles))
+  }
+
+  return vehicles.find(v => v.id === id) || null
+}
+
 // Main Detail Page Component
 export default function VehicleDatabaseDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const { toast } = useToast()
-  const [vehicle, setVehicle] = useState<Vehicle | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Read synchronously from localStorage, so there is no separate loading state.
+  const vehicle = useMemo(() => loadVehicleById(id), [id])
   const [activeTab, setActiveTab] = useState("overview")
   const [imageDialogOpen, setImageDialogOpen] = useState(false)
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
-
-  useEffect(() => {
-    // Load from localStorage or use sample data
-    const stored = localStorage.getItem("customs-vehicle-database")
-    let vehicles: Vehicle[] = []
-    
-    if (stored) {
-      vehicles = JSON.parse(stored)
-    } else {
-      vehicles = sampleVehicles
-      localStorage.setItem("customs-vehicle-database", JSON.stringify(sampleVehicles))
-    }
-    
-    const found = vehicles.find(v => v.id === id)
-    setVehicle(found || null)
-    setLoading(false)
-  }, [id])
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-PK', {
@@ -528,27 +517,6 @@ export default function VehicleDatabaseDetailPage() {
     })
     setDeleteDialogOpen(false)
     navigate("/vehicle-database")
-  }
-
-  if (loading) {
-    return (
-      <ModulePageLayout
-        title="Vehicle Detail"
-        description="Loading vehicle information..."
-        breadcrumbs={[
-          { label: "AI Analytics" },
-          { label: "Vehicle Database", href: "/vehicle-database" },
-          { label: "Loading..." }
-        ]}
-      >
-        <div className="flex items-center justify-center h-64">
-          <div className="text-center">
-            <Car className="h-12 w-12 animate-pulse text-muted-foreground mx-auto mb-4" />
-            <p className="text-muted-foreground">Loading vehicle details...</p>
-          </div>
-        </div>
-      </ModulePageLayout>
-    )
   }
 
   if (!vehicle) {

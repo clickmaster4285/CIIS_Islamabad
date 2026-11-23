@@ -178,20 +178,133 @@ def resolve_location_for_write(user, requested_location: str = "") -> str:
     return (requested_location or "").strip()
 
 
-def location_admin_may_assign_role(actor, role: str) -> bool:
-    """Only the Super Admin may hand out admin roles; HR and location admins may not."""
+# Roles that carry cross-city visibility or camera-admin power. Only the Super Admin
+# may hand these out (see _ALL_CITIES_VIEWER_ROLES and CAMERA_ADMIN_ROLES below).
+_SUPER_ADMIN_ONLY_ROLES = frozenset(
+    {
+        GLOBAL_ADMIN_ROLE,
+        IT_SUPERADMIN_ROLE,
+        LOCATION_ADMIN_ROLE,
+        "IT_ADMIN",
+        "COLLECTOR",
+        "DEPUTY_COLLECTOR",
+        "ASSISTANT_COLLECTOR",
+    }
+)
+
+# Site-wide staff overview (HR data, salaries, every employee's GPS) inside one location.
+SITE_MANAGER_ROLES = frozenset({"HR", "OPERATION_MANAGER"})
+
+# Explicit allow-list: the only roles HR / module-granted HR users may assign.
+# Keep in sync with users.models.User.ROLE_CHOICES; a new role is Super-Admin-only
+# until it is added here on purpose.
+LOW_ASSIGNABLE_ROLES = frozenset(
+    {
+        "INSPECTOR",
+        "RECEPTIONIST",
+        "GUARD",
+        "WAREHOUSE_OFFICER",
+        "WAREHOUSE_SUPERINTENDENT",
+        "WAREHOUSE_IN_CHARGE",
+        "EXAMINATION_OFFICER",
+        "STOCK_CONTROLLER",
+        # SUPPORT / DEVELOPER run the Requests & Support desk for every site: Super Admin only.
+        "AUDITOR",
+        "PRAL",
+        "DETECTION_OFFICER",
+        "FIR_OFFICER",
+        "INVESTIGATION_OFFICER",
+        "SEIZING_OFFICER",
+    }
+)
+
+# Location admins may additionally staff their own site's HR / operations desk.
+LOCATION_ADMIN_ASSIGNABLE_ROLES = LOW_ASSIGNABLE_ROLES | SITE_MANAGER_ROLES
+
+_LEVEL_SUPER = 100
+_LEVEL_IT_SUPER = 90
+_LEVEL_SITE_ADMIN = 80
+_LEVEL_SITE_MANAGER = 50
+_LEVEL_LOW = 10
+
+
+def account_level(user) -> int:
+    """Rough privilege rank used to decide who may edit whose account."""
+    role = getattr(user, "role", None)
+    if role == GLOBAL_ADMIN_ROLE:
+        return _LEVEL_SUPER
+    if role == IT_SUPERADMIN_ROLE:
+        return _LEVEL_IT_SUPER
+    if role in _SUPER_ADMIN_ONLY_ROLES:
+        return _LEVEL_SITE_ADMIN
+    if role in SITE_MANAGER_ROLES:
+        return _LEVEL_SITE_MANAGER
+    if role in LOW_ASSIGNABLE_ROLES:
+        # A module grant of HR gives the same reach as the HR role.
+        modules = getattr(user, "allowed_modules", None) or []
+        return _LEVEL_SITE_MANAGER if HR_MODULE_KEY in modules else _LEVEL_LOW
+    # Unknown / future role: treat as privileged so only the Super Admin touches it.
+    return _LEVEL_SITE_ADMIN
+
+
+def assignable_roles_for(actor) -> frozenset | None:
+    """Roles the actor may hand out. None = every role (Super Admin)."""
     if is_global_admin(actor):
+        return None
+    if is_location_admin(actor):
+        return LOCATION_ADMIN_ASSIGNABLE_ROLES
+    return LOW_ASSIGNABLE_ROLES
+
+
+def location_admin_may_assign_role(actor, role: str) -> bool:
+    """Only the Super Admin may hand out admin / cross-city / camera-admin roles.
+
+    Everyone else may assign only an explicit allow-list of low roles
+    (location admins additionally HR / Operation Manager for their own site).
+    """
+    allowed = assignable_roles_for(actor)
+    if allowed is None:
         return True
-    return role not in PRIVILEGED_ROLES
+    return role in allowed
 
 
 def may_manage_account(actor, target) -> bool:
-    """Admin accounts can be changed only by the Super Admin (or by the admin themselves)."""
+    """May the actor edit / reset the password of / deactivate this account?
+
+    Super Admin: anyone. Everyone else: their own account, or accounts at or below
+    their own privilege level (and never an admin-role account).
+    """
     if is_global_admin(actor):
         return True
-    if getattr(target, "role", None) not in PRIVILEGED_ROLES:
+    if getattr(target, "pk", None) is not None and target.pk == getattr(actor, "pk", None):
         return True
-    return getattr(target, "pk", None) is not None and target.pk == getattr(actor, "pk", None)
+    if getattr(target, "role", None) in PRIVILEGED_ROLES or getattr(target, "role", None) == GLOBAL_ADMIN_ROLE:
+        return False
+    return account_level(target) <= account_level(actor)
+
+
+def staff_location_q(scope: str, prefix: str = "") -> Q:
+    """Staff rows belonging to one location: by the linked login's location, or for staff
+    without a login by the server they belong to (location_code; untagged rows are this
+    server's own) or their branch_location."""
+    from django.conf import settings
+
+    code = (scope or "").strip()
+    here = str(getattr(settings, "LOCATION_CODE", "") or "").strip().upper()
+    unlinked = Q(**{f"{prefix}location_code__iexact": code}) | Q(**{f"{prefix}branch_location__iexact": code})
+    if here and here == code.upper():
+        unlinked |= Q(**{f"{prefix}location_code": ""})
+    return Q(**{f"{prefix}user__location": code}) | (Q(**{f"{prefix}user__isnull": True}) & unlinked)
+
+
+def staff_in_scope(actor, staff) -> bool:
+    """True when a location-scoped actor may touch this staff row (always for unscoped)."""
+    scope = get_location_scope(actor)
+    if not scope or staff is None:
+        return True
+    from users.models import Staff
+
+    return Staff.objects.filter(staff_location_q(scope), pk=staff.pk).exists()
 
 
 HR_MODULE_KEY = "Human Resource"

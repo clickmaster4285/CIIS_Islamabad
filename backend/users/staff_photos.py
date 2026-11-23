@@ -96,7 +96,10 @@ def _save_uploaded_file(uploaded_file) -> str:
     return _normalize_path(saved)
 
 
-def _parse_keep_paths(request) -> list[str]:
+def _parse_keep_paths(request, staff: Staff) -> list[str]:
+    """Photos the client wants to keep. Only this staff member's current photos count:
+    a path to another employee's photo (or any other media file) is ignored, so it can
+    neither be attached to this record nor later deleted through it."""
     raw = request.data.get("staff_photos_keep")
     if raw is None or raw == "":
         return []
@@ -109,13 +112,43 @@ def _parse_keep_paths(request) -> list[str]:
             return []
     if not isinstance(items, list):
         return []
-    return [_normalize_path(str(p)) for p in items if str(p or "").strip()][:MAX_STAFF_PHOTOS]
+    own = set(staff_photo_paths(staff))
+    keep: list[str] = []
+    for item in items:
+        norm = _normalize_path(str(item or ""))
+        if not norm:
+            continue
+        if norm not in own:
+            logger.warning("Ignoring staff_photos_keep path not owned by staff %s: %s", staff.pk, norm)
+            continue
+        keep.append(norm)
+    return keep[:MAX_STAFF_PHOTOS]
+
+
+def _is_own_upload_path(path: str) -> bool:
+    """Files this module wrote: staff/<hex>.<ext>. Anything else is never deleted here."""
+    norm = _normalize_path(path)
+    return norm.startswith("staff/") and "/" not in norm[len("staff/"):] and ".." not in norm
+
+
+def _shared_with_other_staff(staff: Staff, path: str) -> bool:
+    """True when another staff record still points at this file (or we cannot tell)."""
+    others = Staff.objects.exclude(pk=staff.pk)
+    try:
+        return others.filter(profile_image=path).exists() or others.filter(staff_photos__contains=[path]).exists()
+    except Exception:
+        logger.debug("Could not check photo sharing for %s", path, exc_info=True)
+        return True
 
 
 def _delete_removed_photos(staff: Staff, new_paths: list[str]) -> None:
     previous = set(staff_photo_paths(staff))
     keep = set(new_paths)
     for path in previous - keep:
+        if not _is_own_upload_path(path):
+            continue
+        if _shared_with_other_staff(staff, path):
+            continue
         try:
             if default_storage.exists(path):
                 default_storage.delete(path)
@@ -128,7 +161,7 @@ def apply_staff_photo_uploads(staff: Staff, request) -> bool:
     Merge kept paths + newly uploaded staff_photos files onto staff.staff_photos.
     Sets profile_image to the first path. Returns True when photos changed.
     """
-    keep_paths = _parse_keep_paths(request)
+    keep_paths = _parse_keep_paths(request, staff)
     uploads = request.FILES.getlist("staff_photo_files") or request.FILES.getlist("staff_photos")
     new_paths = [_save_uploaded_file(f) for f in uploads if f]
 

@@ -13,7 +13,7 @@ if not exist "go2rtc.exe" (
   exit /b 1
 )
 
-echo Starting go2rtc on :1984  (WebRTC :8555^)
+echo Starting go2rtc: API 127.0.0.1:1984 (local only), WebRTC :8555
 echo Edit go2rtc.yaml webrtc.candidates to your LAN IP for remote browsers.
 echo.
 go2rtc.exe -config go2rtc.yaml

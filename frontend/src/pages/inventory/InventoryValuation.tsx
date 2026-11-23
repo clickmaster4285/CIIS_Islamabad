@@ -83,7 +83,7 @@ function saveRows(rows: ValuationRow[]) {
 }
 
 export default function InventoryValuationPage() {
-  const [rows, setRows] = useState<ValuationRow[]>([])
+  const [rows, setRows] = useState<ValuationRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({
     qrCodeNumber: "",
@@ -100,10 +100,6 @@ export default function InventoryValuationPage() {
     valuingOfficerName: "",
     status: "Pending",
   })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

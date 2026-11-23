@@ -52,6 +52,16 @@ def _annotate_frame(
     return img
 
 
+def _needs_proof(attendance_record, action: str) -> bool:
+    """One proof photo per check-in and one per check-out — not a new file on every later update."""
+    existing = (getattr(attendance_record.image, "name", "") or "") if attendance_record.image else ""
+    if not existing:
+        return True
+    if action == "check_in":
+        return False
+    return f"_{action}_" not in existing
+
+
 def save_detection_snapshot(
     *,
     staff,
@@ -96,6 +106,7 @@ def save_detection_snapshot(
         if (
             attendance_record is not None
             and attendance_action in ("check_in", "check_out")
+            and _needs_proof(attendance_record, attendance_action)
         ):
             proof_name = (
                 f"staff{staff.pk}_{attendance_action}_"

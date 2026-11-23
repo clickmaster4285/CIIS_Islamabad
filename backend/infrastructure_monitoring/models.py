@@ -120,7 +120,7 @@ class InfraDevice(models.Model):
         default=SnmpVersion.V2C,
         blank=True,
     )
-    snmp_community = models.CharField(max_length=128, blank=True, default="public")
+    snmp_community = EncryptedCharField(max_length=128, blank=True, default="public")
     snmp_port = models.PositiveIntegerField(default=161)
     snmp_oid_map = models.JSONField(
         default=dict,
@@ -139,7 +139,7 @@ class InfraDevice(models.Model):
 
     # Camera / NVR / ONVIF / RTSP
     onvif_port = models.PositiveIntegerField(default=80)
-    rtsp_url = models.CharField(max_length=512, blank=True, default="")
+    rtsp_url = EncryptedCharField(max_length=512, blank=True, default="")
     channel_count = models.PositiveIntegerField(
         null=True,
         blank=True,

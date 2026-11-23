@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Handshake, Plus } from "lucide-react"
+import { Plus } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -49,13 +49,9 @@ const REQUESTERS = ["Yarik Collectorate", "Peshawar Collectorate", "Peshawar Col
 const STATUSES = ["Pending", "Completed"]
 
 export default function HandoverRequestsPage() {
-  const [rows, setRows] = useState<HandoverRow[]>([])
+  const [rows, setRows] = useState<HandoverRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ by: "Yarik Collectorate", date: "", status: "Pending" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

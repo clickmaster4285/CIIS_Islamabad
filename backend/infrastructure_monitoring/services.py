@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 
 from .models import (
@@ -38,95 +40,167 @@ def _ensure_site_from_camera_site(cam_site) -> InfraSite | None:
     return site
 
 
-def sync_cameras_and_nvrs() -> dict[str, int]:
-    """
-    Auto-import active NVRs and Cameras from the cameras app so they appear
-    in Infrastructure Monitoring without manual re-entry.
-    """
-    created = updated = 0
+def _valid_ip(raw) -> str | None:
+    """Normalised IP string, or None when the source value is not a valid IPv4/IPv6 address."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
     try:
-        from cameras.models import Camera, Nvr
-    except Exception as exc:
-        logger.warning("cameras app unavailable for sync: %s", exc)
-        return {"created": 0, "updated": 0, "skipped": 1}
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return None
 
-    # NVRs
-    for nvr in Nvr.objects.select_related("site").filter(is_active=True):
-        key = f"cameras.nvr:{nvr.id}"
-        site = _ensure_site_from_camera_site(nvr.site)
-        defaults = {
-            "site": site,
-            "device_type": DeviceType.NVR,
-            "name": nvr.name,
-            "manufacturer": (nvr.brand or "").title(),
-            "model_number": nvr.brand or "",
-            "ip_address": nvr.ip_address,
-            "port": nvr.port or 554,
-            "username": nvr.username or "",
-            "primary_protocol": ProtocolType.SNMP,
-            "secondary_protocol": ProtocolType.RTSP,
-            "supports_snmp": True,
-            "supports_rtsp": True,
-            "channel_count": nvr.cameras.count(),
-            "is_active": True,
-            "poll_interval_sec": 60,
-            "notes": "Auto-synced from Camera Management",
-            "metadata": {"brand": nvr.brand, "source": "cameras.nvr"},
-            "onvif_port": 80,  # HTTP/ISAPI management port
-        }
-        obj = InfraDevice.objects.filter(source_key=key).first()
-        if obj is None:
-            if nvr.password:
-                defaults["password"] = nvr.password
-            InfraDevice.objects.create(source_key=key, **defaults)
-            created += 1
-            InfraEvent.objects.create(
-                device=InfraDevice.objects.filter(source_key=key).first(),
-                event_type="auto_sync",
-                title=f"NVR imported: {nvr.name}",
-                message="Synced from Camera Management",
-                actor="system",
+
+# Fields the Camera Management source owns. Everything else on an auto-synced row
+# (is_active, notes, ports, protocols, poll interval, credentials an admin changed)
+# belongs to the infra admin and is only set when the row is first created.
+_NVR_SOURCE_FIELDS = (
+    "site",
+    "device_type",
+    "name",
+    "manufacturer",
+    "model_number",
+    "ip_address",
+    "channel_count",
+)
+_CAMERA_SOURCE_FIELDS = (
+    "site",
+    "device_type",
+    "name",
+    "manufacturer",
+    "model_number",
+    "ip_address",
+    "install_location",
+    "asset_tag",
+)
+
+
+def _apply_source_fields(obj: InfraDevice, values: dict[str, Any], fields, source_meta: dict) -> None:
+    for field in fields:
+        if field in values:
+            setattr(obj, field, values[field])
+    meta = dict(obj.metadata) if isinstance(obj.metadata, dict) else {}
+    meta.update(source_meta)
+    if meta.pop("auto_deactivated", False):
+        # The source record is back: undo our own deactivation (never an admin's).
+        obj.is_active = True
+    obj.metadata = meta
+
+
+def _deactivate_missing(prefix: str, seen_keys: set[str]) -> int:
+    """Deactivate auto-synced rows whose source record was deleted or deactivated."""
+    gone = 0
+    qs = InfraDevice.objects.filter(source_key__startswith=prefix, is_active=True).exclude(
+        source_key__in=seen_keys
+    )
+    for obj in qs:
+        meta = dict(obj.metadata) if isinstance(obj.metadata, dict) else {}
+        meta["auto_deactivated"] = True
+        obj.metadata = meta
+        obj.is_active = False
+        obj.save(update_fields=["is_active", "metadata", "updated_at"])
+        InfraEvent.objects.create(
+            device=obj,
+            event_type="auto_sync",
+            title=f"Deactivated: {obj.name}"[:200],
+            message="Source record removed or deactivated in Camera Management",
+            actor="system",
+        )
+        gone += 1
+    return gone
+
+
+def _sync_one_nvr(nvr) -> str:
+    key = f"cameras.nvr:{nvr.id}"
+    ip = _valid_ip(nvr.ip_address)
+    if ip is None:
+        logger.warning("infra sync: skipping NVR %s (%s): invalid IP %r", nvr.id, nvr.name, nvr.ip_address)
+        return "skipped"
+    site = _ensure_site_from_camera_site(nvr.site)
+    source = {
+        "site": site,
+        "device_type": DeviceType.NVR,
+        "name": nvr.name,
+        "manufacturer": (nvr.brand or "").title(),
+        "model_number": nvr.brand or "",
+        "ip_address": ip,
+        "channel_count": getattr(nvr, "cam_count", None),
+    }
+    source_meta = {"brand": nvr.brand, "source": "cameras.nvr"}
+    src_user = (nvr.username or "").strip()
+    obj = InfraDevice.objects.filter(source_key=key).first()
+    if obj is None:
+        obj = InfraDevice(
+            source_key=key,
+            port=nvr.port or 554,
+            username=src_user,
+            primary_protocol=ProtocolType.SNMP,
+            secondary_protocol=ProtocolType.RTSP,
+            supports_snmp=True,
+            supports_rtsp=True,
+            is_active=True,
+            poll_interval_sec=60,
+            notes="Auto-synced from Camera Management",
+            onvif_port=80,  # HTTP/ISAPI management port
+            metadata={},
+        )
+        if nvr.password:
+            obj.password = nvr.password
+        _apply_source_fields(obj, source, _NVR_SOURCE_FIELDS, source_meta)
+        obj.save()
+        InfraEvent.objects.create(
+            device=obj,
+            event_type="auto_sync",
+            title=f"NVR imported: {nvr.name}"[:200],
+            message="Synced from Camera Management",
+            actor="system",
+        )
+        return "created"
+    _apply_source_fields(obj, source, _NVR_SOURCE_FIELDS, source_meta)
+    # Follow password changes made in Camera Management, but only while the infra row
+    # still uses the same login (an admin who set a different login keeps it).
+    cur_user = (obj.username or "").strip()
+    if not cur_user or cur_user == src_user:
+        obj.username = src_user
+        if nvr.password:
+            obj.password = nvr.password
+    obj.save()
+    return "updated"
+
+
+def _sync_one_camera(cam) -> str:
+    key = f"cameras.camera:{cam.id}"
+    nvr = cam.nvr if cam.nvr_id else None
+    ip = None
+    if nvr is not None:
+        ip = _valid_ip(nvr.ip_address)
+        if ip is None:
+            logger.warning(
+                "infra sync: skipping camera %s (%s): parent NVR has invalid IP %r",
+                cam.id,
+                cam.name or cam.code,
+                nvr.ip_address,
             )
-        else:
-            for field, value in defaults.items():
-                if field == "password":
-                    continue
-                setattr(obj, field, value)
-            if nvr.password:
-                obj.password = nvr.password
-            obj.save()
-            updated += 1
-
-    # Cameras
-    for cam in Camera.objects.select_related("nvr", "nvr__site").filter(nvr__is_active=True):
-        key = f"cameras.camera:{cam.id}"
-        site = _ensure_site_from_camera_site(cam.nvr.site if cam.nvr_id else None)
-        ip = cam.nvr.ip_address if cam.nvr_id else None
-        defaults = {
-            "site": site,
-            "device_type": DeviceType.CAMERA,
-            "name": cam.name or cam.code or f"Camera {cam.id}",
-            "manufacturer": (cam.nvr.brand if cam.nvr_id else "") or "",
-            "model_number": getattr(cam, "camera_type", "") or "",
-            "ip_address": ip,
-            "port": cam.nvr.port if cam.nvr_id else 554,
-            "install_location": cam.zone or cam.location or "",
-            "username": cam.nvr.username if cam.nvr_id else "",
-            "primary_protocol": ProtocolType.ICMP,
-            "secondary_protocol": ProtocolType.RTSP,
-            "supports_rtsp": True,
-            "supports_onvif": False,
-            "is_active": True,
-            "poll_interval_sec": 60,
-            "asset_tag": cam.code or "",
-            "notes": "Auto-synced from Camera Management",
-            "metadata": {
-                "channel": cam.channel,
-                "camera_code": cam.code,
-                "source": "cameras.camera",
-                "nvr_id": cam.nvr_id,
-            },
-        }
+            return "skipped"
+    site = _ensure_site_from_camera_site(nvr.site if nvr else None)
+    source = {
+        "site": site,
+        "device_type": DeviceType.CAMERA,
+        "name": cam.name or cam.code or f"Camera {cam.id}",
+        "manufacturer": (nvr.brand if nvr else "") or "",
+        "model_number": getattr(cam, "camera_type", "") or "",
+        "ip_address": ip,
+        "install_location": cam.zone or cam.location or "",
+        "asset_tag": cam.code or "",
+    }
+    source_meta = {
+        "channel": cam.channel,
+        "camera_code": cam.code,
+        "source": "cameras.camera",
+        "nvr_id": cam.nvr_id,
+    }
+    obj = InfraDevice.objects.filter(source_key=key).first()
+    if obj is None:
         # Seed status from camera record until first poll
         cam_status = (cam.status or "").lower()
         seed_status = (
@@ -136,20 +210,78 @@ def sync_cameras_and_nvrs() -> dict[str, int]:
             if cam_status == "offline"
             else DeviceStatus.UNKNOWN
         )
-        obj = InfraDevice.objects.filter(source_key=key).first()
-        if obj is None:
-            if cam.nvr_id and cam.nvr.password:
-                defaults["password"] = cam.nvr.password
-            defaults["status"] = seed_status
-            InfraDevice.objects.create(source_key=key, **defaults)
-            created += 1
-        else:
-            for field, value in defaults.items():
-                setattr(obj, field, value)
-            obj.save()
-            updated += 1
+        # No credentials are copied: camera ISAPI is read through the parent NVR.
+        # Saving the camera's own login sets metadata.camera_has_own_creds (serializer).
+        obj = InfraDevice(
+            source_key=key,
+            port=(nvr.port if nvr else None) or 554,
+            primary_protocol=ProtocolType.ICMP,
+            secondary_protocol=ProtocolType.RTSP,
+            supports_rtsp=True,
+            supports_onvif=False,
+            is_active=True,
+            poll_interval_sec=60,
+            notes="Auto-synced from Camera Management",
+            status=seed_status,
+            metadata={"camera_has_own_creds": False},
+        )
+        _apply_source_fields(obj, source, _CAMERA_SOURCE_FIELDS, source_meta)
+        obj.save()
+        return "created"
+    _apply_source_fields(obj, source, _CAMERA_SOURCE_FIELDS, source_meta)
+    obj.save()
+    return "updated"
 
-    return {"created": created, "updated": updated, "skipped": 0}
+
+def sync_cameras_and_nvrs() -> dict[str, int]:
+    """
+    Auto-import active NVRs and Cameras from the cameras app so they appear
+    in Infrastructure Monitoring without manual re-entry.
+
+    Only source-owned identity fields are refreshed on existing rows. A bad record is
+    logged and skipped; rows whose source disappeared are deactivated.
+    """
+    stats = {"created": 0, "updated": 0, "skipped": 0, "failed": 0, "deactivated": 0}
+    try:
+        from cameras.models import Camera, Nvr
+    except Exception as exc:
+        logger.warning("cameras app unavailable for sync: %s", exc)
+        return {**stats, "skipped": 1}
+
+    def _run(kind: str, rows, fn, seen: set[str]) -> bool:
+        """True when the whole source list was walked (safe to deactivate missing rows)."""
+        try:
+            for row in rows:
+                seen.add(f"cameras.{kind}:{row.id}")
+                try:
+                    with transaction.atomic():
+                        outcome = fn(row)
+                    stats[outcome] += 1
+                except Exception:
+                    stats["failed"] += 1
+                    logger.exception("infra sync: %s %s failed", kind, row.id)
+            return True
+        except Exception:
+            logger.exception("infra sync: listing %s records failed", kind)
+            return False
+
+    nvr_seen: set[str] = set()
+    nvr_rows = (
+        Nvr.objects.select_related("site")
+        .filter(is_active=True)
+        .annotate(cam_count=Count("cameras"))
+    )
+    if _run("nvr", nvr_rows, _sync_one_nvr, nvr_seen):
+        stats["deactivated"] += _deactivate_missing("cameras.nvr:", nvr_seen)
+
+    cam_seen: set[str] = set()
+    cam_rows = Camera.objects.select_related("nvr", "nvr__site").filter(
+        is_active=True, nvr__is_active=True
+    )
+    if _run("camera", cam_rows, _sync_one_camera, cam_seen):
+        stats["deactivated"] += _deactivate_missing("cameras.camera:", cam_seen)
+
+    return stats
 
 
 def _compare(op: str, left: float, right: float) -> bool:
@@ -315,6 +447,11 @@ def poll_all_devices(*, limit: int | None = None) -> dict[str, int]:
 
 
 def sync_and_poll() -> dict[str, Any]:
-    sync_stats = sync_cameras_and_nvrs()
+    # A sync failure must never stop device polling.
+    try:
+        sync_stats = sync_cameras_and_nvrs()
+    except Exception as exc:
+        logger.exception("infra sync failed")
+        sync_stats = {"created": 0, "updated": 0, "skipped": 0, "failed": 1, "error": str(exc)[:200]}
     poll_stats = poll_all_devices()
     return {"sync": sync_stats, "poll": poll_stats}

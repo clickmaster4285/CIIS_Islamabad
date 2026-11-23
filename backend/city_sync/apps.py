@@ -18,7 +18,12 @@ class CitySyncConfig(AppConfig):
         try:
             signals.connect_signals()
         except Exception:  # noqa: BLE001
-            pass
+            import logging
+
+            logging.getLogger(__name__).error("city_sync signals could not be connected", exc_info=True)
+            # A city without these hooks would silently stop sending its data to HQ.
+            if str(getattr(settings, "SYSTEM_ROLE", "") or "").strip().lower() == "city":
+                raise
 
         if getattr(settings, "SYNC_SKIP_BOOT_CHECK", False):
             return

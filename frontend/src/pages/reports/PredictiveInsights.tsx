@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
+import type { SVGProps } from "react"
 import { 
   Brain, 
   TrendingUp, 
@@ -11,33 +12,24 @@ import {
   Package,
   Clock,
   Calendar,
-  BarChart3,
   LineChart,
-  PieChart,
   Gauge,
-  Shield,
   Zap,
-  ChevronDown,
   ChevronRight,
   Download,
   RefreshCw,
-  Eye,
-  Thermometer,
   Activity,
   AlertCircle,
-  CheckCircle,
-  XCircle,
   Target,
   TrendingDown
 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Progress } from "@/components/ui/progress"
-import { Separator } from "@/components/ui/separator"
 import {
   Table,
   TableBody,
@@ -46,12 +38,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 
 // Mock data for gate peak hours
 const GATES = ["North Gate", "South Gate", "East Gate", "West Gate", "Main Entrance", "Customs Gate"]
@@ -104,8 +90,8 @@ export default function PredictiveInsightsPage() {
   const [activeTab, setActiveTab] = useState("overview")
   const [refreshing, setRefreshing] = useState(false)
 
-  // Mock data for gate peak hours
-  const gatePeakHours: GatePeakHour[] = DAYS.flatMap(day =>
+  // Mock data for gate peak hours (generated once per mount so it does not reshuffle on every render)
+  const [gatePeakHours] = useState<GatePeakHour[]>(() => DAYS.flatMap(day =>
     GATES.map(gate => ({
       gate,
       day,
@@ -115,10 +101,10 @@ export default function PredictiveInsightsPage() {
       trend: ['up', 'down', 'stable'][Math.floor(Math.random() * 3)] as 'up' | 'down' | 'stable',
       comparisonToLastWeek: Math.floor(Math.random() * 20) - 5
     }))
-  )
+  ))
 
   // Mock data for cargo queue predictions
-  const cargoQueuePredictions: CargoQueuePrediction[] = DAYS.map((day, index) => ({
+  const [cargoQueuePredictions] = useState<CargoQueuePrediction[]>(() => DAYS.map((day, index) => ({
     date: `2024-03-${15 + index}`,
     day,
     predictedQueueLength: Math.floor(Math.random() * 40) + 20,
@@ -126,8 +112,8 @@ export default function PredictiveInsightsPage() {
     utilization: Math.floor(Math.random() * 60) + 30,
     peakTime: `${Math.floor(Math.random() * 4) + 9}:00`,
     averageWaitTime: Math.floor(Math.random() * 45) + 15,
-    riskLevel: ['Low', 'Medium', 'High', 'Critical'][Math.floor(Math.random() * 4)] as any
-  }))
+    riskLevel: ['Low', 'Medium', 'High', 'Critical'][Math.floor(Math.random() * 4)] as CargoQueuePrediction["riskLevel"]
+  })))
 
   // Mock data for risk score distribution
   const riskDistribution: RiskScoreDistribution[] = [
@@ -204,7 +190,7 @@ export default function PredictiveInsightsPage() {
     setTimeout(() => setRefreshing(false), 1500)
   }
 
-  const getTrendIcon = (trend: string, value: number) => {
+  const getTrendIcon = (trend: string, _value: number) => {
     if (trend === 'up') return <TrendingUp className="h-3 w-3 text-green-600" />
     if (trend === 'down') return <TrendingDown className="h-3 w-3 text-red-600" />
     return <Minus className="h-3 w-3 text-gray-400" />
@@ -861,7 +847,7 @@ export default function PredictiveInsightsPage() {
 }
 
 // Helper component for minus icon
-function Minus(props: any) {
+function Minus(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
       {...props}

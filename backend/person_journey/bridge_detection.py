@@ -51,6 +51,7 @@ _BRIDGE_DEDUP_SECONDS = 5
 
 
 def _generic_unknown_handled_elsewhere() -> bool:
+    # Runs inside post_save / atomic: journey_pipeline_active() uses its cached value there (no HTTP).
     return generic_unknown_handled_elsewhere()
 
 
@@ -74,7 +75,7 @@ def _is_person_detection(class_name: str, label: str, employee_name: str = "") -
 def _match_unknown_by_track(instance, camera, now) -> JourneyPerson | None:
     """Link to an existing unknown only when the same camera track id repeats."""
     track_id = getattr(instance, "local_track_id", None)
-    if not track_id or not camera:
+    if track_id is None or not camera:
         return None
 
     from .models import CameraTrack, TrackStatus
@@ -86,6 +87,7 @@ def _match_unknown_by_track(instance, camera, now) -> JourneyPerson | None:
             status=TrackStatus.ACTIVE,
             journey_person__person_type=PersonType.UNKNOWN,
             journey_person__status=PersonStatus.ACTIVE,
+            journey_person__is_deleted=False,
         )
         .select_related("journey_person")
         .order_by("-started_at")
@@ -249,7 +251,10 @@ def record_journey_sighting(
             if detection_event_id:
                 from cameras.models import DetectionEvent
 
-                DetectionEvent.objects.filter(pk=detection_event_id).update(
+                from city_sync.outbox import sync_update
+
+                sync_update(
+                    DetectionEvent.objects.filter(pk=detection_event_id),
                     person_qr=person.code,
                     person_identity_id=person.pk,
                     track_event="detection",
@@ -280,14 +285,17 @@ def record_journey_sighting(
             "last_seen_at": now.isoformat(),
             "duration_seconds": 0,
             "sightings": 1,
-            "track_ids": [track_id] if track_id else [],
+            "track_ids": [track_id] if track_id is not None else [],
         },
     )
 
     if detection_event_id:
         from cameras.models import DetectionEvent
 
-        DetectionEvent.objects.filter(pk=detection_event_id).update(
+        from city_sync.outbox import sync_update
+
+        sync_update(
+            DetectionEvent.objects.filter(pk=detection_event_id),
             person_qr=person.code,
             person_identity_id=person.pk,
             track_event="detection",

@@ -112,7 +112,7 @@ export default function VehicleJourneyDetailPage() {
     enabled: !!plateKey
   })
 
-  const path = data?.path ?? []
+  const path = useMemo(() => data?.path ?? [], [data?.path])
   const groupedByDate = useMemo(() => {
     const map = new Map<string, VehicleJourneySighting[]>()
     for (const stop of path) {

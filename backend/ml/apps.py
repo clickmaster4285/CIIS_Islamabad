@@ -26,8 +26,21 @@ class MlConfig(AppConfig):
         if "migrate" in sys.argv or "makemigrations" in sys.argv:
             return
 
+        def _is_sync_leader() -> bool:
+            # Every web/worker process runs ready(); only one may push the 45 s camera
+            # re-sync (non-leaders re-check each cycle and take over if the leader exits).
+            try:
+                from cameras.locks import is_leader
+
+                return is_leader("ml_camera_sync")
+            except Exception:
+                logger.debug("[camera-sync] Leader lock unavailable", exc_info=True)
+                return True
+
         def _periodic_camera_sync() -> None:
             try:
+                if not _is_sync_leader():
+                    return
                 from django.db import close_old_connections
 
                 close_old_connections()
@@ -69,9 +82,10 @@ class MlConfig(AppConfig):
                         result.get("db_embeddings", result.get("known_faces", 0)),
                         list((result.get("by_server") or {}).keys()),
                     )
-                from .camera_sync import sync_cameras_to_ml
+                if _is_sync_leader():
+                    from .camera_sync import sync_cameras_to_ml
 
-                sync_cameras_to_ml()
+                    sync_cameras_to_ml()
             except Exception:
                 logger.exception("[face-sync] Could not push face embeddings to ML")
             finally:

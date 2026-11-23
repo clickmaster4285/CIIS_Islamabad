@@ -20,7 +20,7 @@ export default function BlacklistManagementPage() {
         {
           key: "profile_image",
           label: "Profile Image",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <img
               src={row.profile_image || "/images/default-user.png"}
               alt={row.name}
@@ -36,7 +36,7 @@ export default function BlacklistManagementPage() {
         {
           key: "name",
           label: "Visitor Name",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <div className="font-semibold">{row.name}</div>
           ),
         },
@@ -47,7 +47,7 @@ export default function BlacklistManagementPage() {
         {
           key: "document_type",
           label: "Document Type",
-          render: (row: any) => {
+          render: (row: Record<string, string>) => {
             const isPassport = row.document_type === "Passport"
 
             return (
@@ -67,7 +67,7 @@ export default function BlacklistManagementPage() {
         {
           key: "document",
           label: "ID Document",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <span className="font-mono text-sm">{row.document}</span>
           ),
         },
@@ -76,7 +76,7 @@ export default function BlacklistManagementPage() {
         {
           key: "restriction",
           label: "Restriction Type",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <span
               className={`px-2 py-1 rounded-full text-xs font-medium ${
                 row.restriction === "Permanent"
@@ -92,7 +92,7 @@ export default function BlacklistManagementPage() {
         {
           key: "duration",
           label: "Duration",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <span
               className={
                 row.duration === "N/A" ? "text-muted-foreground" : ""
@@ -106,7 +106,7 @@ export default function BlacklistManagementPage() {
         {
           key: "reason",
           label: "Violation",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <div
               className="max-w-xs truncate"
               title={row.reason}
@@ -121,7 +121,7 @@ export default function BlacklistManagementPage() {
         {
           key: "expiry_date",
           label: "Expiry Date",
-          render: (row: any) => {
+          render: (row: Record<string, string>) => {
             const isExpired =
               row.expiry_date &&
               row.expiry_date !== "—" &&
@@ -138,7 +138,7 @@ export default function BlacklistManagementPage() {
         {
           key: "blacklisted_by",
           label: "Blacklisted By",
-          render: (row: any) => (
+          render: (row: Record<string, string>) => (
             <span
               className={`px-2 py-1 rounded-full text-xs font-medium ${
                 row.blacklisted_by === "AI"

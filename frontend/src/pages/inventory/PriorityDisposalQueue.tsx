@@ -46,13 +46,9 @@ function saveRows(rows: QueueRow[]) {
 }
 
 export default function PriorityDisposalQueuePage() {
-  const [rows, setRows] = useState<QueueRow[]>([])
+  const [rows, setRows] = useState<QueueRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ itemId: "", desc: "", expiry: "", priority: 1 })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

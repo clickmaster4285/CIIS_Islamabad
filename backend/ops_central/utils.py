@@ -75,12 +75,42 @@ def token_for_user(user) -> str:
     return token.key
 
 
+def is_loopback_server(server) -> bool:
+    """True when the server's Django and ML URLs both point at this machine."""
+    hosts = set()
+    for raw in (server.normalized_base_url(), server.resolved_ml_base_url()):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        try:
+            hosts.add((urlparse(raw).hostname or "").lower())
+        except ValueError:
+            return False
+    return bool(hosts) and hosts <= {"127.0.0.1", "localhost", "::1"}
+
+
+def server_token_for(server, user=None) -> str:
+    """Token to call a django-mode server with.
+
+    The saved token for that server; only a loopback server (this same hub) may fall
+    back to the viewer's own token. A remote server never receives the viewer's token.
+    """
+    stored = (getattr(server, "auth_token", "") or "").strip()
+    if stored and stored not in ("pending", "ml-only"):
+        return stored
+    if user is not None and is_loopback_server(server):
+        return token_for_user(user)
+    return ""
+
+
 def resolve_remote_token(request, explicit: str | None = None) -> str:
-    """Prefer explicit token; otherwise use the logged-in user's API token."""
-    explicit = (explicit or "").strip()
-    if explicit:
-        return explicit
-    return token_for_user(getattr(request, "user", None))
+    """The token entered for the remote server.
+
+    The logged-in user's own API token is never used as a fallback: sending it to a
+    remote server would let that server act as this user on the hub.
+    """
+    del request
+    return (explicit or "").strip()
 
 
 def ensure_default_remote_server(user) -> None:

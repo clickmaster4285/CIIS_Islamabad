@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,15 +56,37 @@ def _hq_private_key() -> Ed25519PrivateKey:
         pem = Ed25519PrivateKey.generate().private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
         )
-        # O_EXCL: two workers starting together cannot write two different keys.
+        # Write the whole key to a temp file first, then publish it without overwriting: a
+        # reader never sees a half-written file, and two workers starting together keep one key.
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".view_pass-", suffix=".tmp")
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
-        else:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(pem)
-    return serialization.load_pem_private_key(path.read_bytes(), password=None)
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            try:
+                os.link(tmp, path)  # fails if another worker published first
+            except FileExistsError:
+                pass
+            except OSError:
+                # No hard links on this filesystem: rename (no-clobber on Windows).
+                if not path.exists():
+                    try:
+                        os.rename(tmp, path)
+                    except FileExistsError:
+                        pass
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+    last_exc: Exception | None = None
+    for _attempt in range(5):
+        try:
+            return serialization.load_pem_private_key(path.read_bytes(), password=None)
+        except (OSError, ValueError) as exc:  # e.g. a legacy writer still filling the file
+            last_exc = exc
+            time.sleep(0.1)
+    raise RuntimeError(f"Could not read the view-pass signing key {path}: {last_exc}")
 
 
 def hq_public_key_b64() -> str:
@@ -93,7 +116,14 @@ def issue_pass(loc: str, *, user: str = "", ttl: int = PASS_TTL_SEC) -> tuple[st
 
 
 def save_hq_public_key(key_b64: str) -> None:
-    """City: remember HQ's public key from a heartbeat answer (shared by web and worker processes)."""
+    """
+    City: remember HQ's public key from a heartbeat answer (shared by web and worker processes).
+
+    The key is pinned: it is stored the first time and afterwards only accepted when it
+    matches. A different key is logged and ignored, so whoever can answer a heartbeat (e.g.
+    a spoofed HQ_SYNC_URL) cannot swap in their own pass-signing key. After a genuine HQ key
+    change, delete VIEW_PASS_KEY_DIR/hq_view_pass_public.key on the city to accept the new one.
+    """
     key_b64 = (key_b64 or "").strip()
     try:
         if len(_unb64(key_b64)) != 32:
@@ -102,10 +132,21 @@ def save_hq_public_key(key_b64: str) -> None:
         return
     path = _key_dir() / _HQ_PUBLIC_KEY_FILE
     try:
-        if path.exists() and path.read_text().strip() == key_b64:
-            return
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(key_b64)
+        if path.exists():
+            current = path.read_text().strip()
+            if current == key_b64:
+                return
+            if current:
+                logger.error(
+                    "HQ sent a different view-pass public key; keeping the pinned key %s. "
+                    "If HQ really changed its key, delete %s on this city.",
+                    current[:12] + "...",
+                    path,
+                )
+                return
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".hq_view_pass-", suffix=".tmp")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(key_b64)
         os.replace(tmp, path)
         logger.info("Saved HQ view-pass public key")
     except OSError:

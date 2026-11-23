@@ -1,4 +1,8 @@
-"""Autostart InsightFace CCTV attendance workers when the server boots."""
+"""Autostart InsightFace CCTV attendance workers when the server boots.
+
+Also holds the cross-process file lock helpers: Gunicorn/Waitress run several processes, and background
+loops (CCTV workers, journey ingest, ...) must run in exactly one of them.
+"""
 
 from __future__ import annotations
 
@@ -13,19 +17,26 @@ from django.db import close_old_connections
 
 logger = logging.getLogger(__name__)
 _lock_handle = None
+_named_locks: dict[str, object] = {}
+_named_guard = threading.Lock()
+
+CCTV_LOCK_NAME = "cctv_autostart"
 
 
-def _lock_path() -> Path:
+def _lock_path(name: str = CCTV_LOCK_NAME) -> Path:
     base = Path(getattr(settings, "BASE_DIR", Path.cwd()))
-    return base / ".cctv_autostart.lock"
+    return base / f".{name}.lock"
 
 
-def _acquire_autostart_lock():
-    lock_path = _lock_path()
+def _try_lock_file(lock_path: Path):
+    """Open and exclusively lock ``lock_path`` (non-blocking). Returns the open handle or None."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = None
     try:
         fh = open(lock_path, "a+", encoding="utf-8")
+        # Always lock byte 0: "a+" opens at end of file, and locking "the current position" would let
+        # every process lock a different byte once the file holds a PID.
+        fh.seek(0)
         if sys.platform == "win32":
             import msvcrt
 
@@ -48,13 +59,84 @@ def _acquire_autostart_lock():
         fh.flush()
         return fh
     except OSError as exc:
-        logger.debug("[cctv-autostart] Could not acquire lock: %s", exc)
+        logger.debug("Could not acquire lock %s: %s", lock_path, exc)
         if fh is not None:
             try:
                 fh.close()
             except OSError:
                 pass
         return None
+
+
+def acquire_process_lock(name: str) -> bool:
+    """Hold the named lock for the life of this process. True if this process holds it (now or already)."""
+    with _named_guard:
+        if name in _named_locks:
+            return True
+        handle = _try_lock_file(_lock_path(name))
+        if handle is None:
+            return False
+        _named_locks[name] = handle
+        return True
+
+
+def holds_process_lock(name: str) -> bool:
+    with _named_guard:
+        return name in _named_locks
+
+
+def run_with_process_lock(name: str, start_fn, *, retry_seconds: float = 60.0) -> bool:
+    """
+    Call ``start_fn`` only in the process that holds lock ``name``.
+
+    Processes that lose the race keep a small daemon thread that retries every ``retry_seconds``, so the
+    loop moves to another process if the owner dies. Returns True when ``start_fn`` ran now.
+    """
+    if acquire_process_lock(name):
+        start_fn()
+        return True
+
+    def _retry():
+        stop = threading.Event()
+        while not stop.wait(retry_seconds):
+            if acquire_process_lock(name):
+                logger.info("Took over background loop '%s' (pid %s)", name, os.getpid())
+                try:
+                    start_fn()
+                except Exception:
+                    logger.exception("Background loop '%s' failed to start", name)
+                return
+
+    logger.info("Background loop '%s' already runs in another process; this one stands by", name)
+    threading.Thread(target=_retry, name=f"lock-wait-{name}", daemon=True).start()
+    return False
+
+
+def _acquire_autostart_lock():
+    """Backwards-compatible: the CCTV worker lock handle, or None if another process owns it."""
+    if acquire_process_lock(CCTV_LOCK_NAME):
+        return _named_locks.get(CCTV_LOCK_NAME)
+    return None
+
+
+def is_cctv_owner() -> bool:
+    """True when this process owns the CCTV attendance workers."""
+    return holds_process_lock(CCTV_LOCK_NAME)
+
+
+def claim_cctv_ownership() -> bool:
+    """Become the CCTV worker process if nobody else is. Starts the command loop on success."""
+    if is_cctv_owner():
+        return True
+    if not acquire_process_lock(CCTV_LOCK_NAME):
+        return False
+    global _lock_handle
+    _lock_handle = _named_locks.get(CCTV_LOCK_NAME)
+    from recognition.services.cctv_control import start_owner_loop
+
+    start_owner_loop()
+    logger.info("CCTV attendance workers are owned by pid %s", os.getpid())
+    return True
 
 
 def collect_attendance_cameras() -> list[dict]:
@@ -67,14 +149,10 @@ def collect_attendance_cameras() -> list[dict]:
 def _autostart_worker(delay_seconds: float):
     import time
 
-    global _lock_handle
-
     time.sleep(delay_seconds)
-    lock = _acquire_autostart_lock()
-    if lock is None:
-        logger.debug("[cctv-autostart] Another Gunicorn worker already started CCTV workers")
+    if not claim_cctv_ownership():
+        logger.debug("[cctv-autostart] Another process already owns the CCTV workers")
         return
-    _lock_handle = lock
     try:
         close_old_connections()
         from recognition.services.cctv_worker import get_cctv_manager

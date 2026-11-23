@@ -3,7 +3,6 @@ import { ArrowRightLeft, Building2, Clock } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
@@ -49,13 +48,9 @@ const LOCATIONS = ["Yarik", "Peshawar", "Peshawar", "Rawalpindi","Peshawar", "Fa
 const STATUSES = ["Pending", "In Transit", "Completed"]
 
 export default function InterCollectorateTransferPage() {
-  const [rows, setRows] = useState<TransferRow[]>([])
+  const [rows, setRows] = useState<TransferRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ from: "Yarik", to: "Peshawar", status: "Pending" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

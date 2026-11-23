@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
 
@@ -12,20 +13,34 @@ CONFIRM_CCTV = 3
 
 
 class MatchConfirmer:
-    """Webcam: 2 hits in 12 seconds. Used by IdentifyFaceView, not by the CCTV worker."""
+    """Webcam: 2 hits in 12 seconds, from DIFFERENT frames. Used by IdentifyFaceView, not by the CCTV worker."""
 
     def __init__(self):
-        self._hits: dict[str, list[float]] = defaultdict(list)
+        self._hits: dict[str, list[tuple[float, str | None]]] = defaultdict(list)
+        self._lock = threading.Lock()
 
-    def observe(self, key: str, *, needed: int = CONFIRM_WEBCAM, window: float = CONFIRM_WEBCAM_WINDOW) -> bool:
+    def observe(
+        self,
+        key: str,
+        *,
+        needed: int = CONFIRM_WEBCAM,
+        window: float = CONFIRM_WEBCAM_WINDOW,
+        frame_hash: str | None = None,
+    ) -> bool:
+        """Record one match. Re-sending the same image (same ``frame_hash``) does not count twice."""
         now = time.monotonic()
-        recent = [stamp for stamp in self._hits[key] if now - stamp <= window]
-        recent.append(now)
-        self._hits[key] = recent[-8:]
-        return len(self._hits[key]) >= needed
+        with self._lock:
+            recent = [(stamp, h) for stamp, h in self._hits[key] if now - stamp <= window]
+            if frame_hash is None or all(h != frame_hash for _, h in recent):
+                recent.append((now, frame_hash))
+            self._hits[key] = recent[-8:]
+            # Hits without a hash (legacy callers) each count; hashed hits count once per distinct frame.
+            distinct = {h if h is not None else f"_{i}" for i, (_, h) in enumerate(self._hits[key])}
+            return len(distinct) >= needed
 
     def reset(self, key: str) -> None:
-        self._hits.pop(key, None)
+        with self._lock:
+            self._hits.pop(key, None)
 
 
 _confirmer = MatchConfirmer()

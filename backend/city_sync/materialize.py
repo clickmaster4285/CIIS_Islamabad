@@ -101,13 +101,18 @@ class StaffMaterializer(Materializer):
         "tax_form_file": None,
         "certificates_file": None,
     }
-    clear_on_clash = ("employee_id",)
+    # cnic is unique: a city row whose CNIC is already on another city's copy keeps its data
+    # with the CNIC cleared (and a conflict to review) instead of failing to copy.
+    clear_on_clash = ("employee_id", "cnic")
 
     def find_hq_owned(self, values: dict):
+        """Same CNIC as a staff member Peshawar itself owns (not another city's copy)."""
+        from city_sync.identity import local_rows_q
+
         cnic = (values.get("cnic") or "").strip()
         if not cnic:
             return None
-        return self.model.objects.filter(cnic=cnic).first()
+        return self.model.objects.filter(local_rows_q(), cnic=cnic).first()
 
 
 class AttendanceMaterializer(Materializer):
@@ -450,18 +455,25 @@ def _write(model, local_pk, values: dict, mat: Materializer, *, loc, entity_id, 
 
 
 def _resolve_pending(loc: str, entity_type: str, origin_pk: str, local_pk: str) -> None:
-    """A parent arrived: fill in children that were waiting for it."""
+    """A parent arrived: fill in children that were waiting for it (each in its own savepoint)."""
     for link in HqPendingLink.objects.filter(
         location_code=loc, target_entity_type=entity_type, target_origin_pk=origin_pk
     ):
         if link.field.startswith(WAITING_ROW):
-            link.delete()
-            _copy_waiting_row(loc, link.entity_type, link.local_pk)
+            try:
+                with transaction.atomic():
+                    link.delete()
+                    _copy_waiting_row(loc, link.entity_type, link.local_pk)
+            except Exception as exc:  # noqa: BLE001
+                # The pending link stays (rolled back) and the failure is recorded, so a retry
+                # (retry_failed_materializations / rematerialize_sync) can copy it later.
+                logger.exception("Could not copy waiting %s %s", link.entity_type, link.local_pk)
+                _waiting_conflict(loc, link.entity_type, link.local_pk, exc)
             continue
         mat = MATERIALIZERS.get(link.entity_type)
         if mat is not None:
-            attname = mat.model._meta.get_field(link.field).attname
             try:
+                attname = mat.model._meta.get_field(link.field).attname
                 with transaction.atomic():
                     mat.model._base_manager.filter(pk=link.local_pk).update(**{attname: local_pk})
             except IntegrityError:
@@ -469,7 +481,31 @@ def _resolve_pending(loc: str, entity_type: str, origin_pk: str, local_pk: str) 
                     "Could not link %s#%s.%s to %s#%s (unique clash)",
                     link.entity_type, link.local_pk, link.field, entity_type, local_pk,
                 )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Could not link %s#%s.%s to %s#%s", link.entity_type, link.local_pk, link.field, entity_type, local_pk
+                )
         link.delete()
+
+
+def _waiting_conflict(loc: str, entity_type: str, entity_id: str, exc: Exception) -> None:
+    from city_sync.hq_receiver import MATERIALIZE_FAILED
+    from city_sync.models import HqReplicaRow
+
+    try:
+        eid = UUID(str(entity_id))
+    except ValueError:
+        return
+    row = HqReplicaRow.objects.filter(location_code=loc, entity_type=entity_type, entity_id=eid).first()
+    version = row.entity_version if row else 0
+    _conflict(
+        loc,
+        entity_type,
+        eid,
+        version,
+        f"{MATERIALIZE_FAILED}:{type(exc).__name__}",
+        row.payload if row else {},
+    )
 
 
 def _copy_waiting_row(loc: str, entity_type: str, entity_id: str) -> None:
@@ -514,6 +550,18 @@ def materialize_event(
 
     if link is not None and link.hq_owned:
         return "linked"  # Peshawar wins
+
+    if link is not None:
+        # HQ moved this record to another location (e.g. a staff transfer): the old city no
+        # longer owns it, so its updates must not overwrite the row or take it back.
+        current = (
+            model._base_manager.filter(pk=link.local_pk).values_list("location_code", flat=True).first()
+        )
+        if current not in (None, "", loc):
+            logger.info(
+                "Not copying %s %s from %s: HQ row now belongs to %s", entity_type, entity_id, loc, current
+            )
+            return "not_owner"
 
     if link is None:
         owned = model._base_manager.filter(entity_id=entity_id).first() or mat.find_hq_owned(values)

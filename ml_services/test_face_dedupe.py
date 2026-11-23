@@ -27,7 +27,7 @@ class FakeFaceDB:
         if x1 < 100:
             return {"label": "Alice", "face_embedding": [0.1, 0.2], "face_match_score": 0.91, "face_match_method": "faiss"}
         if x1 < 300:
-            return {"label": "unknown-7", "face_embedding": [0.3], "face_match_score": 0.4, "face_match_method": "unknown_cache"}
+            return {"label": "unknown:U0007", "face_embedding": [0.3], "face_match_score": 0.4, "face_match_method": "unknown_cache"}
         return {"label": "unknown", "face_embedding": [], "face_match_score": None, "face_match_method": ""}
 
 
@@ -65,7 +65,7 @@ def yolo_result():
     return _Result(
         [
             _Box(0, 0.9, [10, 10, 60, 120]),  # Alice
-            _Box(0, 0.8, [150, 20, 200, 140]),  # unknown-7
+            _Box(0, 0.8, [150, 20, 200, 140]),  # unknown:U0007 (real UnknownFaceCache id format)
             _Box(0, 0.7, [400, 30, 450, 160]),  # no face
             _Box(2, 0.85, [500, 200, 620, 260]),  # car (no face work)
         ]
@@ -115,7 +115,7 @@ class FaceDedupeTests(unittest.TestCase):
         new, _, _ = self._run(dedupe=True)
         by_x = {r["bbox"][0]: r for r in new}
         self.assertEqual(by_x[10]["face_identity_key"], "face:alice")
-        self.assertEqual(by_x[150]["face_identity_key"], "face:unknown-7")
+        self.assertEqual(by_x[150]["face_identity_key"], "face:unknown:u0007")
         self.assertNotIn("face_identity_key", by_x[400])
         self.assertEqual(by_x[500]["object_type"], "vehicle")
 

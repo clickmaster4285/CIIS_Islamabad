@@ -130,10 +130,16 @@ export default function ActivityLogDetailPage() {
     enabled: !!id,
   })
 
-  const results = data?.results ?? []
-  const selectedLog = results.find((log) => String(log.id) === String(id)) ?? null
+  const { selectedLog, userJourney } = useMemo(() => {
+    const results = data?.results ?? []
+    const selected = results.find((log) => String(log.id) === String(id)) ?? null
+    const journeyUsername = selected?.username ?? username ?? ""
+    return {
+      selectedLog: selected,
+      userJourney: results.filter((log) => (log.username ?? "") === journeyUsername),
+    }
+  }, [data?.results, id, username])
   const selectedUsername = selectedLog?.username ?? username ?? "Unknown user"
-  const userJourney = results.filter((log) => (log.username ?? "") === (selectedLog?.username ?? username ?? ""))
   const filteredJourney = useMemo(() => {
     return userJourney.filter((log) => {
       const logDate = toDate(log.time)

@@ -118,7 +118,7 @@ export default function AttendancePage() {
   const [error, setError] = useState<string | null>(null)
   const [markType, setMarkType] = useState<MarkType>("check_in")
   const [markMode, setMarkMode] = useState<MarkMode>("face")
-  const [mlHealth, setMlHealth] = useState<MLHealthResponse | null>(null)
+  const [, setMlHealth] = useState<MLHealthResponse | null>(null)
   const [selectedUserId, setSelectedUserId] = useState<string>(() =>
     String(getStoredUser()?.id ?? "")
   )
@@ -172,9 +172,10 @@ export default function AttendancePage() {
   }, [])
 
   const todayStr = new Date().toISOString().slice(0, 10)
+  const matchesLocation = locations.matches
   const locationAttendance = useMemo(
-    () => attendance.filter((r) => locations.matches(r.location_code, sourceLocation)),
-    [attendance, sourceLocation, locations.matches]
+    () => attendance.filter((r) => matchesLocation(r.location_code, sourceLocation)),
+    [attendance, sourceLocation, matchesLocation]
   )
   const presentToday = locationAttendance.filter((r) => r.check_in && r.date === todayStr).length
   const periodAttendance = useMemo(
@@ -358,7 +359,6 @@ export default function AttendancePage() {
 
   const userIdNum = selectedUserId ? Number(selectedUserId) : currentUser?.id ?? 0
   const todayRecord = userIdNum ? getTodayRecordForUser(attendance, userIdNum) : undefined
-  const canCheckOut = markType === "check_out" && todayRecord
 
   const handleFaceScan = (file: File) => {
     setMarkError(null)

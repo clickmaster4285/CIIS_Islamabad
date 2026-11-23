@@ -9,8 +9,16 @@ from django.urls import include, path, re_path
 
 from config.media_views import protected_media
 
+import os
+
+from django.conf import settings
+
+# Django admin has its own login without the app's lockout/audit, so it is off in production
+# unless explicitly enabled (DJANGO_ADMIN_ENABLED=true); DJANGO_ADMIN_PATH moves it off /admin/.
+_ADMIN_ENABLED = settings.DEBUG or os.getenv("DJANGO_ADMIN_ENABLED", "").strip().lower() in ("1", "true", "yes")
+_ADMIN_PATH = (os.getenv("DJANGO_ADMIN_PATH", "admin").strip().strip("/") or "admin") + "/"
+
 urlpatterns = [
-    path("admin/", admin.site.urls),
     path("api/", include("users.urls")),
     path("api/", include("visitors.urls")),
     path("api/", include("logs.urls")),
@@ -22,6 +30,7 @@ urlpatterns = [
     path("api/", include("person_journey.urls")),
     path("api/", include("object_tracking.urls")),
     path("api/recognition/", include("recognition.urls")),
+    path("api/identity/", include("identity.urls")),
     path("api/", include("ops_central.urls")),
     path("api/", include("gps_tracking.urls")),
     path("api/", include("video_recovery.urls")),
@@ -34,3 +43,5 @@ urlpatterns = [
     # Detection clips, staff photos, attendance video, etc. — login required.
     re_path(r"^media/(?P<path>.*)$", protected_media, name="protected_media"),
 ]
+if _ADMIN_ENABLED:
+    urlpatterns.insert(0, path(_ADMIN_PATH, admin.site.urls))

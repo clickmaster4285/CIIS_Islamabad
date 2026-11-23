@@ -2,13 +2,28 @@ from datetime import datetime
 
 from django.db.models import Count, Q
 from django.utils import timezone
+from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from recognition.models import FaceEnrollment
+from recognition.scoping import staff_scope_q
 from users.models import Attendance, Staff
-from users.permissions import IsAdminOrHR
+from users.permissions import IsAdminOrHR, get_location_scope
 from users.serializers import AttendanceSerializer
+
+
+def _scoped_staff(user):
+    """Active (not deleted) staff the viewer may see. Not limited to local rows: HQ dashboards include cities."""
+    return Staff.objects.filter(staff_scope_q(user, local_only=False))
+
+
+def _scoped_attendance(user):
+    qs = Attendance.objects.filter(is_deleted=False)
+    scope = get_location_scope(user)
+    if scope:
+        qs = qs.filter(Q(user__location=scope) | Q(staff__user__location=scope))
+    return qs
 
 
 class DashboardSummaryView(APIView):
@@ -16,9 +31,13 @@ class DashboardSummaryView(APIView):
 
     def get(self, request):
         today = timezone.localdate()
-        total_staff = Staff.objects.count()
-        trained_faces = FaceEnrollment.objects.filter(is_trained=True).count()
-        today_records = Attendance.objects.filter(date=today).select_related("staff", "user")
+        staff_qs = _scoped_staff(request.user)
+        total_staff = staff_qs.count()
+        trained_faces = FaceEnrollment.objects.filter(
+            staff_scope_q(request.user, "staff__", local_only=False), is_trained=True
+        ).count()
+        attendance = _scoped_attendance(request.user)
+        today_records = attendance.filter(date=today).select_related("staff", "user")
 
         present = today_records.filter(
             Q(status=Attendance.STATUS_PRESENT) | Q(status=Attendance.STATUS_LATE) | Q(check_in__isnull=False)
@@ -42,9 +61,7 @@ class DashboardSummaryView(APIView):
             .order_by("staff__department")
         )
 
-        recent = Attendance.objects.select_related("staff", "user").order_by(
-            "-check_in", "-id"
-        )[:10]
+        recent = attendance.select_related("staff", "user").order_by("-check_in", "-id")[:10]
 
         return Response({
             "date": str(today),
@@ -73,29 +90,35 @@ class DailyReportView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def get(self, request):
-        date_str = request.query_params.get("date")
+        date_str = (request.query_params.get("date") or "").strip()
         if date_str:
-            report_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            try:
+                report_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"error": "date must be YYYY-MM-DD"}, status=status.HTTP_400_BAD_REQUEST)
         else:
             report_date = timezone.localdate()
 
-        records = Attendance.objects.filter(date=report_date).select_related("staff", "user")
+        records = _scoped_attendance(request.user).filter(date=report_date).select_related("staff", "user")
         present_staff_ids = set(records.exclude(staff_id=None).values_list("staff_id", flat=True))
-        # Also include user-linked staff
-        for user_id in records.exclude(user_id=None).values_list("user_id", flat=True):
-            staff = Staff.objects.filter(user_id=user_id).first()
-            if staff:
-                present_staff_ids.add(staff.pk)
+        # Records punched by user account only: map those users to their staff rows in one query.
+        user_ids = set(records.filter(staff_id=None).exclude(user_id=None).values_list("user_id", flat=True))
+        if user_ids:
+            present_staff_ids.update(
+                Staff.objects.filter(user_id__in=user_ids).values_list("pk", flat=True)
+            )
 
         absent_list = [
             {
-                "staff_id": emp.pk,
-                "employee_id": emp.employee_id,
-                "name": emp.full_name,
-                "department": emp.department,
+                "staff_id": emp["pk"],
+                "employee_id": emp["employee_id"],
+                "name": emp["full_name"],
+                "department": emp["department"],
             }
-            for emp in Staff.objects.all()
-            if emp.pk not in present_staff_ids
+            for emp in _scoped_staff(request.user)
+            .exclude(pk__in=present_staff_ids)
+            .order_by("full_name")
+            .values("pk", "employee_id", "full_name", "department")
         ]
 
         return Response({

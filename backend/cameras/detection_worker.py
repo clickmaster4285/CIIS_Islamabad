@@ -28,40 +28,10 @@ def _lock_path() -> Path:
 
 
 def _acquire_worker_lock():
-    lock_path = _lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = None
-    try:
-        fh = open(lock_path, "a+", encoding="utf-8")
-        if sys.platform == "win32":
-            import msvcrt
+    """Exclusive per-host lock so only one process runs the detection poll loop."""
+    from .locks import acquire_process_lock
 
-            try:
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                fh.close()
-                return None
-        else:
-            import fcntl
-
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                fh.close()
-                return None
-        fh.seek(0)
-        fh.truncate()
-        fh.write(f"{os.getpid()}\n")
-        fh.flush()
-        return fh
-    except OSError as exc:
-        logger.debug("[detection-worker] Could not acquire lock: %s", exc)
-        if fh is not None:
-            try:
-                fh.close()
-            except OSError:
-                pass
-        return None
+    return acquire_process_lock(_lock_path())
 
 
 def _worker_enabled() -> bool:
@@ -114,7 +84,7 @@ def _poll_camera(camera_id: int) -> int:
         ml_service_enabled,
     )
 
-    from .clip_capture import stash_evidence_jpeg
+    from .clip_capture import clear_stashed_evidence, stash_evidence_jpeg
     from .detection_utils import save_detection_batch
     from .models import Camera
 
@@ -130,7 +100,7 @@ def _poll_camera(camera_id: int) -> int:
         return 0
 
     try:
-        result = ml_live_detections_for_camera(camera)
+        result = ml_live_detections_for_camera(camera, include_embeddings=True)
     except MLServiceError as exc:
         logger.debug("ML poll skipped for camera %s: %s", camera_id, exc)
         return 0
@@ -146,21 +116,42 @@ def _poll_camera(camera_id: int) -> int:
         try:
             import requests
 
+            from ml.client import ml_auth_headers
+
             url = ml_live_jpeg_evidence_url_for_camera(camera)
-            resp = requests.get(url, timeout=(1.5, 3.0))
+            resp = requests.get(url, timeout=(1.5, 3.0), headers=ml_auth_headers())
             if resp.status_code == 200 and resp.content:
                 stash_evidence_jpeg(camera.pk, resp.content)
         except Exception:
-            logger.debug("Evidence fetch skipped for camera %s", camera_id, exc_info=True)
+            logger.debug("Evidence fetch skipped for camera %s", camera_id)
 
-    return save_detection_batch(camera, detections)
+    try:
+        return save_detection_batch(camera, detections)
+    finally:
+        # Evidence belongs to this poll only; events of later polls fetch their own frame.
+        clear_stashed_evidence(camera.pk)
 
 
 def run_worker_forever() -> None:
     """Poll cameras round-robin and save detections until stopped."""
+    global _lock_handle
+
     if not _worker_enabled():
         logger.info("[detection-worker] Disabled via DETECTION_WORKER_ENABLED")
         return
+
+    # maybe_start_background_worker() already holds the lock for its thread; the management
+    # commands call this directly and must take it here so two processes never poll at once.
+    owns_lock = False
+    if _lock_handle is None:
+        _lock_handle = _acquire_worker_lock()
+        if _lock_handle is None:
+            logger.warning(
+                "[detection-worker] Another process holds %s — not starting a second poll loop",
+                _lock_path(),
+            )
+            return
+        owns_lock = True
 
     if not _wait_for_ml():
         logger.warning("[detection-worker] ML service not ready — retrying in loop")
@@ -215,6 +206,12 @@ def run_worker_forever() -> None:
         _stop_event.wait(interval)
 
     logger.info("[detection-worker] Stopped")
+    if owns_lock and _lock_handle is not None:
+        try:
+            _lock_handle.close()
+        except OSError:
+            pass
+        _lock_handle = None
 
 
 def stop_background_worker() -> None:

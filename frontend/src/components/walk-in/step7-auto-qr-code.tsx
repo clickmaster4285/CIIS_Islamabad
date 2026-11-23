@@ -74,8 +74,9 @@ export function WalkInStep7AutoQrCode({ formData, updateFormData }: WalkInStep7A
   const durationMinutes = Number(formData.slotDuration || "30")
   const endTime = addMinutes(startTime, Number.isFinite(durationMinutes) ? durationMinutes : 30)
 
+  // Captured once on mount; only used until formData.qrCodeId is filled in.
+  const [uniqueSuffix] = useState(() => Date.now().toString().slice(-6))
   const autoQrValues = useMemo(() => {
-    const uniqueSuffix = Date.now().toString().slice(-6)
     const cnicSuffix = safeCnic.slice(-6).padStart(6, "0")
     const qrCodeId = formData.qrCodeId || `WALKIN-${cnicSuffix}-${uniqueSuffix}`
     const visitorRefNumber = formData.visitorRefNumber || `REF-${safeCnic.slice(-8).padStart(8, "0")}`
@@ -100,6 +101,7 @@ export function WalkInStep7AutoQrCode({ formData, updateFormData }: WalkInStep7A
     generatedDate,
     safeCnic,
     startTime,
+    uniqueSuffix,
     visitDate,
     zone,
   ])

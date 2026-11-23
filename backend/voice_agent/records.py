@@ -244,6 +244,7 @@ DATASETS: dict[str, Dataset] = {
         "created_at",
         ("status", "godown_warehouse", "unit"),
         ("status", "godown_warehouse", "unit", "pct_code"),
+        base={"is_deleted": False},
     ),
     "destruction_alerts": Dataset(
         "warehouse.DestructionAlert",
@@ -272,6 +273,7 @@ DATASETS: dict[str, Dataset] = {
         ("visitor_type", "approval_status", "registration_status", "department_to_visit", "host_officer_name",
          "access_zone"),
         _location_scope("location"),
+        {"is_deleted": False},
     ),
     "visitor_security_alerts": Dataset(
         "visitors.SecurityAlert",
@@ -443,18 +445,37 @@ def mentions_time(utterance: str) -> bool:
     return bool(_TIME_WORDS.search((utterance or "").lower()))
 
 
+# Large event/log tables: an unindexed icontains over them on every failed search is too costly.
+_ELSEWHERE_SKIP = frozenset({"user_activity", "detection_events", "object_visits", "infra_events", "server_logs"})
+_ELSEWHERE_MAX_DATASETS = 8
+
+
 def _text_elsewhere(user, text: str, skip: str) -> list[dict]:
-    """When a text search finds nothing, report which other permitted datasets do contain it."""
+    """When a text search finds nothing, report which other permitted datasets do contain it.
+
+    Cheap by design: exact (non-fuzzy) match only, EXISTS instead of COUNT, datasets the
+    utterance hints at first, heavy log tables skipped, and at most a few datasets probed.
+    """
+    hinted = [n for n in dataset_hints(text) if n in DATASETS]
+    candidates = [*hinted, *(n for n in DATASETS if n not in hinted)]
     found = []
-    for name in DATASETS:
-        if name == skip:
+    probed = 0
+    for name in candidates:
+        if name == skip or name in _ELSEWHERE_SKIP:
             continue
+        if probed >= _ELSEWHERE_MAX_DATASETS:
+            break
+        ds = DATASETS[name]
+        if not policy.has_capability(user, ds.capability) or ds.scope(user) is None:
+            continue
+        probed += 1
         try:
-            n = search_records(user, {"dataset": name, "text": text, "limit": 0}, fallback=False, allow_fuzzy=False)["total"]
+            rq = build_query(user, {"dataset": name, "text": text}, allow_fuzzy=False)
+            hit = rq.qs.exists()
         except RecordsError:
             continue
-        if n:
-            found.append({"dataset": name, "matches": n})
+        if hit:
+            found.append({"dataset": name, "matches": True})
     return found
 
 

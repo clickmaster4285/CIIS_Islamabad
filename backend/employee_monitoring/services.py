@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
@@ -116,10 +118,16 @@ def mask_number(raw: str | None) -> str:
 
 
 def client_ip(request) -> str | None:
-    fwd = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.META.get("REMOTE_ADDR") or None
+    """REMOTE_ADDR, or the proxy's forwarded address only when nginx on this machine sent it
+    (same rule as the login guard). Returns None for anything that is not a valid IP so the
+    audit row's GenericIPAddressField never receives client-controlled junk."""
+    from users.login_guard import client_ip as _guarded_ip
+
+    raw = (_guarded_ip(request) or "").strip()
+    try:
+        return str(ipaddress.ip_address(raw))
+    except ValueError:
+        return None
 
 
 def record_audit(request, action: str, *, target_type: str = "", target_id: str = "", reason: str = "", **metadata) -> None:
@@ -152,10 +160,99 @@ def recording_root() -> str:
     return root
 
 
+class UnsafeStoragePath(ValueError):
+    """A storage key that would resolve outside the private recording root."""
+
+
 def storage_path(storage_key: str) -> str:
-    # storage_key is a server-chosen relative name; never a client path.
-    safe = os.path.normpath(storage_key).lstrip(os.sep).replace("..", "")
-    return os.path.join(recording_root(), safe)
+    """Absolute path for a server-chosen storage key, guaranteed to stay inside the root.
+
+    Raises UnsafeStoragePath for absolute keys, drive letters, ``..`` escapes or anything else
+    that resolves outside the recording root (checked on the real, symlink-resolved path)."""
+    key = (storage_key or "").replace("\\", "/").strip()
+    if not key or key.startswith("/") or os.path.isabs(key) or os.path.splitdrive(key)[0]:
+        raise UnsafeStoragePath(storage_key)
+    root = os.path.realpath(recording_root())
+    full = os.path.realpath(os.path.join(root, key))
+    try:
+        inside = os.path.commonpath([root, full]) == root and full != root
+    except ValueError:  # different drives on Windows
+        inside = False
+    if not inside:
+        raise UnsafeStoragePath(storage_key)
+    return full
+
+
+def safe_storage_path(storage_key: str) -> str:
+    """storage_path() that returns "" instead of raising, for read/serve/delete callers."""
+    try:
+        return storage_path(storage_key) if storage_key else ""
+    except UnsafeStoragePath:
+        return ""
+
+
+_KEY_PART = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def new_storage_key(prefix: str, owner: str | int | None, ext: str) -> str:
+    """A fresh server-generated key: <prefix>/<owner>/<uuid>.<ext>. No client text survives
+    except after being reduced to [A-Za-z0-9_-]."""
+    parts = [_KEY_PART.sub("_", str(prefix or "misc"))[:60] or "misc"]
+    if owner not in (None, ""):
+        parts.append(_KEY_PART.sub("_", str(owner))[:40] or "0")
+    ext = _KEY_PART.sub("", ext or "")[:8] or "bin"
+    return "/".join(parts) + f"/{uuid.uuid4().hex}.{ext}"
+
+
+# --- content types ----------------------------------------------------------------------------
+# Only these types are accepted on upload and echoed back when serving. Everything else is
+# rejected (upload) or served as an octet-stream attachment (legacy rows).
+
+AUDIO_CONTENT_TYPES = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/aac": "aac",
+    "audio/amr": "amr",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "audio/opus": "opus",
+    "audio/3gpp": "3gp",
+    "audio/webm": "webm",
+}
+
+SCREEN_CONTENT_TYPES = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+}
+
+
+def normalize_content_type(value: str | None) -> str:
+    return (value or "").split(";", 1)[0].strip().lower()
+
+
+def protected_file_response(path: str, content_type: str | None, allowed: dict):
+    """FileResponse for a private monitoring file with hardened headers.
+
+    Media types from the whitelist are served inline; anything else is forced to an
+    application/octet-stream attachment so a browser never renders it as HTML/script."""
+    from django.http import FileResponse
+
+    ct = normalize_content_type(content_type)
+    if ct in allowed:
+        resp = FileResponse(open(path, "rb"), content_type=ct)
+    else:
+        resp = FileResponse(
+            open(path, "rb"), content_type="application/octet-stream", as_attachment=True,
+            filename=os.path.basename(path),
+        )
+    resp["X-Content-Type-Options"] = "nosniff"
+    resp["Content-Security-Policy"] = "sandbox"
+    return resp
 
 
 def probe_audio_duration(path: str) -> int | None:

@@ -21,10 +21,8 @@ export default function DestructionRecordDetailPage() {
   const [logs, setLogs] = useState<FireSmokeLogRecord[]>([])
 
   useEffect(() => {
-    if (!id) {
-      setRecord(null)
-      return
-    }
+    // Missing id is handled by the early return in render.
+    if (!id) return
     let cancelled = false
     void (async () => {
       try {

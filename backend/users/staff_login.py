@@ -100,7 +100,16 @@ def unique_employee_login_id(staff: Staff) -> str:
             n += 1
 
 
-DEFAULT_STAFF_LOGIN_PASSWORD = "123456"
+def generate_staff_login_password(length: int = 12) -> str:
+    """Random temporary password for a new staff login (shown once to HR to hand over)."""
+    import secrets
+    import string
+
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.isdigit() for c in pwd) and any(c.isalpha() for c in pwd):
+            return pwd
 
 
 def staff_login_preview(staff: Staff) -> dict:
@@ -121,5 +130,5 @@ def staff_login_preview(staff: Staff) -> dict:
         "role_required": not bool(role),
         "location_required": (role or "GUARD") != "ADMIN" and not bool(infer_staff_location(staff)),
         "already_linked": bool(staff.user_id),
-        "default_password": DEFAULT_STAFF_LOGIN_PASSWORD,
+        "default_password": generate_staff_login_password(),
     }

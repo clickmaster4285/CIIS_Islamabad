@@ -88,14 +88,18 @@ def _recent_event_exists(person: JourneyPerson, camera, now) -> bool:
     ).exists()
 
 
-@transaction.atomic
 def ingest_camera_detections(camera, detections: list[dict]) -> int:
     """Record one journey sighting per person visible in the ML detection batch."""
     people = _filter_person_detections(detections)
     if not people:
         return 0
-
+    # Decided before the transaction opens: it may need an HTTP probe of the ML node (cached 30 s).
     unknowns_enabled = live_ingest_unknowns_enabled()
+    return _ingest_people(camera, people, unknowns_enabled)
+
+
+@transaction.atomic
+def _ingest_people(camera, people: list[dict], unknowns_enabled: bool) -> int:
     now = timezone.now()
     recorded = 0
     frame_slots: list[tuple[list, JourneyPerson]] = []

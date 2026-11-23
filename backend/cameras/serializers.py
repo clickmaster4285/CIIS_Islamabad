@@ -31,10 +31,17 @@ class SiteSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "created_at", "updated_at", "nvr_count", "camera_count"]
 
+    # SiteViewSet annotates _nvr_count / _camera_count; the queries are a fallback for other callers.
     def get_nvr_count(self, obj: Site) -> int:
+        annotated = getattr(obj, "_nvr_count", None)
+        if annotated is not None:
+            return annotated
         return obj.nvrs.filter(is_active=True).count()
 
     def get_camera_count(self, obj: Site) -> int:
+        annotated = getattr(obj, "_camera_count", None)
+        if annotated is not None:
+            return annotated
         return Camera.objects.filter(nvr__site=obj, is_active=True).count()
 
 
@@ -73,7 +80,26 @@ class NvrSerializer(serializers.ModelSerializer):
         return bool(obj.password)
 
     def get_camera_count(self, obj: Nvr) -> int:
+        annotated = getattr(obj, "_camera_count", None)
+        if annotated is not None:
+            return annotated
         return obj.cameras.filter(is_active=True).count()
+
+    def validate_ip_address(self, value: str) -> str:
+        from .access import validate_nvr_host
+
+        try:
+            return validate_nvr_host(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from None
+
+    def validate_stream_path_template(self, value: str) -> str:
+        from .rtsp_utils import validate_stream_path_template
+
+        try:
+            return validate_stream_path_template(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from None
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { Users, Shield, UserPlus, Loader2, Eye, Pencil, Trash2, KeyRound, Copy, Check } from "lucide-react"
+import { Users, Shield, UserPlus, Loader2, Eye, Pencil, Trash2, KeyRound } from "lucide-react"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -46,7 +46,6 @@ import {
   roleLabel,
   type ApiUser,
 } from "@/lib/users-api"
-import { DEFAULT_STAFF_LOGIN_PASSWORD } from "@/lib/staff-api"
 import { ROUTES, getUserDetailPath, getUserEditPath } from "@/routes/config"
 
 export default function UserRoleManagementPage() {
@@ -58,17 +57,6 @@ export default function UserRoleManagementPage() {
   const [deleting, setDeleting] = useState(false)
   const [permissionsUser, setPermissionsUser] = useState<ApiUser | null>(null)
   const [rolePickRole, setRolePickRole] = useState<string | null>(null)
-  const [copiedPassword, setCopiedPassword] = useState(false)
-
-  const copyDefaultPassword = async () => {
-    try {
-      await navigator.clipboard.writeText(DEFAULT_STAFF_LOGIN_PASSWORD)
-      setCopiedPassword(true)
-      window.setTimeout(() => setCopiedPassword(false), 1500)
-    } catch {
-      /* ignore */
-    }
-  }
 
   const hasAuth = Boolean(getStoredToken())
   const canManageModules = isGlobalAdmin(getStoredUser()?.role)
@@ -206,26 +194,6 @@ export default function UserRoleManagementPage() {
                     value={search}
                     onChange={(e) => setSearch(e.target.value)}
                   />
-                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                    <KeyRound className="h-4 w-4 shrink-0 text-slate-500" />
-                    <span className="text-slate-600">Default password</span>
-                    <code className="rounded bg-white px-2 py-0.5 font-mono text-sm font-semibold tracking-wider text-slate-900 ring-1 ring-slate-200">
-                      {DEFAULT_STAFF_LOGIN_PASSWORD}
-                    </code>
-                    <button
-                      type="button"
-                      onClick={() => void copyDefaultPassword()}
-                      className="rounded-md p-1.5 text-slate-500 hover:bg-white hover:text-slate-800"
-                      title="Copy default password"
-                      aria-label="Copy default password"
-                    >
-                      {copiedPassword ? (
-                        <Check className="h-4 w-4 text-emerald-600" />
-                      ) : (
-                        <Copy className="h-4 w-4" />
-                      )}
-                    </button>
-                  </div>
                 </div>
                 {isLoading ? (
                   <p className="text-sm text-muted-foreground py-8 flex items-center gap-2">
@@ -239,7 +207,6 @@ export default function UserRoleManagementPage() {
                         <TableRow>
                           <TableHead className="w-[1%] whitespace-nowrap">Name</TableHead>
                           <TableHead className="w-[1%] whitespace-nowrap">Username</TableHead>
-                          <TableHead className="w-[1%] whitespace-nowrap">Password</TableHead>
                           <TableHead className="w-[1%] whitespace-nowrap">Email</TableHead>
                           <TableHead className="w-[1%] whitespace-nowrap">Role</TableHead>
                           <TableHead className="w-[1%] whitespace-nowrap">Location</TableHead>
@@ -262,15 +229,6 @@ export default function UserRoleManagementPage() {
                                 {row.full_name?.trim() || "—"}
                               </TableCell>
                               <TableCell className="whitespace-nowrap font-mono text-sm">{row.username}</TableCell>
-                              <TableCell className="whitespace-nowrap">
-                                {row.role === "ADMIN" || row.role === "IT_SUPERADMIN" ? (
-                                  <span className="text-muted-foreground text-sm">—</span>
-                                ) : (
-                                  <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs font-medium tracking-wider text-slate-800">
-                                    {DEFAULT_STAFF_LOGIN_PASSWORD}
-                                  </code>
-                                )}
-                              </TableCell>
                               <TableCell className="text-muted-foreground whitespace-nowrap">{row.email}</TableCell>
                               <TableCell className="whitespace-nowrap">
                                 <Badge variant="outline">{roleLabel(row.role)}</Badge>

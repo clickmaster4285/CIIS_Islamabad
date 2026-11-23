@@ -121,13 +121,20 @@ export default function PersonJourneyPage() {
   const rangeStart = totalCount === 0 ? 0 : (page - 1) * pageSize + 1
   const rangeEnd = Math.min(page * pageSize, totalCount)
 
-  useEffect(() => {
-    setPage(1)
-  }, [debouncedSearch, typeFilter, pageSize])
-
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages)
-  }, [page, totalPages])
+  // Back to page 1 when the search, type or page size changes, and clamp the
+  // page to the available range (adjust state during render instead of effects).
+  const [pageResetKey, setPageResetKey] = useState({ debouncedSearch, typeFilter, pageSize })
+  if (
+    pageResetKey.debouncedSearch !== debouncedSearch ||
+    pageResetKey.typeFilter !== typeFilter ||
+    pageResetKey.pageSize !== pageSize
+  ) {
+    setPageResetKey({ debouncedSearch, typeFilter, pageSize })
+    // Same outcome as the former reset+clamp effects (the clamp ran last).
+    setPage(page > totalPages ? totalPages : 1)
+  } else if (page > totalPages) {
+    setPage(totalPages)
+  }
 
   const summary = summaryQuery.data
 

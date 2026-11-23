@@ -49,13 +49,9 @@ function saveRows(rows: AnprRow[]) {
 const REGIONS = ["PK-Punjab", "PK-Sindh", "PK-KP", "PK-Balochistan", "PK-Gilgit"]
 
 export default function AnprSettingsPage() {
-  const [rows, setRows] = useState<AnprRow[]>([])
+  const [rows, setRows] = useState<AnprRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ gate: "", camera: "", region: "PK-Punjab", status: "Active" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

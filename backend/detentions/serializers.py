@@ -1,5 +1,6 @@
 from typing import Optional
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
@@ -214,23 +215,24 @@ def apply_validated_to_memo(memo: DetentionMemo, data: dict) -> None:
     memo.examining_officer_notes = data.get("examiningOfficerNotes") or ""
     memo.detention_notes = data.get("detentionNotes") or ""
 
-    memo.memo_qr_code_number = data.get("memoQrCodeNumber") or ""
-    memo.memo_qr_code_payload = data.get("memoQrCodePayload") or ""
-
-    memo.created_by = data.get("createdBy") or memo.created_by or ""
+    # memo_qr_code_number / memo_qr_code_payload / created_by are server-managed
+    # (set by the views); client values are ignored so an update never blanks them.
 
 
 def replace_goods_lines(memo: DetentionMemo, goods_items: Optional[list]) -> None:
-    memo.goods_lines.all().delete()
-    if not goods_items:
-        return
+    """Upsert goods lines by client line id; soft-delete lines no longer sent.
 
-    # Validate camera / detection FKs exist before bulk create
+    Existing lines keep their images. PCT code / assessable value are assessment-stage
+    fields: a blank value from the memo form never clears what the assessment set.
+    """
+    import uuid
+
     from cameras.models import Camera, DetectionEvent
 
+    goods_items = [raw for raw in (goods_items or []) if isinstance(raw, dict)]
+
     camera_ids = {
-        _optional_int((raw if isinstance(raw, dict) else {}).get("locatedCameraId")
-                      or (raw if isinstance(raw, dict) else {}).get("located_camera_id"))
+        _optional_int(raw.get("locatedCameraId") or raw.get("located_camera_id"))
         for raw in goods_items
     }
     camera_ids.discard(None)
@@ -239,46 +241,64 @@ def replace_goods_lines(memo: DetentionMemo, goods_items: Optional[list]) -> Non
     ) if camera_ids else set()
 
     event_ids = {
-        _optional_int((raw if isinstance(raw, dict) else {}).get("detectionEventId")
-                      or (raw if isinstance(raw, dict) else {}).get("detection_event_id"))
+        _optional_int(raw.get("detectionEventId") or raw.get("detection_event_id"))
         for raw in goods_items
     }
     event_ids.discard(None)
-    valid_events = set(
-        DetectionEvent.objects.filter(pk__in=event_ids).values_list("pk", flat=True)
-    ) if event_ids else set()
+    valid_events = dict(
+        DetectionEvent.objects.filter(pk__in=event_ids).values_list("pk", "camera_id")
+    ) if event_ids else {}
 
-    bulk = []
+    existing_by_client_id: dict[str, DetentionMemoGoodsLine] = {}
+    for line in memo.goods_lines.filter(is_deleted=False).order_by("id"):
+        key = (line.client_line_id or "").strip() or str(line.pk)
+        existing_by_client_id.setdefault(key, line)
+
+    keep_ids: list[int] = []
     for raw in goods_items:
-        item = _goods_item_raw(raw if isinstance(raw, dict) else {})
+        item = _goods_item_raw(raw)
+        client_id = str(item["id"] or "").strip()
         cam_id = item["locatedCameraId"] if item["locatedCameraId"] in valid_cameras else None
         event_id = item["detectionEventId"] if item["detectionEventId"] in valid_events else None
         # If AI event is linked but camera missing, inherit camera from the event.
         if event_id and not cam_id:
-            try:
-                cam_id = DetectionEvent.objects.filter(pk=event_id).values_list("camera_id", flat=True).first()
-            except Exception:
-                cam_id = None
-        bulk.append(
-            DetentionMemoGoodsLine(
+            cam_id = valid_events.get(event_id)
+        fields = {
+            "qr_code_number": item["qrCodeNumber"],
+            "description": item["description"],
+            "quantity": item["quantity"],
+            "unit": item["unit"],
+            "condition": item["condition"],
+            "identification_ref": item["identificationRef"],
+            "item_notes": item["itemNotes"],
+            "perishable": item["perishable"],
+            "located_camera_id": cam_id,
+            "detected_at": item["detectedAt"],
+            "detection_event_id": event_id,
+        }
+        line = existing_by_client_id.pop(client_id, None) if client_id else None
+        if line is not None:
+            for attr, value in fields.items():
+                setattr(line, attr, value)
+            if item["pctCode"]:
+                line.pct_code = item["pctCode"]
+            if item["assessableValuePkr"]:
+                line.assessable_value_pkr = item["assessableValuePkr"]
+            line.save()
+        else:
+            line = DetentionMemoGoodsLine.objects.create(
                 memo=memo,
-                client_line_id=item["id"],
-                qr_code_number=item["qrCodeNumber"],
-                description=item["description"],
+                client_line_id=client_id or uuid.uuid4().hex,
                 pct_code=item["pctCode"],
-                quantity=item["quantity"],
-                unit=item["unit"],
-                condition=item["condition"],
                 assessable_value_pkr=item["assessableValuePkr"],
-                identification_ref=item["identificationRef"],
-                item_notes=item["itemNotes"],
-                perishable=item["perishable"],
-                located_camera_id=cam_id,
-                detected_at=item["detectedAt"],
-                detection_event_id=event_id,
+                **fields,
             )
-        )
-    DetentionMemoGoodsLine.objects.bulk_create(bulk)
+        keep_ids.append(line.pk)
+
+    # Soft delete (keeps images and lets the deletion sync to HQ).
+    for line in memo.goods_lines.filter(is_deleted=False).exclude(pk__in=keep_ids):
+        line.is_deleted = True
+        line.save()
 
 
 def memo_to_frontend_dict(memo: DetentionMemo, request=None) -> dict:
@@ -293,11 +313,13 @@ def memo_to_frontend_dict(memo: DetentionMemo, request=None) -> dict:
         return (getattr(memo, text_field_name) or "") or ""
 
     goods_items = []
-    goods_qs = memo.goods_lines.all()
+    goods_qs = [gl for gl in memo.goods_lines.all() if not gl.is_deleted]
     # Prefer prefetched located_camera / detection_event when available
     for gl in goods_qs:
         goods_images = []
         for img in gl.images.all():
+            if img.is_deleted:
+                continue
             url = _absolute_media_url(request, img.image)
             if url:
                 goods_images.append(url)
@@ -348,6 +370,8 @@ def memo_to_frontend_dict(memo: DetentionMemo, request=None) -> dict:
         qs_att = list(memo.attachments.all())
 
     for att in qs_att:
+        if att.is_deleted:
+            continue
         url = _absolute_media_url(request, att.file)
         media_attachments.append(
             {
@@ -425,15 +449,25 @@ class DepositAccountWriteSerializer(serializers.Serializer):
     remarks = serializers.CharField(required=False, allow_blank=True)
 
 
-def apply_partial_to_deposit_entry(entry: DepositAccountEntry, data: dict) -> None:
+def _find_memo(raw_id, memo_qs=None) -> DetentionMemo | None:
+    raw = str(raw_id or "").strip()
+    if not raw:
+        return None
+    qs = memo_qs if memo_qs is not None else DetentionMemo.objects.filter(is_deleted=False)
+    try:
+        return qs.filter(pk=raw).first()
+    except (ValueError, TypeError, DjangoValidationError):
+        return None
+
+
+def apply_partial_to_deposit_entry(entry: DepositAccountEntry, data: dict, memo_qs=None) -> None:
     """Update deposit row from PATCH body (camelCase keys). Only keys present in `data` are applied."""
 
     def _present(key: str) -> bool:
         return key in data
 
     if _present("detentionMemoId"):
-        raw = (data.get("detentionMemoId") or "").strip()
-        entry.detention_memo = DetentionMemo.objects.filter(pk=raw).first() if raw else None
+        entry.detention_memo = _find_memo(data.get("detentionMemoId"), memo_qs)
     if _present("treasuryChallanNo"):
         entry.treasury_challan_no = data.get("treasuryChallanNo") or ""
     if _present("depositType"):
@@ -456,11 +490,8 @@ def apply_partial_to_deposit_entry(entry: DepositAccountEntry, data: dict) -> No
         entry.remarks = data.get("remarks") or ""
 
 
-def create_deposit_account_entry(validated_data: dict) -> DepositAccountEntry:
-    memo = None
-    raw_id = (validated_data.get("detentionMemoId") or "").strip()
-    if raw_id:
-        memo = DetentionMemo.objects.filter(pk=raw_id).first()
+def create_deposit_account_entry(validated_data: dict, memo_qs=None) -> DepositAccountEntry:
+    memo = _find_memo(validated_data.get("detentionMemoId"), memo_qs)
 
     return DepositAccountEntry.objects.create(
         detention_memo=memo,

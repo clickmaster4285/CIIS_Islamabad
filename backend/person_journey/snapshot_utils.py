@@ -162,3 +162,84 @@ def person_camera_captures(person, *, since=None) -> list[dict]:
 
     results.sort(key=lambda row: row.get("camera_name") or "")
     return results
+
+
+def annotate_person_list_extras(persons, *, tracklet_limit: int = 40, events_per_person: int = 20) -> list:
+    """
+    Precompute latest_snapshot_url / active_tracklet_count / tracklet_ids for a page of persons in a few
+    queries (the serializer otherwise runs 1-3 queries per row). Mirrors journey_person_latest_snapshot_url.
+    """
+    from django.db.models import F, Window
+    from django.db.models.functions import RowNumber
+
+    from .models import CameraTrack
+
+    persons = list(persons)
+    ids = [p.pk for p in persons]
+    if not ids:
+        return persons
+
+    events: dict[int, list] = {}
+    rows = (
+        JourneyEvent.objects.filter(journey_person_id__in=ids)
+        .exclude(snapshot_path="")
+        .annotate(rn=Window(RowNumber(), partition_by=[F("journey_person_id")], order_by=F("created_at").desc()))
+        .filter(rn__lte=events_per_person)
+        .values_list("journey_person_id", "snapshot_path", "metadata")
+    )
+    for pid, path, meta in rows:
+        events.setdefault(pid, []).append((path, meta if isinstance(meta, dict) else {}))
+
+    tracks: dict[int, list] = {}
+    active: dict[int, int] = {}
+    track_rows = (
+        CameraTrack.objects.filter(journey_person_id__in=ids)
+        .annotate(rn=Window(RowNumber(), partition_by=[F("journey_person_id")], order_by=F("started_at").desc()))
+        .filter(rn__lte=tracklet_limit)
+        .values_list("journey_person_id", "tracklet_id")
+    )
+    for pid, label in track_rows:
+        label = (label or "").strip()
+        if label and label not in tracks.setdefault(pid, []):
+            tracks[pid].append(label)
+    for pid in CameraTrack.objects.filter(journey_person_id__in=ids, status="active").values_list(
+        "journey_person_id", flat=True
+    ):
+        active[pid] = active.get(pid, 0) + 1
+
+    need_clip: list[int] = []
+    for person in persons:
+        url = ""
+        rows_for = events.get(person.pk, [])
+        for path, meta in rows_for:
+            if meta.get("snapshot_kind") == "person_crop" and (path or "").strip():
+                url = path.strip()
+                break
+        if not url:
+            for path, _meta in rows_for:
+                if (path or "").strip():
+                    url = path.strip()
+                    break
+        if not url:
+            meta = person.metadata if isinstance(getattr(person, "metadata", None), dict) else {}
+            url = str(meta.get("thumbnail_url") or "").strip()
+        if not url:
+            need_clip.append(person.pk)
+        person._latest_snapshot_url = url
+        person._active_tracklet_count = active.get(person.pk, 0)
+        person._tracklet_ids = tracks.get(person.pk, [])
+
+    if need_clip:
+        latest_det = {}
+        for pid, det_id in (
+            JourneyEvent.objects.filter(journey_person_id__in=need_clip, detection_event_id__isnull=False)
+            .annotate(rn=Window(RowNumber(), partition_by=[F("journey_person_id")], order_by=F("created_at").desc()))
+            .filter(rn=1)
+            .values_list("journey_person_id", "detection_event_id")
+        ):
+            latest_det[pid] = det_id
+        clip_map = build_detection_clip_map([JourneyEvent(detection_event_id=d) for d in latest_det.values()])
+        by_pk = {p.pk: p for p in persons}
+        for pid, det_id in latest_det.items():
+            by_pk[pid]._latest_snapshot_url = clip_map.get(det_id, "")
+    return persons

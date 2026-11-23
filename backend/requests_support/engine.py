@@ -10,8 +10,7 @@ import re
 from datetime import timedelta
 from typing import Any
 
-from django.db import transaction
-from django.db.models import Q
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (
@@ -112,6 +111,10 @@ def compute_sla_deadlines(priority: str, created_at=None):
     return created + timedelta(hours=response_h), created + timedelta(hours=resolve_h)
 
 
+def _title_tokens(title: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(t) > 3}
+
+
 def find_duplicates(
     *,
     title: str,
@@ -119,8 +122,13 @@ def find_duplicates(
     infra_device_id: int | None = None,
     site_name: str = "",
     hours: int = 48,
+    requester=None,
 ) -> SupportTicket | None:
-    """Return an open similar ticket if one likely exists."""
+    """Return an open similar ticket if one likely exists.
+
+    Scoped to the requester's own site (their location, or just their own tickets when they
+    have none) so one site never sees another site's tickets. A title-only match needs at
+    least two shared significant words."""
     since = timezone.now() - timedelta(hours=hours)
     open_statuses = [
         TicketStatus.NEW,
@@ -134,6 +142,9 @@ def find_duplicates(
         TicketStatus.REOPENED,
     ]
     qs = SupportTicket.objects.filter(created_at__gte=since, status__in=open_statuses)
+    if requester is not None:
+        location = (getattr(requester, "location", None) or "").strip()
+        qs = qs.filter(requester__location=location) if location else qs.filter(requester=requester)
     if camera_id:
         hit = qs.filter(camera_id=camera_id).first()
         if hit:
@@ -143,17 +154,17 @@ def find_duplicates(
         if hit:
             return hit
 
-    # Soft title match: shared significant tokens
-    tokens = {t for t in re.findall(r"[a-z0-9]+", title.lower()) if len(t) > 3}
-    if not tokens:
+    # Soft title match: at least two shared significant tokens.
+    tokens = _title_tokens(title)
+    if len(tokens) < 2:
         return None
-    q = Q()
-    for token in list(tokens)[:6]:
-        q |= Q(title__icontains=token)
-    candidates = qs.filter(q)
+    candidates = qs
     if site_name:
         candidates = candidates.filter(site_name__iexact=site_name)
-    return candidates.first()
+    for ticket in candidates.only("id", "title", "ticket_number", "requester_id")[:200]:
+        if len(tokens & _title_tokens(ticket.title)) >= 2:
+            return ticket
+    return None
 
 
 def log_event(
@@ -257,18 +268,18 @@ def create_request(
         camera_id=camera_id,
         infra_device_id=infra_device_id,
         site_name=site_name,
+        requester=requester,
     )
     if dup and not force_create:
         raise DuplicateRequestError(
-            f"Possible duplicate of {dup.ticket_number}.",
+            "A similar open request already exists for this site.",
             duplicate=dup,
         )
 
     now = timezone.now()
     response_due, resolve_due = compute_sla_deadlines(priority)
     expires_at = now + timedelta(hours=TICKET_VALIDITY_HOURS)
-    ticket = SupportTicket.objects.create(
-        ticket_number=_next_ticket_number(),
+    fields = dict(
         title=title,
         description=description or "",
         status=TicketStatus.NEW,
@@ -291,6 +302,16 @@ def create_request(
         expires_at=expires_at,
         source=source or "portal",
     )
+    # Two concurrent creates can compute the same next number; the unique constraint rejects
+    # the loser, which simply retries with a fresh number inside its own savepoint.
+    for attempt in range(5):
+        try:
+            with transaction.atomic():
+                ticket = SupportTicket.objects.create(ticket_number=_next_ticket_number(), **fields)
+            break
+        except IntegrityError:
+            if attempt == 4:
+                raise
     log_event(
         ticket,
         actor=requester,

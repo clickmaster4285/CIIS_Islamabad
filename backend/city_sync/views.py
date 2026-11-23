@@ -36,7 +36,27 @@ class NodeIdentityView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        return Response(identity_dict())
+        data = identity_dict()
+        user = getattr(request, "user", None)
+        if not (user and user.is_authenticated):
+            # Anonymous callers (HQ reachability probe, ROLLOUT.md browser check) only need to know
+            # which site answered; node id and software versions stay private.
+            data = {"system_role": data.get("system_role"), "location_code": data.get("location_code")}
+        return Response(data)
+
+
+def _is_int_like(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        try:
+            int(value)
+        except ValueError:
+            return False
+        return True
+    return False
 
 
 class SyncEventsView(APIView):
@@ -55,6 +75,14 @@ class SyncEventsView(APIView):
         events = body.get("events")
         if not isinstance(events, list):
             return Response({"detail": "events must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        for idx, ev in enumerate(events):
+            if not isinstance(ev, dict):
+                return Response({"detail": f"events[{idx}] must be an object"}, status=status.HTTP_400_BAD_REQUEST)
+            seq = ev.get("seq")
+            if seq is not None and not _is_int_like(seq):
+                return Response(
+                    {"detail": f"events[{idx}].seq must be an integer"}, status=status.HTTP_400_BAD_REQUEST
+                )
         max_batch = int(getattr(settings, "SYNC_MAX_BATCH_SIZE_ACCEPTED", 500))
         if len(events) > max_batch:
             return Response(
@@ -72,6 +100,54 @@ class SyncEventsView(APIView):
             return Response({"results": results})
         results = apply_event_batch(events, credential_location=principal.location_code)
         return Response({"results": results})
+
+
+# Heartbeat keys kept in HqCityStatus.raw (read by ops_central's City Control pages).
+HEARTBEAT_RAW_KEYS = frozenset(
+    {
+        "system_role",
+        "location_code",
+        "node_id",
+        "schema_version",
+        "app_version",
+        "pending_outbox",
+        "dead_outbox",
+        "oldest_pending_age_sec",
+        "pending_media",
+        "failed_media",
+        "disk_percent",
+        "last_backup_at",
+        "last_business_event_at",
+        "full_history_done_id",
+        "camera_directory_hash",
+        "cameras_total",
+        "cameras_online",
+        "cameras_online_source",
+        "vitals",
+    }
+)
+HEARTBEAT_RAW_MAX_BYTES = 64 * 1024
+
+
+def heartbeat_raw(body: dict) -> dict:
+    """Whitelisted, size-capped copy of a heartbeat body for HqCityStatus.raw."""
+    import json
+    import logging
+
+    raw = {k: v for k, v in body.items() if k in HEARTBEAT_RAW_KEYS}
+    try:
+        size = len(json.dumps(raw, default=str))
+    except (TypeError, ValueError):
+        raw.pop("vitals", None)
+        size = len(json.dumps(raw, default=str))
+    if size > HEARTBEAT_RAW_MAX_BYTES:
+        logging.getLogger(__name__).warning(
+            "Heartbeat from %s is %s bytes; dropping vitals", body.get("location_code"), size
+        )
+        raw["vitals"] = {}
+        if len(json.dumps(raw, default=str)) > HEARTBEAT_RAW_MAX_BYTES:
+            raw = {k: v for k, v in raw.items() if isinstance(v, (int, float, bool)) or (isinstance(v, str) and len(v) < 256)}
+    return raw
 
 
 class SyncHeartbeatView(APIView):
@@ -120,7 +196,7 @@ class SyncHeartbeatView(APIView):
                 row.last_business_event_at = dt
         row.last_heartbeat_at = timezone.now()
         # The camera list is stored in CityCamera; keep the raw status small.
-        row.raw = {k: v for k, v in body.items() if k != "camera_directory"}
+        row.raw = heartbeat_raw(body)
         row.save()
         record_heartbeat_ack(loc, body)
         return Response({"ok": True, "location_code": loc, "control": control_for_location(loc)})
@@ -134,10 +210,14 @@ class SyncCursorView(APIView):
         principal: SyncPrincipal = request.user
         loc = principal.location_code.upper()
         cursor = HqSyncCursor.objects.filter(location_code=loc).first()
+        highest = cursor.last_seq_applied if cursor else 0
         return Response(
             {
                 "location_code": loc,
-                "last_seq_applied": cursor.last_seq_applied if cursor else 0,
+                # Highest city seq HQ has received. NOT a contiguous watermark: lower seqs may
+                # still be in flight or retrying, so never use it to skip or delete outbox rows.
+                "last_seq_applied": highest,
+                "highest_seq_received": highest,
                 "last_success_at": cursor.last_success_at if cursor else None,
             }
         )

@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -28,6 +30,18 @@ from .tools import TOOLS_BY_NAME, ToolContext, ToolError, execute_pending_action
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = {SessionMode.VOICE: 8, SessionMode.CHAT: 14}
+# Wall-clock budget for one whole turn (all LLM steps + tools). Overridable in settings.
+TURN_DEADLINE_SEC = {SessionMode.VOICE: 60, SessionMode.CHAT: 180}
+MIN_STEP_SECONDS = 3.0
+TURN_TIMEOUT_REPLY = "That's taking longer than expected. Could you narrow the request down?"
+
+
+def turn_deadline_seconds(mode: str) -> float:
+    key = "VOICE_AGENT_CHAT_TURN_DEADLINE_SEC" if mode == SessionMode.CHAT else "VOICE_AGENT_VOICE_TURN_DEADLINE_SEC"
+    try:
+        return max(10.0, float(getattr(settings, key, TURN_DEADLINE_SEC.get(mode, 60))))
+    except (TypeError, ValueError):
+        return float(TURN_DEADLINE_SEC.get(mode, 60))
 GREETING = "Yes, Officer. How can I help?"
 CHAT_GREETING = "Hello Officer. Ask me anything about CIIS, or tell me what to do."
 
@@ -83,12 +97,20 @@ def system_prompt(mode: str) -> str:
 
 SYSTEM_PROMPT = system_prompt(SessionMode.VOICE)
 
-_YES = re.compile(
-    r"^(yes|yeah|yep|yup|haan|han|ha|haa|ji|jee|ji haan|confirm|confirmed|go ahead|do it|create it|"
-    r"proceed|theek hai|thik hai|ok|okay|sure|bilkul|ہاں|جی|ٹھیک ہے)\b"
+# A confirmation must be the whole utterance: "yes", "haan ji", "ok please" — never "yes but …",
+# "ok, change the date", or a long sentence that happens to start with "yes".
+_YES_WORDS = (
+    r"yes|yeah|yep|yup|haan|han|haa|haan ji|ji|jee|ji haan|jee haan|ji han|confirm|confirmed|yes confirm|"
+    r"go ahead|do it|proceed|ok|okay|ok ji|theek hai|thik hai|sure|bilkul|bilkul theek hai|"
+    r"ہاں|ہاں جی|جی|جی ہاں|ٹھیک ہے|بالکل"
 )
-_NO = re.compile(r"^(no|nope|nahi|nahin|na|cancel|stop|don't|do not|mat|rehne do|نہیں)\b")
-_HEDGE = re.compile(r"\b(but|lekin|change|instead|wait|magar|however)\b")
+_NO_WORDS = (
+    r"no|nope|nah|nahi|nahin|na|no thanks|cancel|cancel it|stop|don't|do not|dont|mat|mat karo|rehne do|"
+    r"نہیں|نہیں جی|مت|رہنے دو"
+)
+_POLITE = r"(?:please|officer|ji|sir)"
+_YES = re.compile(rf"^(?:{_POLITE}\s+)?(?:{_YES_WORDS})(?:\s+{_POLITE})?$")
+_NO = re.compile(rf"^(?:{_POLITE}\s+)?(?:{_NO_WORDS})(?:\s+{_POLITE})?$")
 # Whole-utterance sign-offs; small local models often reply politely without calling end_conversation.
 _GOODBYE = re.compile(
     r"^(ok(ay)?\s+)?(thank you|thanks|thank you so much|that's all|that is all|that's it|nothing else|"
@@ -143,10 +165,15 @@ def is_goodbye(utterance: str) -> bool:
 
 
 def classify_confirmation(utterance: str) -> str:
-    """'yes' | 'no' | 'other' — deliberately strict; anything unclear is not a yes."""
-    text = re.sub(r"[^\w\s']", " ", (utterance or "").lower()).strip()
-    text = re.sub(r"^(officer|please|hello customs)\s+", "", text)
-    if not text or len(text.split()) > 6 or _HEDGE.search(text):
+    """'yes' | 'no' | 'other' — deliberately strict: only a bare yes/no word or phrase counts.
+
+    Punctuation and a polite "please"/"officer"/"ji"/"sir" are ignored; anything else makes the
+    utterance a new request, so the prepared action is discarded rather than executed.
+    """
+    text = re.sub(r"[^\w\s']", " ", (utterance or "").lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^hello customs\s*", "", text).strip()
+    if not text:
         return "other"
     if _NO.match(text):
         return "no"
@@ -227,15 +254,35 @@ def close_session(session: VoiceSession) -> None:
         session.save(update_fields=["status", "closed_at", "pending_action", "updated_at"])
 
 
+def claim_pending_action(session: VoiceSession) -> dict | None:
+    """Atomically take the session's prepared action and clear it in the database.
+
+    The row is locked while it is read and cleared, so two concurrent turns (double-submit,
+    retry, two tabs) can never both see — and both execute — the same pending write.
+    """
+    if session.pk is None:
+        pending, session.pending_action = session.pending_action, None
+        return pending
+    with transaction.atomic():
+        locked = VoiceSession.objects.select_for_update().only("id", "pending_action").get(pk=session.pk)
+        pending = locked.pending_action
+        if pending:
+            VoiceSession.objects.filter(pk=session.pk).update(pending_action=None, updated_at=timezone.now())
+    session.pending_action = None
+    return pending or None
+
+
 def _handle_pending(session, user, utterance, provider, history) -> dict | None:
     """Resolve a prepared write. Returns a finished turn result, or None to continue with the LLM."""
-    pending = session.pending_action
+    pending = claim_pending_action(session)
     if not pending:
         return None
-    expired = datetime.fromisoformat(pending["expires_at"]) < timezone.now()
+    try:
+        expired = datetime.fromisoformat(pending["expires_at"]) < timezone.now()
+    except (KeyError, TypeError, ValueError):
+        expired = True
     decision = "expired" if expired else classify_confirmation(utterance)
-    session.pending_action = None
-    tool_name = pending.get("params", {}).get("action") or pending["type"]
+    tool_name = pending.get("params", {}).get("action") or pending.get("type") or "action"
 
     if decision == "yes":
         try:
@@ -302,8 +349,13 @@ def run_turn(session: VoiceSession, user, utterance: str, screen: dict | None = 
         tools_used: list[str] = []
         reply = ""
         nudged = nudged_promise = False
+        deadline = time.monotonic() + turn_deadline_seconds(mode)
         for _step in range(MAX_STEPS[mode]):
-            step = provider.complete(prompt, tools, history)
+            remaining = deadline - time.monotonic()
+            if remaining <= MIN_STEP_SECONDS:
+                reply = TURN_TIMEOUT_REPLY
+                break
+            step = provider.complete(prompt, tools, history, timeout=remaining)
             if not step.tool_calls:
                 if tools_used and not nudged_promise and _PROMISE.search(step.text or ""):
                     # "I will search…" / "shall I…?" after a failed attempt: make the model actually do it.
@@ -327,10 +379,15 @@ def run_turn(session: VoiceSession, user, utterance: str, screen: dict | None = 
                 tools_used.append(call.name)
             provider.append_tool_results(history, outputs)
         else:
-            reply = "That's taking longer than expected. Could you narrow the request down?"
-        if not chat:
+            reply = TURN_TIMEOUT_REPLY
+        prepared_now = bool(session.pending_action and {"perform_action", "create_incident"} & set(tools_used))
+        if not chat and prepared_now:
+            # Speak exactly what will change (the prepared summary), not the model's paraphrase of it.
+            summary = _speakable(str(session.pending_action.get("summary") or "")).rstrip(". ")
+            reply = f"{summary}. Nothing has changed yet. Say yes to confirm or no to cancel."
+        elif not chat:
             reply = _speakable(reply)
-        elif session.pending_action and {"perform_action", "create_incident"} & set(tools_used):
+        elif prepared_now:
             # The Confirm / Cancel card shows exactly what will change; don't let the model embellish it.
             reply = PREPARED_CHAT_REPLY
         else:

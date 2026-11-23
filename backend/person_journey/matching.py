@@ -1,90 +1,12 @@
-"""Person matching engine — face + appearance + travel-time scoring."""
+"""Label / visitor resolution helpers, plus the legacy find_best_match() wrapper around identity.identify()."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from datetime import timedelta
-from typing import Any
-
-from django.conf import settings
-from django.db.models import Q
-from django.utils import timezone
 
 from city_sync.identity import local_rows_q
 
 from .models import JourneyPerson, PersonStatus, PersonType
-
-
-def _env_float(key: str, default: float) -> float:
-    try:
-        return float(getattr(settings, key, default))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(getattr(settings, key, default))
-    except (TypeError, ValueError):
-        return default
-
-
-FACE_MATCH_THRESHOLD = _env_float("JOURNEY_FACE_MATCH_THRESHOLD", 0.72)
-REID_MATCH_THRESHOLD = _env_float("JOURNEY_REID_MATCH_THRESHOLD", 0.80)
-# Legacy name; cross-camera hops now use the same calibrated bar (see identity.py).
-REID_CROSS_CAMERA_THRESHOLD = _env_float("JOURNEY_REID_CROSS_CAMERA_THRESHOLD", 0.80)
-COMBINED_MATCH_THRESHOLD = _env_float("JOURNEY_COMBINED_MATCH_THRESHOLD", 0.70)
-MAX_TRAVEL_SECONDS = _env_int("JOURNEY_MAX_TRAVEL_SECONDS", 300)
-RECENT_WINDOW_SECONDS = _env_int("JOURNEY_RECENT_WINDOW_SECONDS", 900)
-
-
-def cosine_similarity(a: list[float] | None, b: list[float] | None) -> float:
-    if not a or not b:
-        return 0.0
-    n = min(len(a), len(b))
-    if n == 0:
-        return 0.0
-    dot = sum(float(a[i]) * float(b[i]) for i in range(n))
-    na = math.sqrt(sum(float(a[i]) ** 2 for i in range(n)))
-    nb = math.sqrt(sum(float(b[i]) ** 2 for i in range(n)))
-    if na <= 0 or nb <= 0:
-        return 0.0
-    return max(0.0, min(1.0, dot / (na * nb)))
-
-
-def _travel_time_valid(
-    *,
-    from_camera_id: int | None,
-    to_camera_id: int | None,
-    seconds_elapsed: float,
-) -> bool:
-    if from_camera_id is None or to_camera_id is None:
-        return True
-    if from_camera_id == to_camera_id:
-        return True
-    return 0 <= seconds_elapsed <= MAX_TRAVEL_SECONDS
-
-
-def _connected_cameras(from_camera_id: int | None, to_camera_id: int | None) -> bool:
-    if from_camera_id is None or to_camera_id is None:
-        return True
-    if from_camera_id == to_camera_id:
-        return True
-    try:
-        from cameras.models import Camera
-
-        c1 = Camera.objects.filter(pk=from_camera_id).values("location", "zone").first()
-        c2 = Camera.objects.filter(pk=to_camera_id).values("location", "zone").first()
-        if not c1 or not c2:
-            return True
-        if c1["location"] and c1["location"] == c2["location"]:
-            return True
-        if c1["zone"] and c2["zone"] and c1["zone"] == c2["zone"]:
-            return True
-    except Exception:
-        return True
-    return True
 
 
 @dataclass
@@ -94,50 +16,6 @@ class MatchCandidate:
     reid_score: float
     travel_score: float
     combined_score: float
-
-
-def score_candidate(
-    person: JourneyPerson,
-    *,
-    face_embedding: list[float] | None,
-    reid_embedding: list[float] | None,
-    camera_id: int | None,
-    now,
-) -> MatchCandidate | None:
-    face_score = cosine_similarity(face_embedding, person.face_embedding or [])
-    reid_score = cosine_similarity(reid_embedding, person.reid_embedding or [])
-
-    travel_score = 0.0
-    if person.latest_seen_at and person.latest_camera_id:
-        elapsed = (now - person.latest_seen_at).total_seconds()
-        if _travel_time_valid(
-            from_camera_id=person.latest_camera_id,
-            to_camera_id=camera_id,
-            seconds_elapsed=elapsed,
-        ) and _connected_cameras(person.latest_camera_id, camera_id):
-            travel_score = max(0.0, 1.0 - (elapsed / max(1, MAX_TRAVEL_SECONDS)))
-        else:
-            travel_score = 0.0
-
-    has_face = bool(face_embedding and person.face_embedding)
-    has_reid = bool(reid_embedding and person.reid_embedding)
-
-    if has_face and has_reid:
-        combined = face_score * 0.5 + reid_score * 0.3 + travel_score * 0.2
-    elif has_face:
-        combined = face_score * 0.7 + travel_score * 0.3
-    elif has_reid:
-        combined = reid_score * 0.7 + travel_score * 0.3
-    else:
-        combined = travel_score
-
-    return MatchCandidate(
-        person=person,
-        face_score=face_score,
-        reid_score=reid_score,
-        travel_score=travel_score,
-        combined_score=combined,
-    )
 
 
 def find_best_match(

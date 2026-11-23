@@ -19,13 +19,13 @@ _cache: tuple[float, dict, set[int]] | None = None
 
 def _ml_connected_keys() -> set[str] | None:
     """Stream keys the ML servers report as connected; None when no ML server answered."""
-    from ml.client import known_ml_base_urls
+    from ml.client import known_ml_base_urls, ml_auth_headers
 
     keys: set[str] = set()
     answered = False
     for base in known_ml_base_urls():
         try:
-            resp = requests.get(f"{base}/live/status", timeout=3, headers={"Accept": "application/json"})
+            resp = requests.get(f"{base}/live/status", timeout=3, headers={"Accept": "application/json", **ml_auth_headers()})
             data = resp.json() if resp.status_code == 200 else None
         except (requests.RequestException, ValueError):
             continue

@@ -80,51 +80,64 @@ def compute_movement_direction(trajectory: list) -> str:
     return "north"
 
 
+def load_topology_edges() -> dict[tuple[int, int], dict]:
+    """All active camera hops in one query: {(from_camera_id, to_camera_id): edge values}."""
+    edges: dict[tuple[int, int], dict] = {}
+    # Highest typical_min first so the shortest edge for a pair wins when several exist.
+    for row in CameraTopologyEdge.objects.filter(is_active=True).order_by("-typical_min_sec").values(
+        "from_camera_id", "to_camera_id", "typical_min_sec", "typical_max_sec", "hard_max_sec", "bidirectional"
+    ):
+        edges[(row["from_camera_id"], row["to_camera_id"])] = row
+    return edges
+
+
+def _edge_between(edges: dict, from_camera_id: int, to_camera_id: int) -> dict | None:
+    edge = edges.get((from_camera_id, to_camera_id))
+    if edge is None:
+        reverse = edges.get((to_camera_id, from_camera_id))
+        if reverse is not None and reverse["bidirectional"]:
+            edge = reverse
+    return edge
+
+
 def topology_travel_score(
     from_camera_id: int | None,
     to_camera_id: int | None,
     travel_seconds: float,
+    *,
+    edges: dict | None = None,
 ) -> tuple[float, bool]:
     """
     Score 0–1 for camera hop plausibility. Returns (score, impossible).
-    Uses CameraTopologyEdge when configured; otherwise soft travel-time prior.
+
+    Only a hop that is too FAST is impossible (nobody walks between those cameras that quickly). A slow hop
+    just scores low: people stop, chat, use the washroom. Uses CameraTopologyEdge when configured
+    (pass ``edges`` from load_topology_edges() to avoid a query per call); otherwise a soft travel-time prior.
     """
     if from_camera_id is None or to_camera_id is None:
         return 0.5, False
     if from_camera_id == to_camera_id:
         return 1.0, False
+    if travel_seconds < 0:
+        return 0.0, True
 
-    edge = (
-        CameraTopologyEdge.objects.filter(
-            from_camera_id=from_camera_id,
-            to_camera_id=to_camera_id,
-            is_active=True,
-        )
-        .order_by("typical_min_sec")
-        .first()
-    )
-    if edge is None:
-        # Reverse edge still useful
-        edge = (
-            CameraTopologyEdge.objects.filter(
-                from_camera_id=to_camera_id,
-                to_camera_id=from_camera_id,
-                is_active=True,
+    if edges is None:
+        edges = {
+            (row["from_camera_id"], row["to_camera_id"]): row
+            for row in CameraTopologyEdge.objects.filter(is_active=True)
+            .filter(
+                from_camera_id__in=[from_camera_id, to_camera_id],
+                to_camera_id__in=[from_camera_id, to_camera_id],
             )
-            .order_by("typical_min_sec")
-            .first()
-        )
-        if edge is not None and not edge.bidirectional:
-            edge = None
+            .order_by("-typical_min_sec")
+            .values("from_camera_id", "to_camera_id", "typical_min_sec", "typical_max_sec", "hard_max_sec", "bidirectional")
+        }
+    edge = _edge_between(edges, from_camera_id, to_camera_id)
 
     if edge is not None:
-        lo = float(edge.typical_min_sec)
-        hi = float(edge.typical_max_sec)
-        hard_max = float(edge.hard_max_sec or (hi * 2.5))
-        if travel_seconds < 0:
-            return 0.0, True
-        if travel_seconds > hard_max:
-            return 0.0, True
+        lo = float(edge["typical_min_sec"])
+        hi = float(edge["typical_max_sec"])
+        hard_max = float(edge["hard_max_sec"] or (hi * 2.5))
         if lo <= travel_seconds <= hi:
             return 1.0, False
         if travel_seconds < lo:
@@ -133,15 +146,13 @@ def topology_travel_score(
             if ratio < 0.25:
                 return 0.05, True
             return max(0.1, ratio), False
-        # Slower than typical but under hard max
+        # Slower than typical: lower score, never excluded.
         over = (travel_seconds - hi) / max(hard_max - hi, 1.0)
-        return max(0.15, 1.0 - over), False
+        return max(0.05, 1.0 - over), False
 
-    # No topology: soft prior — same site hops up to MAX_TRAVEL_SECONDS
+    # No topology: soft prior — same site hops up to MAX_TRAVEL_SECONDS, slower ones just score low.
     max_sec = float(getattr(settings, "JOURNEY_MAX_TRAVEL_SECONDS", 300))
-    if travel_seconds < 0 or travel_seconds > max_sec:
-        return 0.0, travel_seconds > max_sec * 1.5
-    return max(0.2, 1.0 - (travel_seconds / max(max_sec, 1.0))), False
+    return max(0.05, 1.0 - (travel_seconds / max(max_sec, 1.0))), False
 
 
 def find_best_global_match(

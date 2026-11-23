@@ -23,6 +23,12 @@ import numpy as np
 # create_camera_stream lives in live_stream; import lazily in ensure to avoid cycles.
 
 
+def _redact(url: str) -> str:
+    from live_stream import redact_url
+
+    return redact_url(url)
+
+
 class CameraSession:
     """One decoded ingest for a camera key."""
 
@@ -99,11 +105,19 @@ class CameraSessionManager:
             print(f"[camera-session] Opening: {key} ({tag})")
             return session
 
-    def release(self, key: str) -> bool:
+    def release(self, key: str, *, stream: Any = None) -> bool:
+        """Stop and forget a camera's ingest.
+
+        stream: only release when the current ingest is this stream object (a newer
+        ingest opened meanwhile for the same key is left running).
+        """
         key = (key or "").strip()
         if not key:
             return False
         with self._lock:
+            current = self._sessions.get(key)
+            if current is not None and stream is not None and current.stream is not stream:
+                return False
             session = self._sessions.pop(key, None)
         if session is None:
             return False
@@ -130,7 +144,7 @@ class CameraSessionManager:
                         "key": key,
                         "connected": session.connected,
                         "keep_native": session.keep_native,
-                        "rtsp_url": session.rtsp_url[:48] + ("…" if len(session.rtsp_url) > 48 else ""),
+                        "rtsp_url": _redact(session.rtsp_url),
                     }
                 )
         return {"sessions": items, "count": len(items)}

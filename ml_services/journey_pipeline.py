@@ -15,7 +15,7 @@ import numpy as np
 from live_metrics import get_live_metrics
 
 from camera_byte_tracker import CameraByteTrackerPool
-from face_recognizer import KnownFaceDB
+from face_recognizer import KnownFaceDB, is_unknown_label
 from inference_engine import (
     WEAPON_MIN_CONF,
     get_face_db,
@@ -26,7 +26,7 @@ from inference_engine import (
     resolve_ml_device,
 )
 from live_stream import get_live_manager
-from reid_extractor import extract_reid_embedding
+from reid_extractor import extract_reid_embedding, reid_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,6 @@ class JourneyCameraPipeline:
         self._weapon_conf = _env_float("ML_WEAPON_CONF", WEAPON_MIN_CONF)
         self._face_db: KnownFaceDB = get_face_db()
         self._tracks: dict[int, TrackedPersonState] = {}
-        self._running = False
         self._live = get_live_manager()
         # Per-pipeline ByteTrack — never call Ultralytics model.track() on the shared YOLO.
         self._byte_trackers = CameraByteTrackerPool(track_buffer=90)
@@ -253,11 +252,13 @@ class JourneyCameraPipeline:
         if crop.size == 0:
             return [], "", None
 
+        # ``crop`` already is the person box, so there is no wider person region to fall back to:
+        # the frame-absolute ``bbox`` must not be applied to the crop (it would cut the wrong area).
         result = self._face_db.recognize_track(
             crop,
             camera_key=self.camera_key,
             track_id=track_id,
-            bbox=bbox,
+            bbox=None,
         )
         if result.identity in {"", "unknown"} and not result.embedding:
             # Retry on this person's own head region, upscaled — never the whole frame, where the largest
@@ -308,7 +309,9 @@ class JourneyCameraPipeline:
             face_emb, face_label, face_score = self._ensure_face_identity(frame, bbox, track_id)
             if face_emb:
                 state.face_embedding = face_emb
-            if face_label and face_label.lower() not in {"person", "face", ""}:
+            # Only a real (enrolled) identity may label the track. Temporary "unknown:Uxxxx" IDs and
+            # plain "unknown" must not overwrite a name already learned for this track.
+            if face_label and not is_unknown_label(face_label):
                 state.face_label = face_label
                 state.face_match_score = face_score
 
@@ -340,6 +343,7 @@ class JourneyCameraPipeline:
                         "confidence": det["confidence"],
                         "face_embedding": state.face_embedding,
                         "reid_embedding": state.reid_embedding,
+                        "reid_model": reid_model_name() if state.reid_embedding else "",
                         "face_label": state.face_label,
                         "face_match_score": state.face_match_score,
                         "detections": weapons,
@@ -369,6 +373,7 @@ class JourneyCameraPipeline:
                         "confidence": 0.0,
                         "face_embedding": state.face_embedding,
                         "reid_embedding": state.reid_embedding,
+                        "reid_model": reid_model_name() if state.reid_embedding else "",
                         "face_label": state.face_label,
                         "face_match_score": state.face_match_score,
                         "detections": [],
@@ -384,7 +389,6 @@ class JourneyCameraPipeline:
         return observations
 
     def stop(self):
-        self._running = False
         try:
             self._byte_trackers.reset(self.camera_key)
         except Exception:

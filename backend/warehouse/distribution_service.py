@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,7 @@ import signal
 import subprocess
 import threading
 import time
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -24,6 +26,9 @@ from cameras.stream_utils import ffmpeg_path, hwaccel_input_flags, video_encoder
 from detentions.models import DepositAccountEntry, DetentionMemo, DetentionMemoGoodsLine
 
 from .models import DestructionAlert, FireSmokeDetectionLog, MemoDistribution, WarehouseStockItem
+from .permissions import DESTRUCTION_ALERT_ROLES  # noqa: F401  (re-exported for existing imports)
+
+logger = logging.getLogger(__name__)
 
 _recorders: dict[str, list[tuple[subprocess.Popen, str, int]]] = {}
 _recorders_lock = threading.Lock()
@@ -31,17 +36,15 @@ _alert_cooldown: dict[str, float] = {}
 _alert_cooldown_lock = threading.Lock()
 ALERT_COOLDOWN_SECONDS = 30
 
-DESTRUCTION_ALERT_ROLES = frozenset(
-    {
-        "ADMIN",
-        "LOCATION_ADMIN",
-        "WAREHOUSE_OFFICER",
-        "WAREHOUSE_IN_CHARGE",
-        "WAREHOUSE_SUPERINTENDENT",
-    }
-)
-
 FIRE_SMOKE_KEYWORDS = ("fire", "smoke", "flame", "burning")
+
+
+class StockSyncError(ValueError):
+    """Bad stock rows; .errors lists one message per rejected row."""
+
+    def __init__(self, errors: list[str]):
+        super().__init__("; ".join(errors[:5]) + (" …" if len(errors) > 5 else ""))
+        self.errors = errors
 
 
 def _parse_qty(value: str | Decimal | float | int | None) -> Decimal:
@@ -58,31 +61,91 @@ def _parse_qty(value: str | Decimal | float | int | None) -> Decimal:
         return Decimal("0")
 
 
+def _strict_qty(value) -> Decimal | None:
+    """Quantity for stored stock: a finite, non-negative number (blank = 0), else None."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return Decimal("0")
+    if isinstance(value, bool):
+        return None
+    try:
+        qty = value if isinstance(value, Decimal) else Decimal(str(value).strip().replace(",", ""))
+    except (InvalidOperation, ValueError):
+        return None
+    if not qty.is_finite() or qty < 0 or qty >= Decimal("100000000000"):
+        return None
+    return qty
+
+
+def _text(row: dict, *keys: str, default: str = "", max_len: int | None = None) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, ""):
+            text = str(value).strip()
+            return text[:max_len] if max_len else text
+    return default
+
+
 def sync_stock_items(rows: list[dict[str, Any]]) -> int:
-    """Upsert stock rows from frontend localStorage."""
-    count = 0
-    for row in rows:
-        client_id = str(row.get("id") or row.get("client_row_id") or "").strip()
-        if not client_id:
+    """Upsert stock rows from frontend localStorage. All-or-nothing; raises StockSyncError on bad rows."""
+    errors: list[str] = []
+    cleaned: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        label = f"row {index + 1}"
+        if not isinstance(row, dict):
+            errors.append(f"{label}: must be an object.")
             continue
-        qty = _parse_qty(row.get("quantity"))
-        defaults = {
-            "case_ref": str(row.get("seizureCaseRef") or row.get("case_ref") or "").strip(),
-            "qr_code": str(row.get("qrCodeNumber") or row.get("qr_code") or "").strip(),
-            "description": str(row.get("descriptionOfGoods") or row.get("description") or "").strip(),
-            "pct_code": str(row.get("pctCode") or row.get("pct_code") or "").strip(),
-            "quantity": qty,
-            "unit": str(row.get("unitOfMeasure") or row.get("unit") or "PCS").strip(),
-            "godown_warehouse": str(row.get("godownWarehouse") or row.get("godown_warehouse") or "").strip(),
-            "status": str(row.get("status") or "In Custody").strip(),
-            "detention_memo_id": row.get("detentionMemoId") or row.get("detention_memo_id") or None,
-        }
-        # This server's own stock only; HQ copies of city stock are never rewritten here.
-        _, created = WarehouseStockItem.objects.filter(local_rows_q()).update_or_create(
-            client_row_id=client_id,
-            defaults=defaults,
+        client_id = _text(row, "id", "client_row_id")
+        if not client_id:
+            errors.append(f"{label}: id is required.")
+            continue
+        if len(client_id) > 80:
+            errors.append(f"{label}: id is longer than 80 characters.")
+            continue
+        if client_id in seen:
+            errors.append(f"{label}: duplicate id {client_id}.")
+            continue
+        seen.add(client_id)
+        qty = _strict_qty(row.get("quantity"))
+        if qty is None:
+            errors.append(f"{label} ({client_id}): quantity must be a non-negative number.")
+            continue
+        memo_raw = row.get("detentionMemoId") or row.get("detention_memo_id") or None
+        memo_id = None
+        if memo_raw:
+            try:
+                memo_id = uuid.UUID(str(memo_raw).strip())
+            except (ValueError, AttributeError, TypeError):
+                errors.append(f"{label} ({client_id}): detentionMemoId is not a valid UUID.")
+                continue
+        cleaned.append(
+            (
+                client_id,
+                {
+                    "case_ref": _text(row, "seizureCaseRef", "case_ref", max_len=200),
+                    "qr_code": _text(row, "qrCodeNumber", "qr_code", max_len=160),
+                    "description": _text(row, "descriptionOfGoods", "description"),
+                    "pct_code": _text(row, "pctCode", "pct_code", max_len=40),
+                    "quantity": qty,
+                    "unit": _text(row, "unitOfMeasure", "unit", default="PCS", max_len=40),
+                    "godown_warehouse": _text(row, "godownWarehouse", "godown_warehouse", max_len=200),
+                    "status": _text(row, "status", default="In Custody", max_len=80),
+                    "detention_memo_id": memo_id,
+                },
+            )
         )
-        count += 1 if created else 0
+    if errors:
+        raise StockSyncError(errors)
+
+    count = 0
+    with transaction.atomic():
+        for client_id, defaults in cleaned:
+            # This server's own stock only; HQ copies of city stock are never rewritten here.
+            _, created = WarehouseStockItem.objects.filter(local_rows_q(), is_deleted=False).update_or_create(
+                client_row_id=client_id,
+                defaults=defaults,
+            )
+            count += 1 if created else 0
     return count
 
 
@@ -99,12 +162,12 @@ def _normalize_selected_items(
                 "quantity": str(gl.quantity or "0"),
                 "unit": gl.unit or "PCS",
             }
-            for gl in memo.goods_lines.all()
+            for gl in memo.goods_lines.filter(is_deleted=False)
         ]
 
     goods_by_key: dict[str, DetentionMemoGoodsLine] = {}
     goods_by_qr: dict[str, DetentionMemoGoodsLine] = {}
-    for gl in memo.goods_lines.all():
+    for gl in memo.goods_lines.filter(is_deleted=False):
         goods_by_key[str(gl.pk)] = gl
         if (gl.client_line_id or "").strip():
             goods_by_key[gl.client_line_id.strip()] = gl
@@ -141,7 +204,7 @@ def _normalize_selected_items(
 def _resolve_goods_line(memo: DetentionMemo, item: dict[str, Any]) -> DetentionMemoGoodsLine | None:
     gl_id = str(item.get("goods_line_id") or "").strip()
     qr_key = (item.get("qr_code") or "").strip().lower()
-    for gl in memo.goods_lines.all():
+    for gl in memo.goods_lines.filter(is_deleted=False):
         if gl_id and (str(gl.pk) == gl_id or gl.client_line_id == gl_id):
             return gl
         if qr_key and (gl.qr_code_number or "").strip().lower() == qr_key:
@@ -149,23 +212,36 @@ def _resolve_goods_line(memo: DetentionMemo, item: dict[str, Any]) -> DetentionM
     return None
 
 
-def _find_stock_for_item(memo: DetentionMemo, item: dict[str, Any]) -> WarehouseStockItem | None:
+def _memo_stock_qs(memo: DetentionMemo, *, lock: bool = False):
+    """This server's live stock rows that may belong to this memo.
+
+    Rows linked to another memo are never touched; rows with no memo link are allowed for QR
+    matches (stock synced from the browser often lacks the link).
+    """
+    qs = (
+        WarehouseStockItem.objects.filter(local_rows_q(), is_deleted=False)
+        .filter(Q(detention_memo_id=memo.pk) | Q(detention_memo_id__isnull=True))
+        .exclude(quantity__lte=0)
+    )
+    if lock:
+        qs = qs.select_for_update()
+    return qs
+
+
+def _find_stock_for_item(
+    memo: DetentionMemo, item: dict[str, Any], *, lock: bool = False
+) -> WarehouseStockItem | None:
     qr = (item.get("qr_code") or "").strip()
     if qr:
-        stock = (
-            WarehouseStockItem.objects.filter(local_rows_q(), qr_code__iexact=qr)
-            .exclude(quantity__lte=0)
-            .order_by("-updated_at")
-            .first()
-        )
+        stock = _memo_stock_qs(memo, lock=lock).filter(qr_code__iexact=qr).order_by("-updated_at").first()
         if stock:
             return stock
 
     gl = _resolve_goods_line(memo, item)
     if gl and (gl.qr_code_number or "").strip():
         stock = (
-            WarehouseStockItem.objects.filter(local_rows_q(), qr_code__iexact=gl.qr_code_number.strip())
-            .exclude(quantity__lte=0)
+            _memo_stock_qs(memo, lock=lock)
+            .filter(qr_code__iexact=gl.qr_code_number.strip())
             .order_by("-updated_at")
             .first()
         )
@@ -174,7 +250,8 @@ def _find_stock_for_item(memo: DetentionMemo, item: dict[str, Any]) -> Warehouse
 
     case_no = (memo.case_no or "").strip()
     desc = (item.get("description") or "").strip()
-    qs = WarehouseStockItem.objects.filter(detention_memo_id=memo.pk).exclude(quantity__lte=0)
+    # Description fallback only for stock explicitly linked to this memo.
+    qs = _memo_stock_qs(memo, lock=lock).filter(detention_memo_id=memo.pk)
     if case_no:
         qs = qs.filter(Q(case_ref__iexact=case_no) | Q(case_ref__icontains=case_no))
     if desc:
@@ -188,7 +265,8 @@ def _deduct_selected_inventory(
 ) -> list[dict[str, Any]]:
     deductions: list[dict[str, Any]] = []
     for item in selected_items:
-        stock = _find_stock_for_item(memo, item)
+        # Row lock: two destructions of the same stock cannot both read the old quantity.
+        stock = _find_stock_for_item(memo, item, lock=True)
         if not stock:
             continue
         before = stock.quantity
@@ -199,7 +277,7 @@ def _deduct_selected_inventory(
         stock.quantity = after
         if after <= 0:
             stock.status = "Destructed"
-        stock.save(update_fields=["quantity", "status", "updated_at"])
+        stock.save(update_fields=["quantity", "status", "updated_at", "version"])
         deductions.append(
             {
                 "stock_id": str(stock.pk),
@@ -263,7 +341,7 @@ def _goods_lines_sync_payload(memo: DetentionMemo) -> list[dict[str, Any]]:
             "quantity": gl.quantity,
             "condition": gl.condition,
         }
-        for gl in memo.goods_lines.all()
+        for gl in memo.goods_lines.filter(is_deleted=False)
     ]
 
 
@@ -381,8 +459,57 @@ def _wait_for_recording_file(output_path: str, timeout: float = 20.0) -> bool:
     return os.path.isfile(output_path) and os.path.getsize(output_path) > 0
 
 
-def _terminate_pid(pid: int) -> None:
+def _pid_is_our_ffmpeg(pid: int, output_path: str = "") -> bool:
+    """True only if the PID is still an ffmpeg process (ideally writing this session's file).
+
+    Manifest PIDs survive server restarts; by then the OS may have reused the number for an
+    unrelated process, which must never be killed.
+    """
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            proc = psutil.Process(pid)
+            name = (proc.name() or "").lower()
+            if "ffmpeg" not in name:
+                return False
+            if output_path:
+                try:
+                    cmdline = " ".join(proc.cmdline()).lower()
+                except (psutil.AccessDenied, psutil.ZombieProcess):
+                    return True
+                return os.path.basename(output_path).lower() in cmdline
+            return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, ValueError):
+            return False
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return "ffmpeg" in (out or "").lower()
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            cmdline = fh.read().replace(b"\0", b" ").decode("utf-8", "ignore").lower()
+    except OSError:
+        return False
+    if "ffmpeg" not in cmdline:
+        return False
+    return not output_path or os.path.basename(output_path).lower() in cmdline
+
+
+def _terminate_pid(pid: int, output_path: str = "") -> None:
     if pid <= 0:
+        return
+    if not _pid_is_our_ffmpeg(pid, output_path):
+        logger.warning("[distribution] not killing PID %s: it is not this session's ffmpeg recorder", pid)
         return
     try:
         if os.name == "nt":
@@ -447,7 +574,7 @@ def _stop_manifest_recorders(session_id: str) -> list[tuple[str, int]]:
         if not output_path:
             continue
         if pid > 0:
-            _terminate_pid(pid)
+            _terminate_pid(pid, output_path)
         if _wait_for_recording_file(output_path):
             stopped.append((output_path, camera_id))
     return stopped
@@ -560,8 +687,10 @@ def collect_session_recording_entries(
             )
 
     if repair and merged_paths and not session.camera_videos:
+        # Runs ffmpeg: only call from a write path (never from a GET / serializer).
         entries = _persist_session_recordings(session, merged_paths)
-        session.save(update_fields=["camera_videos", "video", "updated_at"])
+        session.camera_videos = entries
+        session.save(update_fields=["camera_videos", "video", "version"])
 
     return entries
 
@@ -648,12 +777,12 @@ def _start_camera_recording(
         stderr=subprocess.DEVNULL,
         creationflags=creationflags,
     )
+    # No stream URL here: it embeds RTSP/NVR credentials and this file lives under MEDIA_ROOT.
     manifest_row = {
         "camera_id": camera.pk,
         "pid": proc.pid,
         "path": output_path,
         "source": source,
-        "stream_url": stream_url[:200],
         "started_at": timezone.now().isoformat(),
     }
     return proc, output_path, camera.pk, manifest_row
@@ -695,13 +824,28 @@ def start_distribution_recording(
 
     recorder_entries: list[tuple[subprocess.Popen, str, int]] = []
     manifest_rows: list[dict[str, Any]] = []
-    for camera in cameras:
-        proc, output_path, camera_id, manifest_row = _start_camera_recording(
-            str(session.pk), camera, media_root
-        )
-        recorder_entries.append((proc, output_path, camera_id))
-        manifest_rows.append(manifest_row)
-    _save_recording_manifest(str(session.pk), manifest_rows)
+    try:
+        for camera in cameras:
+            proc, output_path, camera_id, manifest_row = _start_camera_recording(
+                str(session.pk), camera, media_root
+            )
+            recorder_entries.append((proc, output_path, camera_id))
+            manifest_rows.append(manifest_row)
+        _save_recording_manifest(str(session.pk), manifest_rows)
+    except Exception as exc:
+        # Don't leave orphan ffmpeg processes recording for a session that never started.
+        for proc, _path, _cam in recorder_entries:
+            try:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                logger.exception("[distribution] could not stop recorder pid %s", getattr(proc, "pid", "?"))
+        session.status = MemoDistribution.STATUS_FAILED
+        session.error_message = f"Recording could not start: {exc}"[:2000]
+        session.completed_at = timezone.now()
+        session.save(update_fields=["status", "error_message", "completed_at", "version"])
+        raise
 
     with _recorders_lock:
         _recorders[str(session.pk)] = recorder_entries
@@ -769,6 +913,12 @@ def report_destruction_detection(
 
     if session.status != MemoDistribution.STATUS_RECORDING:
         return None, None
+
+    session_camera_ids = {int(c) for c in (session.camera_ids or []) if str(c).strip().lstrip("-").isdigit()}
+    if session.camera_id:
+        session_camera_ids.add(int(session.camera_id))
+    if int(camera_id) not in session_camera_ids:
+        raise ValueError("That camera is not recording this destruction session.")
 
     try:
         camera = Camera.objects.get(pk=camera_id)
@@ -843,23 +993,35 @@ def report_destruction_detection(
     return log, alert
 
 
-def complete_distribution(session_id: str) -> MemoDistribution:
+def _stop_session_recorders(session_id: str) -> list[tuple[str, int]]:
+    """Stop this session's ffmpeg recorders and return the recording files found."""
     with _recorders_lock:
         entries = _recorders.pop(str(session_id), [])
-
-    try:
-        session = MemoDistribution.objects.select_related("camera").get(pk=session_id)
-    except MemoDistribution.DoesNotExist as exc:
-        raise ValueError("Distribution session not found.") from exc
-
     memory_entries = _stop_recorder_entries(entries) if entries else []
     manifest_entries = _stop_manifest_recorders(session_id) if not memory_entries else []
     disk_entries = _scan_disk_recordings(session_id)
-    output_entries = _merge_recording_entries(memory_entries, manifest_entries, disk_entries)
+    return _merge_recording_entries(memory_entries, manifest_entries, disk_entries)
 
+
+def complete_distribution(session_id: str) -> MemoDistribution:
+    """Finish a destruction session exactly once.
+
+    1. Locked transaction: claim the session (it must still be RECORDING — repeat or concurrent
+       calls return the session unchanged instead of deducting stock again), deduct inventory
+       with the stock rows locked, and mark the session COMPLETED.
+    2. Outside any transaction: stop ffmpeg and remux/re-encode the recordings (slow), then
+       attach them to the session.
+    """
     try:
         with transaction.atomic():
-            memo = DetentionMemo.objects.get(pk=session.detention_memo_id)
+            try:
+                session = MemoDistribution.objects.select_for_update().get(pk=session_id)
+            except MemoDistribution.DoesNotExist as exc:
+                raise ValueError("Distribution session not found.") from exc
+            if session.status != MemoDistribution.STATUS_RECORDING:
+                return MemoDistribution.objects.select_related("camera").get(pk=session.pk)
+
+            memo = DetentionMemo.objects.select_for_update().get(pk=session.detention_memo_id)
             if session.selected_items:
                 selected_items = session.selected_items
             else:
@@ -873,10 +1035,10 @@ def complete_distribution(session_id: str) -> MemoDistribution:
 
             all_lines_destructed = all(
                 _parse_qty(gl.quantity) <= 0 or gl.condition == "Destructed"
-                for gl in memo.goods_lines.all()
+                for gl in memo.goods_lines.filter(is_deleted=False)
             )
             memo.disposition_status = "Destructed" if all_lines_destructed else "Partially Destructed"
-            memo.save(update_fields=["disposition_status", "updated_at"])
+            memo.save(update_fields=["disposition_status", "updated_at", "version"])
 
             if deductions:
                 session.outcome = MemoDistribution.OUTCOME_INVENTORY
@@ -885,19 +1047,37 @@ def complete_distribution(session_id: str) -> MemoDistribution:
                 _mark_items_destructed(memo, selected_items)
                 session.outcome = MemoDistribution.OUTCOME_DESTRUCTED
                 session.inventory_deductions = []
-
-            if output_entries:
-                session.camera_videos = _persist_session_recordings(session, output_entries)
-            else:
-                session.camera_videos = collect_session_recording_entries(session, repair=True)
             session.status = MemoDistribution.STATUS_COMPLETED
             session.completed_at = timezone.now()
             session.save()
     except Exception as exc:
-        session.status = MemoDistribution.STATUS_FAILED
-        session.error_message = str(exc)
-        session.completed_at = timezone.now()
-        session.save(update_fields=["status", "error_message", "completed_at"])
+        # Inventory changes were rolled back. Stop the cameras and record the failure (only if
+        # the session was still recording — never overwrite a completed session).
+        try:
+            _stop_session_recorders(str(session_id))
+        except Exception:  # noqa: BLE001
+            logger.exception("[distribution] stopping recorders for failed session %s", session_id)
+        failed = MemoDistribution.objects.filter(pk=session_id, status=MemoDistribution.STATUS_RECORDING).first()
+        if failed is not None:
+            failed.status = MemoDistribution.STATUS_FAILED
+            failed.error_message = str(exc)[:2000]
+            failed.completed_at = timezone.now()
+            failed.save(update_fields=["status", "error_message", "completed_at", "version"])
         raise
 
+    # Slow work (ffmpeg stop + remux / re-encode) after the inventory transaction has committed.
+    try:
+        output_entries = _stop_session_recorders(str(session_id))
+        session = MemoDistribution.objects.select_related("camera").get(pk=session_id)
+        if output_entries:
+            session.camera_videos = _persist_session_recordings(session, output_entries)
+        else:
+            session.camera_videos = collect_session_recording_entries(session)
+        session.save(update_fields=["camera_videos", "video", "version"])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[distribution] attaching recordings for session %s failed", session_id)
+        MemoDistribution.objects.filter(pk=session_id).update(
+            error_message=f"Inventory updated, but the recordings could not be attached: {exc}"[:2000]
+        )
+        session = MemoDistribution.objects.select_related("camera").get(pk=session_id)
     return session

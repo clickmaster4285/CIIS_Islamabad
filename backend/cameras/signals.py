@@ -53,14 +53,14 @@ def _camera_delete_cleanup(
         )
 
     try:
-        from ml.client import ml_service_enabled, ml_unregister_camera_at
+        from ml.client import ml_auth_headers, ml_service_enabled, ml_unregister_camera_at
 
         if ml_service_enabled() and ml_base_url and stream_key:
             ml_unregister_camera_at(ml_base_url, stream_key, timeout=(2.0, 8.0))
             import requests
 
             try:
-                requests.delete(f"{ml_base_url}/journey/cam/{stream_key}", timeout=5)
+                requests.delete(f"{ml_base_url}/journey/cam/{stream_key}", timeout=5, headers=ml_auth_headers())
             except Exception:
                 pass
     except Exception:

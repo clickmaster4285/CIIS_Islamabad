@@ -121,7 +121,7 @@ export default function ZoneRestrictionsPage() {
     },
   })
 
-  const availableZones = zonesQuery.data ?? []
+  const availableZones = useMemo(() => zonesQuery.data ?? [], [zonesQuery.data])
   const [search, setSearch] = useState("")
   const [typeFilter, setTypeFilter] = useState<string | undefined>(undefined)
 

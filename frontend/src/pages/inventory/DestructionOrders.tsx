@@ -53,13 +53,9 @@ function saveRows(rows: OrderRow[]) {
 const STATUSES = ["Pending", "In Progress", "Completed", "Cancelled"]
 
 export default function DestructionOrdersPage() {
-  const [rows, setRows] = useState<OrderRow[]>([])
+  const [rows, setRows] = useState<OrderRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ orderId: "", items: 1, date: "", status: "Pending" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

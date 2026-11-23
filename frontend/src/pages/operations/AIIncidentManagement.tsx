@@ -1,56 +1,34 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { 
   AlertTriangle,
   Camera,
   FileText,
   Image,
-  Mic,
   Users,
   MapPin,
   Clock,
-  Filter,
   Search,
   Download,
   Eye,
   CheckCircle,
-  XCircle,
-  Bell,
-  Calendar,
-  ChevronDown,
-  Grid,
-  Layers,
   Shield,
-  Flame,
   Truck,
   Package,
   DollarSign,
   UserX,
   Building,
-  AlertCircle,
   Zap,
   Thermometer,
   Video,
-  FileAudio,
   FileJson,
-  Map,
   Plus,
   X,
   Maximize2,
-  ZoomIn,
-  TrendingUp,
-  BarChart3,
-  PieChart,
   Activity,
   Box,
   Scale,
-  Ship,
-  Plane,
-  Train,
-  Wifi,
-  WifiOff,
-  Fingerprint,
   Scan
 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -59,7 +37,7 @@ import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 // Pakistan Customs Incident Types
 const INCIDENT_TYPES = [
@@ -315,7 +293,7 @@ interface Evidence {
   timestamp: string
   size?: string
   description?: string
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
   fileNumber?: string
   referenceId?: string
 }
@@ -403,8 +381,6 @@ interface CustomsIncident {
 }
 
 export default function CustomsIncidentManagementPage() {
-  const [incidents, setIncidents] = useState<CustomsIncident[]>([])
-  const [filteredIncidents, setFilteredIncidents] = useState<CustomsIncident[]>([])
   const [selectedIncident, setSelectedIncident] = useState<CustomsIncident | null>(null)
   const [showModal, setShowModal] = useState(false)
   const [showImageModal, setShowImageModal] = useState(false)
@@ -418,7 +394,7 @@ export default function CustomsIncidentManagementPage() {
   const [selectedIncidentType, setSelectedIncidentType] = useState<string>("all")
   const [selectedSeverity, setSelectedSeverity] = useState<string>("all")
   const [selectedStatus, setSelectedStatus] = useState<string>("all")
-  const [selectedLocation, setSelectedLocation] = useState<string>("all")
+  const [selectedLocation] = useState<string>("all")
   const [selectedPort, setSelectedPort] = useState<string>("all")
   const [dateRange, setDateRange] = useState<string>("today")
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table')
@@ -442,8 +418,8 @@ export default function CustomsIncidentManagementPage() {
     countryOfDestination: ""
   })
 
-  // Generate realistic Pakistan Customs dummy data
-  useEffect(() => {
+  // Generate realistic Pakistan Customs dummy data (loaded once on mount)
+  const [incidents, setIncidents] = useState<CustomsIncident[]>(() => {
     const generateDummyIncidents = (): CustomsIncident[] => {
       const now = new Date()
       const dummyIncidents: CustomsIncident[] = []
@@ -731,16 +707,15 @@ export default function CustomsIncidentManagementPage() {
     // Check localStorage first, then generate dummy data
     const stored = localStorage.getItem("customsIncidents")
     if (stored) {
-      setIncidents(JSON.parse(stored))
-    } else {
-      const dummyData = generateDummyIncidents()
-      setIncidents(dummyData)
-      localStorage.setItem("customsIncidents", JSON.stringify(dummyData))
+      return JSON.parse(stored) as CustomsIncident[]
     }
-  }, [])
+    const dummyData = generateDummyIncidents()
+    localStorage.setItem("customsIncidents", JSON.stringify(dummyData))
+    return dummyData
+  })
 
   // Apply filters
-  useEffect(() => {
+  const filteredIncidents = useMemo(() => {
     let filtered = [...incidents]
     
     if (searchTerm) {
@@ -802,7 +777,7 @@ export default function CustomsIncidentManagementPage() {
       filtered = filtered.filter(i => new Date(i.date) >= monthAgo)
     }
     
-    setFilteredIncidents(filtered)
+    return filtered
   }, [incidents, searchTerm, selectedIncidentType, selectedSeverity, selectedStatus, selectedLocation, selectedPort, dateRange, activeTab])
 
   // Save to localStorage
@@ -881,7 +856,7 @@ export default function CustomsIncidentManagementPage() {
     setIncidents(incidents.map(incident => 
       incident.id === id ? { 
         ...incident, 
-        status: status as any,
+        status: status as CustomsIncident["status"],
         resolvedAt: status === 'released' || status === 'seized' ? new Date().toISOString() : incident.resolvedAt,
         resolution: status === 'released' ? 'Goods cleared after inspection' : 
                    status === 'seized' ? 'Goods seized under Customs Act Section 156' : incident.resolution
@@ -1282,7 +1257,7 @@ export default function CustomsIncidentManagementPage() {
                       </TableCell>
                       <TableCell>
                         <div className="flex -space-x-1">
-                          {incident.evidence.slice(0, 3).map((ev, idx) => (
+                          {incident.evidence.slice(0, 3).map((ev) => (
                             <div 
                               key={ev.id} 
                               className="w-6 h-6 rounded-full bg-gray-100 border-2 border-white flex items-center justify-center"
@@ -1396,7 +1371,7 @@ export default function CustomsIncidentManagementPage() {
                   
                   <div className="flex items-center justify-between">
                     <div className="flex -space-x-1">
-                      {incident.evidence.slice(0, 4).map((ev, idx) => (
+                      {incident.evidence.slice(0, 4).map((ev) => (
                         <div 
                           key={ev.id} 
                           className="w-6 h-6 rounded-full bg-gray-100 border-2 border-white flex items-center justify-center"
@@ -1712,7 +1687,7 @@ export default function CustomsIncidentManagementPage() {
                       value={selectedIncident.status}
                       onChange={(e) => {
                         updateIncidentStatus(selectedIncident.id, e.target.value)
-                        setSelectedIncident({...selectedIncident, status: e.target.value as any})
+                        setSelectedIncident({...selectedIncident, status: e.target.value as CustomsIncident["status"]})
                       }}
                     >
                       {STATUS_TYPES.map(s => (

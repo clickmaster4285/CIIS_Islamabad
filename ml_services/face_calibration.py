@@ -21,32 +21,37 @@ def suggest_threshold(
     genuine = sorted(float(s) for s in genuine_scores if s is not None)
     impostor = sorted(float(s) for s in impostor_scores if s is not None)
 
-    if not genuine and not impostor:
+    if not genuine or not impostor:
+        # FAR needs impostor scores and FRR needs genuine ones: with either list empty any
+        # "best" threshold is meaningless (it would just be the min / max score).
         return {
             "threshold": None,
+            "min_half_total_error": None,
+            "min_half_total_error_threshold": None,
             "eer": None,
+            "eer_threshold": None,
             "far_at_threshold": None,
             "frr_at_threshold": None,
-            "genuine_count": 0,
-            "impostor_count": 0,
-            "message": "Provide at least one genuine or impostor score.",
+            "genuine_count": len(genuine),
+            "impostor_count": len(impostor),
+            "message": "Provide at least one genuine AND at least one impostor score.",
         }
 
     candidates = sorted(set(genuine + impostor))
-    if not candidates:
-        candidates = [0.32]
 
+    # Minimum half total error rate, HTER = (FAR + FRR) / 2. This is NOT the equal error rate
+    # (the point where FAR == FRR); "eer" keys are kept only as backward-compatible aliases.
     best_threshold = candidates[0]
-    best_eer = 1.0
+    best_hter = 1.0
     best_far = 1.0
     best_frr = 1.0
 
     for threshold in candidates:
         far = _rate_above(impostor, threshold)
         frr = _rate_below(genuine, threshold)
-        eer = (far + frr) / 2.0
-        if eer < best_eer:
-            best_eer = eer
+        hter = (far + frr) / 2.0
+        if hter < best_hter:
+            best_hter = hter
             best_threshold = threshold
             best_far = far
             best_frr = frr
@@ -64,8 +69,13 @@ def suggest_threshold(
 
     return {
         "threshold": round(float(target_threshold), 4),
+        "min_half_total_error": round(float(best_hter), 4),
+        "min_half_total_error_threshold": round(float(best_threshold), 4),
+        "far_at_min_half_total_error": round(float(best_far), 4),
+        "frr_at_min_half_total_error": round(float(best_frr), 4),
+        # Deprecated aliases (same values as above) for existing API consumers.
         "eer_threshold": round(float(best_threshold), 4),
-        "eer": round(float(best_eer), 4),
+        "eer": round(float(best_hter), 4),
         "far_at_eer": round(float(best_far), 4),
         "frr_at_eer": round(float(best_frr), 4),
         "far_at_threshold": round(float(target_far_val), 4),

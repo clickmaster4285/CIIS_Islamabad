@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
+from collections import OrderedDict
 from typing import Any
+
+from django.conf import settings
 
 from .corruption_types import classify_frame_corruption, mark_frozen_duplicate_frames
 from .damage_map import (
@@ -24,12 +28,56 @@ from .gpu_utils import (
 )
 
 
+# Decoded frames kept in memory while regenerating (a few neighbours are enough; a long
+# video must not hold every frame in RAM).
+_FRAME_CACHE_SIZE = 64
+# Longest run synthesised by interpolation. Longer gaps are interpolated at this many
+# frames and stretched by repeating them, so the output keeps the exact gap length (timing).
+_MAX_SYNTH_FRAMES = 60
+_FRAME_NAME_RE = re.compile(r"frame_(\d+)\.\w+$")
+
+
+class _FrameCache(OrderedDict):
+    """Small LRU of decoded frames keyed by timeline index."""
+
+    def __init__(self, maxsize: int = _FRAME_CACHE_SIZE):
+        super().__init__()
+        self.maxsize = maxsize
+
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+            return self[key]
+        return default
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.maxsize:
+            self.popitem(last=False)
+
+
 def _require_cv2():
     try:
         import cv2
     except ImportError as exc:
         raise RuntimeError("OpenCV required for regeneration") from exc
     return cv2
+
+
+def _restore_decodable_frames() -> bool:
+    """Opt-in only: rewriting a frame that decodes alters evidence, so by default visually
+    damaged frames are kept as-is and only flagged."""
+    return bool(getattr(settings, "VIDEO_RECOVERY_RESTORE_DAMAGED_FRAMES", False))
+
+
+def _fit_length(frames: list, length: int) -> list:
+    """Exactly `length` frames: stretch a shorter synthesized run by repeating frames evenly."""
+    if length <= 0 or not frames:
+        return []
+    if len(frames) == length:
+        return frames
+    return [frames[min(len(frames) - 1, k * len(frames) // length)] for k in range(length)]
 
 
 def restore_damaged_frame(img, cv2) -> tuple[Any, bool]:
@@ -156,13 +204,15 @@ def np_mesh(w, h, mx, my, cv2):
 
 
 def generate_long_gap(prev_frames: list, next_frame, gap_size: int, cv2) -> list:
-    """Technique C — scene-aware generation for long missing segments."""
+    """Technique C — long missing segments. Always returns exactly gap_size frames: at most
+    _MAX_SYNTH_FRAMES are interpolated, then repeated evenly to fill the gap's real length."""
     if not prev_frames or next_frame is None or gap_size <= 0:
         return []
     anchor = prev_frames[-1]
     if anchor.shape != next_frame.shape:
         next_frame = cv2.resize(next_frame, (anchor.shape[1], anchor.shape[0]))
-    return interpolate_frames(anchor, next_frame, min(gap_size, 60), cv2)
+    synth = interpolate_frames(anchor, next_frame, min(gap_size, _MAX_SYNTH_FRAMES), cv2)
+    return _fit_length(synth, gap_size)
 
 
 def run_regeneration_engine(
@@ -189,7 +239,7 @@ def run_regeneration_engine(
     }
     batch_size = gpu_batch_size() if get_torch_device() else 1
 
-    paths_cache: dict[int, Any] = {}
+    paths_cache: dict[int, Any] = _FrameCache()
 
     def load_img(entry: dict) -> Any:
         path = entry.get("path")
@@ -210,6 +260,8 @@ def run_regeneration_engine(
         idx = entry.get("index", i)
 
         if status == VALID and path:
+            # Decodable original — kept untouched at its index (frozen / duplicate frames in a
+            # static CCTV scene are real footage; they are only flagged, never replaced).
             output_entries.append({**entry, "source": "original", "technique": "none"})
             stats["kept_original"] += 1
             i += 1
@@ -277,9 +329,9 @@ def run_regeneration_engine(
                 continue
 
             if gap_size <= short_gap_max:
-                generated = interpolate_frames(prev_img, next_img, gap_size, cv2)
+                generated = _fit_length(interpolate_frames(prev_img, next_img, gap_size, cv2), gap_size)
                 technique = "frame_interpolation"
-                stats["interpolated"] += gap_size
+                stats["interpolated"] += len(generated)
             else:
                 prev_list = [prev_img]
                 generated = generate_long_gap(prev_list, next_img, gap_size, cv2)
@@ -287,15 +339,14 @@ def run_regeneration_engine(
                 stats["generated"] += len(generated)
 
             gap_type = frame_entries[gap_start].get("corruption_type") if gap_start < len(frame_entries) else None
-            if gap_type == "frozen_duplicate":
-                technique = "frozen_frame_interpolation"
 
             for g_idx, g_img in enumerate(generated):
-                out_path = os.path.join(reg_dir, f"gen_{gap_start + g_idx:06d}.jpg")
+                timeline_idx = int(frame_entries[gap_start + g_idx].get("index", gap_start + g_idx))
+                out_path = os.path.join(reg_dir, f"gen_{timeline_idx:06d}.jpg")
                 cv2.imwrite(out_path, g_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
                 output_entries.append(
                     {
-                        "index": gap_start + g_idx,
+                        "index": timeline_idx,
                         "path": out_path,
                         "status": GENERATED,
                         "source": "generated",
@@ -317,60 +368,65 @@ def run_regeneration_engine(
     }
 
 
+def _frame_number(path: str) -> int | None:
+    match = _FRAME_NAME_RE.search(os.path.basename(str(path or "")))
+    return int(match.group(1)) if match else None
+
+
 def classify_extracted_frames(
     valid_paths: list[str],
     bad_paths: list[str],
     *,
     missing_count: int = 0,
 ) -> list[dict[str, Any]]:
-    """Build classified frame timeline from recovery extraction results."""
+    """Build the frame timeline from extraction results, every frame at its original index.
+
+    - A frame that decodes is kept as an original (status VALID). Visual damage found on it
+      (green / black / blocky / blurred) is recorded in corruption_type + visual_damage, but
+      the frame itself is not replaced unless VIDEO_RECOVERY_RESTORE_DAMAGED_FRAMES is on.
+    - A frame that does not decode is UNRECOVERABLE and is synthesized in its own slot.
+    - Numbers missing from the extracted sequence are MISSING at their real position.
+    """
     cv2 = _require_cv2()
-    entries: list[dict[str, Any]] = []
-    idx = 0
-    for path in valid_paths:
+    restore = _restore_decodable_frames()
+    paths = [(p, True) for p in valid_paths] + [(p, False) for p in bad_paths]
+    numbered = bool(paths) and all(_frame_number(p) is not None for p, _ in paths)
+    if numbered:
+        paths.sort(key=lambda item: _frame_number(item[0]))
+    else:
+        paths.sort(key=lambda item: os.path.basename(str(item[0])))
+
+    by_index: dict[int, dict[str, Any]] = {}
+    for pos, (path, decoded_ok) in enumerate(paths):
+        idx = (_frame_number(path) - 1) if numbered else pos
         img = cv2.imread(path)
-        detail = classify_frame_corruption(img)
-        entries.append(
-            {
+        if img is None:
+            by_index[idx] = {
                 "index": idx,
                 "path": path,
-                "status": detail.get("status", VALID),
-                "corruption_type": detail.get("corruption_type"),
+                "status": UNRECOVERABLE,
+                "corruption_type": "undecodable_frames",
             }
-        )
-        idx += 1
-    for path in bad_paths:
-        img = cv2.imread(path)
-        if img is not None:
-            detail = classify_frame_corruption(img)
-            entries.append(
-                {
-                    "index": idx,
-                    "path": path,
-                    "status": detail.get("status", DAMAGED_RECOVERABLE),
-                    "corruption_type": detail.get("corruption_type") or "undecodable_frames",
-                }
+            continue
+        ctype = classify_frame_corruption(img).get("corruption_type")
+        if not decoded_ok and not ctype:
+            ctype = "undecodable_frames"  # flagged by the extractor (tiny file) but readable
+        by_index[idx] = {
+            "index": idx,
+            "path": path,
+            "status": DAMAGED_RECOVERABLE if (restore and ctype) else VALID,
+            "corruption_type": ctype,
+            "visual_damage": bool(ctype),
+        }
+
+    if by_index:
+        last = max(by_index)
+        if not numbered:
+            last += max(0, int(missing_count))
+        for idx in range(0, last + 1):
+            by_index.setdefault(
+                idx,
+                {"index": idx, "path": None, "status": MISSING, "corruption_type": "missing_frames"},
             )
-        else:
-            entries.append(
-                {
-                    "index": idx,
-                    "path": path,
-                    "status": UNRECOVERABLE,
-                    "corruption_type": "undecodable_frames",
-                }
-            )
-        idx += 1
-    for _ in range(missing_count):
-        entries.append(
-            {
-                "index": idx,
-                "path": None,
-                "status": MISSING,
-                "corruption_type": "missing_frames",
-            }
-        )
-        idx += 1
-    entries.sort(key=lambda e: e["index"])
-    entries = mark_frozen_duplicate_frames(entries)
-    return entries
+    entries = [by_index[k] for k in sorted(by_index)]
+    return mark_frozen_duplicate_frames(entries)

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { Link, useParams, useNavigate } from "react-router-dom"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
@@ -72,9 +72,12 @@ export default function VisitorEditPage() {
   })
 
   const [form, setForm] = useState<Record<string, string>>({})
-  useEffect(() => {
-    if (visitor) setForm(visitorToForm(visitor))
-  }, [visitor])
+  // Re-seed the form whenever a new visitor object arrives (adjust state during render).
+  const [syncedVisitor, setSyncedVisitor] = useState<typeof visitor>(undefined)
+  if (visitor && visitor !== syncedVisitor) {
+    setSyncedVisitor(visitor)
+    setForm(visitorToForm(visitor))
+  }
 
   const updateMutation = useMutation({
     mutationFn: (payload: Record<string, unknown>) => updateVisitor(visitorId, payload, true),

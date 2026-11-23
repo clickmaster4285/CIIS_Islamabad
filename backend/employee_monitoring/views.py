@@ -15,9 +15,10 @@ from datetime import timedelta
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Sum
-from django.http import FileResponse, Http404
+from django.http import Http404
+from django.utils.dateparse import parse_date
 from rest_framework import permissions, status
-from rest_framework.exceptions import APIException
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -57,9 +58,11 @@ from .services import (
     ANDROID_CALL_SOURCE,
     APP_USAGE_CATEGORY,
     APP_USAGE_SOURCE,
+    AUDIO_CONTENT_TYPES,
     CALL_RECORDING_CATEGORY,
     HANDSET_CATEGORY,
     IN_APP_SCREEN_CATEGORY,
+    SCREEN_CONTENT_TYPES,
     SCREEN_SHARE_CATEGORY,
     SCREEN_SOURCE,
     category_consented,
@@ -67,6 +70,8 @@ from .services import (
     feature_enabled,
     latest_consent,
     mask_number,
+    new_storage_key,
+    normalize_content_type,
     normalize_number,
     playback_expiry,
     policy_allows_category,
@@ -74,6 +79,8 @@ from .services import (
     record_audit,
     retention_days,
     probe_audio_duration,
+    protected_file_response,
+    safe_storage_path,
     scope_queryset,
     sign_playback,
     storage_path,
@@ -132,7 +139,7 @@ def match_call_for_recording(user, recorded_at, duration_seconds):
     return best
 
 
-def paginate(request, qs):
+def paginate(request, qs, default_size: int = PAGE_SIZE_DEFAULT, max_size: int = PAGE_SIZE_MAX):
     """Slice `qs` to one page using ?page & ?page_size. Returns (rows, meta). Caller must have
     applied any select_related/prefetch_related to `qs` before passing it in."""
     try:
@@ -140,10 +147,10 @@ def paginate(request, qs):
     except (TypeError, ValueError):
         page = 1
     try:
-        page_size = int(request.query_params.get("page_size", PAGE_SIZE_DEFAULT))
+        page_size = int(request.query_params.get("page_size", default_size))
     except (TypeError, ValueError):
-        page_size = PAGE_SIZE_DEFAULT
-    page_size = max(1, min(page_size, PAGE_SIZE_MAX))
+        page_size = default_size
+    page_size = max(1, min(page_size, max_size))
     total = qs.count()
     start = (page - 1) * page_size
     rows = list(qs[start:start + page_size])
@@ -154,6 +161,66 @@ def paginate(request, qs):
         "has_next": start + page_size < total,
         "has_prev": page > 1,
     }
+
+
+# Sources only the signed-in handset may create; server-side ingest (PBX etc.) must not use them.
+RESERVED_SOURCES = frozenset({ANDROID_CALL_SOURCE, ANDROID_CALL_RECORDING_SOURCE, APP_USAGE_SOURCE, SCREEN_SOURCE})
+
+
+def date_param(request):
+    """Parse ?date=YYYY-MM-DD. Returns a date, None when absent; raises a 400 when invalid."""
+    raw = (request.query_params.get("date") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = parse_date(raw)
+    except ValueError:
+        value = None
+    if value is None:
+        raise ValidationError({"date": "Use YYYY-MM-DD."})
+    return value
+
+
+def parse_bool(value) -> bool:
+    """JSON booleans as-is; strings only for clear truthy words ("false"/"0"/"" are False)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def remove_quietly(path: str) -> None:
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def save_upload(upload, path: str):
+    """Stream an upload to `path`; returns (size, sha256 hex). Removes a partial file on error."""
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with open(path, "wb") as fh:
+            for chunk in upload.chunks():
+                digest.update(chunk)
+                size += len(chunk)
+                fh.write(chunk)
+    except BaseException:
+        remove_quietly(path)
+        raise
+    return size, digest.hexdigest()
+
+
+def _scoped_uuid_lookup(qs, user, raw_id):
+    """One row by UUID through scope_queryset; None for malformed ids or out-of-scope rows."""
+    try:
+        obj_id = uuid.UUID(str(raw_id))
+    except (TypeError, ValueError):
+        return None
+    return scope_queryset(qs, user).filter(id=obj_id).first()
 
 
 class IngestView(MonitorView):
@@ -261,7 +328,7 @@ class DataCategoriesView(MonitorView):
 class CallsView(MonitorView):
     def get(self, request):
         qs = scope_queryset(EmployeeCallRecord.objects.all(), request.user)
-        date = (request.query_params.get("date") or "").strip()
+        date = date_param(request)
         if date:
             qs = qs.filter(started_at__date=date)
         username = (request.query_params.get("username") or "").strip()
@@ -276,7 +343,7 @@ class CallsView(MonitorView):
                 request,
                 action="call_numbers_viewed",
                 target_type="calls",
-                target_id=date or "all",
+                target_id=str(date or "all"),
                 count=len(rows),
                 username=username or "",
             )
@@ -294,9 +361,9 @@ class CallMetadataBatchView(IngestView):
         ser = CallMetadataBatchSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         source = ser.validated_data["source"]
-        if source == ANDROID_CALL_SOURCE:
+        if source in RESERVED_SOURCES:
             return Response(
-                {"error": {"code": "SOURCE_RESERVED", "message": "Handset call logs must be uploaded by the signed-in device."}},
+                {"error": {"code": "SOURCE_RESERVED", "message": "Handset data must be uploaded by the signed-in device."}},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         source_label = ser.validated_data.get("source_label", "")
@@ -446,6 +513,12 @@ class DeviceCallRecordingUploadView(MonitorView):
                 {"error": {"code": "TOO_LARGE", "message": "Recording exceeds 50 MB."}},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
+        content_type = normalize_content_type(data.get("content_type") or "audio/mpeg")
+        if content_type not in AUDIO_CONTENT_TYPES:
+            return Response(
+                {"error": {"code": "UNSUPPORTED_TYPE", "message": "Only audio recordings are accepted."}},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
 
         device_uuid = data["device_uuid"]
         source_recording_id = f"{device_uuid}:{data['source_recording_id']}"
@@ -462,27 +535,19 @@ class DeviceCallRecordingUploadView(MonitorView):
         if call is None:
             call = match_call_for_recording(request.user, data["recorded_at"], data.get("duration_seconds"))
 
-        ext = (data.get("content_type") or "audio/mpeg").split("/")[-1][:8] or "mp3"
-        storage_key = f"{ANDROID_CALL_RECORDING_SOURCE}/{request.user.id}/{uuid.uuid4().hex}.{ext}"
+        storage_key = new_storage_key(ANDROID_CALL_RECORDING_SOURCE, request.user.id, AUDIO_CONTENT_TYPES[content_type])
         path = storage_path(storage_key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        digest = hashlib.sha256()
-        size = 0
-        with open(path, "wb") as fh:
-            for chunk in upload.chunks():
-                digest.update(chunk)
-                size += len(chunk)
-                fh.write(chunk)
-
-        # Exact length read from the stored audio itself wins; then the device's value, then the
-        # linked call's connected time. (Call connected time differs from the recording length.)
-        duration_seconds = (
-            probe_audio_duration(path)
-            or data.get("duration_seconds")
-            or (call.duration_seconds if call else None)
-        )
+        size, checksum = save_upload(upload, path)
 
         try:
+            # Exact length read from the stored audio itself wins; then the device's value, then
+            # the linked call's connected time. (Call connected time differs from the recording.)
+            duration_seconds = (
+                probe_audio_duration(path)
+                or data.get("duration_seconds")
+                or (call.duration_seconds if call else None)
+            )
             with transaction.atomic():
                 rec = EmployeeCallRecording.objects.create(
                     user=request.user,
@@ -491,9 +556,9 @@ class DeviceCallRecordingUploadView(MonitorView):
                     source_label="Android call recording",
                     source_recording_id=source_recording_id,
                     storage_key=storage_key,
-                    content_type=(data.get("content_type") or "audio/mpeg")[:60],
+                    content_type=content_type,
                     size_bytes=size,
-                    checksum_sha256=digest.hexdigest(),
+                    checksum_sha256=checksum,
                     duration_seconds=duration_seconds,
                     recorded_at=data["recorded_at"],
                     status=EmployeeCallRecording.AVAILABLE,
@@ -504,11 +569,11 @@ class DeviceCallRecordingUploadView(MonitorView):
                         recording_status=EmployeeCallRecord.AVAILABLE
                     )
         except IntegrityError:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            remove_quietly(path)
             return Response({"status": "duplicate"}, status=status.HTTP_200_OK)
+        except BaseException:
+            remove_quietly(path)  # never leave an orphan file behind
+            raise
 
         record_audit(request, action="call_recording_uploaded", target_type="recording", target_id=rec.id)
         return Response({"id": str(rec.id), "status": rec.status}, status=status.HTTP_201_CREATED)
@@ -517,7 +582,7 @@ class DeviceCallRecordingUploadView(MonitorView):
 class RecordingsView(MonitorView):
     def get(self, request):
         qs = scope_queryset(EmployeeCallRecording.objects.all(), request.user)
-        date = (request.query_params.get("date") or "").strip()
+        date = date_param(request)
         if date:
             qs = qs.filter(recorded_at__date=date)
         username = (request.query_params.get("username") or "").strip()
@@ -531,7 +596,7 @@ class RecordingsView(MonitorView):
         if overview and rows:
             record_audit(
                 request, action="recording_numbers_viewed", target_type="recordings",
-                target_id=date or "all", count=len(rows), username=username or "",
+                target_id=str(date or "all"), count=len(rows), username=username or "",
             )
         results = [
             recording_payload(r, can_play=overview or r.user_id == request.user.id, include_number=overview)
@@ -547,10 +612,16 @@ class RecordingUploadRequestView(IngestView):
         ser = RecordingUploadRequestSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
-        if data["source"] == ANDROID_CALL_SOURCE:
+        if data["source"] in RESERVED_SOURCES:
             return Response(
-                {"error": {"code": "SOURCE_RESERVED", "message": "Call audio is not accepted from the handset."}},
+                {"error": {"code": "SOURCE_RESERVED", "message": "This source is reserved for the signed-in handset."}},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+        content_type = normalize_content_type(data.get("content_type") or "audio/mpeg")
+        if content_type not in AUDIO_CONTENT_TYPES:
+            return Response(
+                {"error": {"code": "UNSUPPORTED_TYPE", "message": "Only audio recordings are accepted."}},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             )
         user = User.objects.filter(username=data["username"]).first() if data.get("username") else None
         call = None
@@ -558,14 +629,23 @@ class RecordingUploadRequestView(IngestView):
             call = EmployeeCallRecord.objects.filter(
                 source=data["source"], source_event_id=data["source_call_event_id"]
             ).first()
-        storage_key = f"{data['source']}/{data['source_recording_id']}"
+        # The storage key is always generated here, never built from client text. A repeated
+        # request for the same recording keeps the (safe) key it was first given.
+        existing = EmployeeCallRecording.objects.filter(
+            source=data["source"], source_recording_id=data["source_recording_id"]
+        ).first()
+        storage_key = (
+            existing.storage_key
+            if existing and safe_storage_path(existing.storage_key)
+            else new_storage_key(data["source"], None, AUDIO_CONTENT_TYPES[content_type])
+        )
         rec, _ = EmployeeCallRecording.objects.update_or_create(
             source=data["source"],
             source_recording_id=data["source_recording_id"],
             defaults={
                 "user": user or (call.user if call else None),
                 "call": call,
-                "content_type": data.get("content_type", "audio/mpeg"),
+                "content_type": content_type,
                 "size_bytes": data.get("size_bytes"),
                 "checksum_sha256": data.get("checksum_sha256", ""),
                 "duration_seconds": data.get("duration_seconds"),
@@ -588,8 +668,8 @@ class RecordingUploadCompleteView(IngestView):
         rec = EmployeeCallRecording.objects.filter(id=recording_id).first()
         if not rec:
             raise Http404
-        path = storage_path(rec.storage_key) if rec.storage_key else ""
-        exists = bool(path) and os.path.exists(path)
+        path = safe_storage_path(rec.storage_key)
+        exists = bool(path) and os.path.isfile(path)
         rec.status = EmployeeCallRecording.AVAILABLE if exists else EmployeeCallRecording.FAILED
         rec.save(update_fields=["status"])
         if rec.call_id and exists:
@@ -603,12 +683,10 @@ class RecordingPlaybackView(MonitorView):
     """Issue a short-lived signed URL. Playback itself is audited at stream time."""
 
     def get(self, request, recording_id):
-        rec = EmployeeCallRecording.objects.filter(id=recording_id).first()
+        # Looked up through the caller's scope: own rows for staff, site rows for overview roles.
+        rec = _scoped_uuid_lookup(EmployeeCallRecording.objects.all(), request.user, recording_id)
         if not rec:
             raise Http404
-        allowed = can_view_all_staff(request.user) or rec.user_id == request.user.id
-        if not allowed:
-            self.permission_denied(request, message="Not permitted to play this recording.")
         if rec.status != EmployeeCallRecording.AVAILABLE:
             return Response(
                 {"error": {"code": "RECORDING_UNAVAILABLE", "message": "Recording is not available."}},
@@ -626,18 +704,17 @@ class RecordingStreamView(MonitorView):
     def get(self, request):
         token = request.query_params.get("t", "")
         rec_id = unsign_playback(token)
-        if not rec_id:
+        # Screen tokens carry a "screen:" prefix; only a bare UUID is a recording token.
+        if not rec_id or rec_id.startswith("screen:"):
             raise Http404
-        rec = EmployeeCallRecording.objects.filter(id=rec_id).first()
+        rec = _scoped_uuid_lookup(EmployeeCallRecording.objects.all(), request.user, rec_id)
         if not rec or rec.status != EmployeeCallRecording.AVAILABLE:
             raise Http404
-        if not (can_view_all_staff(request.user) or rec.user_id == request.user.id):
-            self.permission_denied(request, message="Not permitted.")
-        path = storage_path(rec.storage_key) if rec.storage_key else ""
-        if not path or not os.path.exists(path):
+        path = safe_storage_path(rec.storage_key)
+        if not path or not os.path.isfile(path):
             raise Http404
         record_audit(request, action="recording_streamed", target_type="recording", target_id=rec.id)
-        return FileResponse(open(path, "rb"), content_type=rec.content_type or "audio/mpeg")
+        return protected_file_response(path, rec.content_type or "audio/mpeg", AUDIO_CONTENT_TYPES)
 
 
 # --- App usage (Android handset, signed-in user) -------------------------------------------
@@ -681,11 +758,13 @@ class DeviceAppUsageSyncView(MonitorView):
                     # per-day window, so a day re-synced later (today's total keeps growing until
                     # midnight) UPDATES the same row rather than appending a duplicate. Appending
                     # was the cause of per-app totals ballooning on every sync.
+                    # user is part of the lookup, so another user's row is never overwritten
+                    # (the insert hits the unique constraint and is reported as a duplicate).
                     _, created = EmployeeAppUsage.objects.update_or_create(
                         source=APP_USAGE_SOURCE,
                         source_event_id=f"{device_uuid}:{client_id}"[:160],
+                        user=request.user,
                         defaults=dict(
-                            user=request.user,
                             package_name=ev["package_name"][:160],
                             app_label=(ev.get("app_label") or "")[:200],
                             foreground_seconds=ev["foreground_seconds"],
@@ -714,7 +793,7 @@ class AppUsageView(MonitorView):
 
     def get(self, request):
         qs = scope_queryset(EmployeeAppUsage.objects.all(), request.user)
-        date = (request.query_params.get("date") or "").strip()
+        date = date_param(request)
         if date:
             qs = qs.filter(window_start__date=date)
         username = (request.query_params.get("username") or "").strip()
@@ -753,7 +832,7 @@ class MobileVisibilityView(MonitorView):
         v = MobileVisibility.load()
         for field in ("staff_see_calls", "staff_see_logs"):
             if field in request.data:
-                setattr(v, field, bool(request.data[field]))
+                setattr(v, field, parse_bool(request.data[field]))
         v.save()
         return Response({"staff_see_calls": v.staff_see_calls, "staff_see_logs": v.staff_see_logs})
 
@@ -818,11 +897,12 @@ class DeviceAppSessionSyncView(MonitorView):
                 continue
             try:
                 with transaction.atomic():
+                    # user in the lookup: never overwrite another user's row.
                     _, created = EmployeeAppSession.objects.update_or_create(
                         source=APP_USAGE_SOURCE,
                         source_event_id=f"{device_uuid}:{client_id}"[:160],
+                        user=request.user,
                         defaults=dict(
-                            user=request.user,
                             package_name=ev["package_name"][:160],
                             app_label=(ev.get("app_label") or "")[:200],
                             started_at=ev["started_at"],
@@ -849,7 +929,7 @@ class AppSessionView(MonitorView):
 
     def get(self, request):
         qs = scope_queryset(EmployeeAppSession.objects.all(), request.user)
-        date = (request.query_params.get("date") or "").strip()
+        date = date_param(request)
         if date:
             qs = qs.filter(started_at__date=date)
         username = (request.query_params.get("username") or "").strip()
@@ -858,10 +938,11 @@ class AppSessionView(MonitorView):
         package = (request.query_params.get("package") or "").strip()
         if package:
             qs = qs.filter(package_name=package)
-        rows = list(qs.select_related("user")[:1000])
+        # Same 1000-row default as before, so callers that never page see no change.
+        rows, meta = paginate(request, qs.select_related("user"), default_size=1000, max_size=1000)
         return Response({
             "results": [app_session_payload(r) for r in rows],
-            "count": len(rows),
+            **meta,
         })
 
 
@@ -904,17 +985,16 @@ class ScreenUploadView(MonitorView):
                 {"error": {"code": "TOO_LARGE", "message": "Capture exceeds 25 MB."}},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
-        ext = "jpg" if "jpeg" in (data.get("content_type") or "") else (data.get("content_type") or "bin").split("/")[-1][:8]
-        storage_key = f"{SCREEN_SOURCE}/{request.user.id}/{uuid.uuid4().hex}.{ext}"
+        content_type = normalize_content_type(data.get("content_type") or "image/jpeg")
+        if content_type not in SCREEN_CONTENT_TYPES:
+            return Response(
+                {"error": {"code": "UNSUPPORTED_TYPE", "message": "Only JPEG/PNG/WebP images or MP4 video are accepted."}},
+                status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            )
+        storage_key = new_storage_key(SCREEN_SOURCE, request.user.id, SCREEN_CONTENT_TYPES[content_type])
         path = storage_path(storage_key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        digest = hashlib.sha256()
-        size = 0
-        with open(path, "wb") as fh:
-            for chunk in upload.chunks():
-                digest.update(chunk)
-                size += len(chunk)
-                fh.write(chunk)
+        size, checksum = save_upload(upload, path)
 
         try:
             with transaction.atomic():
@@ -924,9 +1004,9 @@ class ScreenUploadView(MonitorView):
                     session_id=(data.get("session_id") or "")[:64],
                     route=(data.get("route") or "")[:160],
                     storage_key=storage_key,
-                    content_type=(data.get("content_type") or "image/jpeg")[:60],
+                    content_type=content_type,
                     size_bytes=size,
-                    checksum_sha256=digest.hexdigest(),
+                    checksum_sha256=checksum,
                     captured_at=data.get("captured_at"),
                     status=EmployeeScreenCapture.AVAILABLE,
                     source=SCREEN_SOURCE,
@@ -934,11 +1014,11 @@ class ScreenUploadView(MonitorView):
                     retention_deadline=playback_expiry(retention_days() * 86400) if retention_days() else None,
                 )
         except IntegrityError:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+            remove_quietly(path)
             return Response({"status": "duplicate"}, status=status.HTTP_200_OK)
+        except BaseException:
+            remove_quietly(path)
+            raise
 
         record_audit(request, action="screen_capture_uploaded", target_type="screen", target_id=cap.id, kind=kind)
         return Response({"id": str(cap.id), "status": cap.status}, status=status.HTTP_201_CREATED)
@@ -947,7 +1027,7 @@ class ScreenUploadView(MonitorView):
 class ScreensView(MonitorView):
     def get(self, request):
         qs = scope_queryset(EmployeeScreenCapture.objects.all(), request.user)
-        date = (request.query_params.get("date") or "").strip()
+        date = date_param(request)
         if date:
             qs = qs.filter(created_at__date=date)
         kind = (request.query_params.get("kind") or "").strip()
@@ -956,21 +1036,20 @@ class ScreensView(MonitorView):
         username = (request.query_params.get("username") or "").strip()
         if username and can_view_all_staff(request.user):
             qs = qs.filter(user__username=username)
-        rows = list(qs.select_related("user")[:200])
+        # Same 200-row default as before; ?page / ?page_size now reach older captures.
+        rows, meta = paginate(request, qs.select_related("user"), default_size=200, max_size=200)
         overview = can_view_all_staff(request.user)
         results = [screen_capture_payload(c, can_view=overview or c.user_id == request.user.id) for c in rows]
-        return Response({"results": results, "count": len(results)})
+        return Response({"results": results, **meta})
 
 
 class ScreenPlaybackView(MonitorView):
     """Issue a short-lived signed URL for one capture; the stream itself is audited."""
 
     def get(self, request, capture_id):
-        cap = EmployeeScreenCapture.objects.filter(id=capture_id).first()
+        cap = _scoped_uuid_lookup(EmployeeScreenCapture.objects.all(), request.user, capture_id)
         if not cap:
             raise Http404
-        if not (can_view_all_staff(request.user) or cap.user_id == request.user.id):
-            self.permission_denied(request, message="Not permitted to view this capture.")
         if cap.status != EmployeeScreenCapture.AVAILABLE:
             return Response(
                 {"error": {"code": "CAPTURE_UNAVAILABLE", "message": "Capture is not available."}},
@@ -987,13 +1066,11 @@ class ScreenStreamView(MonitorView):
         raw = unsign_playback(request.query_params.get("t", ""))
         if not raw or not raw.startswith("screen:"):
             raise Http404
-        cap = EmployeeScreenCapture.objects.filter(id=raw.split(":", 1)[1]).first()
+        cap = _scoped_uuid_lookup(EmployeeScreenCapture.objects.all(), request.user, raw.split(":", 1)[1])
         if not cap or cap.status != EmployeeScreenCapture.AVAILABLE:
             raise Http404
-        if not (can_view_all_staff(request.user) or cap.user_id == request.user.id):
-            self.permission_denied(request, message="Not permitted.")
-        path = storage_path(cap.storage_key) if cap.storage_key else ""
-        if not path or not os.path.exists(path):
+        path = safe_storage_path(cap.storage_key)
+        if not path or not os.path.isfile(path):
             raise Http404
         record_audit(request, action="screen_streamed", target_type="screen", target_id=cap.id)
-        return FileResponse(open(path, "rb"), content_type=cap.content_type or "image/jpeg")
+        return protected_file_response(path, cap.content_type or "image/jpeg", SCREEN_CONTENT_TYPES)

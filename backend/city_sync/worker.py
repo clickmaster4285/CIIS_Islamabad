@@ -9,7 +9,7 @@ from datetime import timedelta
 import requests
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from city_sync.identity import identity_dict, is_city, location_code
@@ -48,30 +48,88 @@ def _load_api_key() -> str:
     return key.strip()
 
 
+def warn_if_insecure_hq_url() -> None:
+    """Log once per process when HQ_SYNC_URL is not https (LAN http is allowed, but keys travel in clear)."""
+    global _INSECURE_URL_WARNED
+    url = (getattr(settings, "HQ_SYNC_URL", "") or "").strip()
+    if _INSECURE_URL_WARNED or not url:
+        return
+    _INSECURE_URL_WARNED = True
+    if not url.lower().startswith("https://"):
+        logger.warning(
+            "HQ_SYNC_URL=%s is not https: the sync API key and data are sent unencrypted. "
+            "Use https unless this link is a trusted private network.",
+            url,
+        )
+
+
+_INSECURE_URL_WARNED = False
+
+
 def recover_stuck_sending(*, older_than_seconds: int = 300) -> int:
+    """Rows a crashed worker left in "sending" go back to pending (keyed on when they were claimed)."""
     cutoff = timezone.now() - timedelta(seconds=older_than_seconds)
-    return SyncOutbox.objects.filter(
-        status=SyncOutbox.STATUS_SENDING, next_attempt_at__lt=cutoff
-    ).update(status=SyncOutbox.STATUS_PENDING, next_attempt_at=timezone.now())
+    return (
+        SyncOutbox.objects.filter(status=SyncOutbox.STATUS_SENDING)
+        .filter(Q(claimed_at__lt=cutoff) | Q(claimed_at__isnull=True, next_attempt_at__lt=cutoff))
+        .update(status=SyncOutbox.STATUS_PENDING, next_attempt_at=timezone.now(), claimed_at=None)
+    )
 
 
 def claim_batch(*, limit: int, min_age_seconds: float) -> list[SyncOutbox]:
-    min_created = timezone.now() - timedelta(seconds=min_age_seconds)
+    """
+    Claim the oldest due rows. A row is held back while an earlier seq of the same entity
+    is still in flight or backing off, so HQ always receives one entity's versions in order.
+    Earlier rows that are due go in the same batch (HQ applies a batch in seq order).
+    Dead rows do not block later versions (HQ accepts a newer full-state version).
+    """
+    now = timezone.now()
+    min_created = now - timedelta(seconds=min_age_seconds)
+    blocking = SyncOutbox.objects.filter(
+        entity_type=OuterRef("entity_type"),
+        entity_id=OuterRef("entity_id"),
+        seq__lt=OuterRef("seq"),
+    ).filter(
+        Q(status=SyncOutbox.STATUS_SENDING)
+        | Q(status=SyncOutbox.STATUS_PENDING, next_attempt_at__gt=now)
+        | Q(status=SyncOutbox.STATUS_PENDING, created_at__gt=min_created)
+    )
     with transaction.atomic():
         qs = (
             SyncOutbox.objects.select_for_update(skip_locked=True)
             .filter(
                 status=SyncOutbox.STATUS_PENDING,
-                next_attempt_at__lte=timezone.now(),
+                next_attempt_at__lte=now,
                 created_at__lte=min_created,
             )
+            .exclude(Exists(blocking))
             .order_by("seq")[:limit]
         )
         rows = list(qs)
+        # An earlier row of the same entity that another worker holds locked (skip_locked
+        # hid it) must still hold back the later versions claimed here.
+        first_seq: dict[tuple, int] = {}
         for row in rows:
+            first_seq.setdefault((row.entity_type, row.entity_id), row.seq)
+        kept = rows
+        if rows:
+            earlier = (
+                SyncOutbox.objects.filter(
+                    status__in=[SyncOutbox.STATUS_PENDING, SyncOutbox.STATUS_SENDING],
+                    entity_id__in={k[1] for k in first_seq},
+                    seq__lt=max(first_seq.values()),
+                )
+                .exclude(seq__in=[r.seq for r in rows])
+                .values_list("entity_type", "entity_id", "seq")
+            )
+            blocked = {(t, e) for t, e, sq in earlier if sq < first_seq.get((t, e), 0)}
+            kept = [r for r in rows if (r.entity_type, r.entity_id) not in blocked]
+        for row in kept:
             row.status = SyncOutbox.STATUS_SENDING
-            row.save(update_fields=["status"])
-        return rows
+            row.claimed_at = now
+        if kept:
+            SyncOutbox.objects.bulk_update(kept, ["status", "claimed_at"])
+        return kept
 
 
 def _serialize_event(row: SyncOutbox) -> dict:
@@ -90,16 +148,38 @@ def _serialize_event(row: SyncOutbox) -> dict:
     }
 
 
+def _retry_later(row: SyncOutbox, error: str, now, *, count_attempt: bool = True) -> None:
+    """Back to pending with a capped backoff. Transient failures never dead-letter."""
+    if count_attempt:
+        row.attempts = int(row.attempts or 0) + 1
+    row.last_error = (error or "retry")[:2000]
+    row.status = SyncOutbox.STATUS_PENDING
+    row.claimed_at = None
+    row.next_attempt_at = now + _backoff(max(int(row.attempts or 0), 1))
+    row.save(update_fields=["attempts", "last_error", "status", "claimed_at", "next_attempt_at"])
+
+
+def _dead_letter(row: SyncOutbox, error: str, now) -> None:
+    row.status = SyncOutbox.STATUS_DEAD
+    row.last_error = (error or "rejected")[:2000]
+    row.done_at = now
+    row.claimed_at = None
+    row.save(update_fields=["status", "last_error", "done_at", "claimed_at"])
+
+
 def _apply_hq_results(rows: list[SyncOutbox], results: list[dict]) -> None:
     by_id = {str(r.event_id): r for r in rows}
-    max_attempts = int(getattr(settings, "OUTBOX_MAX_ATTEMPTS_BEFORE_DEAD", 20))
     now = timezone.now()
+    answered: set[str] = set()
 
     for item in results:
+        if not isinstance(item, dict):
+            continue
         event_id = str(item.get("event_id") or "")
         row = by_id.get(event_id)
-        if not row:
+        if not row or event_id in answered:
             continue
+        answered.add(event_id)
         result = str(item.get("result") or "").lower()
         detail = str(item.get("detail") or "")
 
@@ -108,52 +188,57 @@ def _apply_hq_results(rows: list[SyncOutbox], results: list[dict]) -> None:
             row.done_at = now
             row.last_error = detail
             row.schema_hold = False
-            row.save(update_fields=["status", "done_at", "last_error", "schema_hold"])
+            row.claimed_at = None
+            row.save(update_fields=["status", "done_at", "last_error", "schema_hold", "claimed_at"])
             continue
 
         if result == "rejected":
-            row.status = SyncOutbox.STATUS_DEAD
-            row.last_error = detail or "rejected"
-            row.done_at = now
-            row.save(update_fields=["status", "last_error", "done_at"])
+            # HQ validated the event and refused it: retrying cannot help (permanent 4xx-style).
+            _dead_letter(row, detail or "rejected", now)
             logger.error("Outbox event %s rejected: %s", event_id, detail)
             continue
 
         if result == "retry" or item.get("schema_hold"):
             # Do NOT increment toward dead.
             row.status = SyncOutbox.STATUS_PENDING
-            row.schema_hold = True
+            row.schema_hold = detail == "schema_unsupported" or bool(item.get("schema_hold"))
+            row.claimed_at = None
             row.next_attempt_at = now + timedelta(minutes=5)
-            row.last_error = detail or "schema_hold"
-            row.save(update_fields=["status", "schema_hold", "next_attempt_at", "last_error"])
+            row.last_error = detail or "retry"
+            row.save(update_fields=["status", "schema_hold", "claimed_at", "next_attempt_at", "last_error"])
             continue
 
-        # Unknown / retryable
-        row.attempts = int(row.attempts or 0) + 1
-        row.last_error = detail or result or "retry"
-        if row.attempts >= max_attempts and not row.schema_hold:
-            row.status = SyncOutbox.STATUS_DEAD
-            row.done_at = now
-            logger.error("Outbox event %s marked dead after %s attempts", event_id, row.attempts)
-        else:
-            row.status = SyncOutbox.STATUS_PENDING
-            row.next_attempt_at = now + _backoff(row.attempts)
-        row.save(update_fields=["attempts", "last_error", "status", "done_at", "next_attempt_at"])
+        # Unknown / retryable (e.g. an HQ-side error for this one event): keep retrying.
+        _retry_later(row, detail or result or "retry", now)
+
+    # Events HQ did not answer must not stay "sending" until stuck recovery.
+    for event_id, row in by_id.items():
+        if event_id not in answered:
+            _retry_later(row, "no_result_from_hq", now)
 
 
 def _requeue_network_failure(rows: list[SyncOutbox], error: str) -> None:
+    """Network errors, HQ 5xx, auth failures, bad responses: retry forever at the capped backoff."""
+    now = timezone.now()
+    for row in rows:
+        _retry_later(row, error, now)
+
+
+def _reject_batch(rows: list[SyncOutbox], error: str) -> None:
+    """HQ refused the whole request as invalid (400/422). Retry a few times, then dead-letter."""
     now = timezone.now()
     max_attempts = int(getattr(settings, "OUTBOX_MAX_ATTEMPTS_BEFORE_DEAD", 20))
     for row in rows:
-        row.attempts = int(row.attempts or 0) + 1
-        row.last_error = error[:2000]
-        if row.attempts >= max_attempts and not row.schema_hold:
-            row.status = SyncOutbox.STATUS_DEAD
-            row.done_at = now
+        if int(row.attempts or 0) + 1 >= max_attempts and not row.schema_hold:
+            row.attempts = int(row.attempts or 0) + 1
+            _dead_letter(row, error, now)
+            logger.error("Outbox event %s dead after %s invalid-request answers", row.event_id, row.attempts)
         else:
-            row.status = SyncOutbox.STATUS_PENDING
-            row.next_attempt_at = now + _backoff(row.attempts)
-        row.save(update_fields=["attempts", "last_error", "status", "done_at", "next_attempt_at"])
+            _retry_later(row, error, now)
+
+
+# Request-level answers that mean "this request is invalid" rather than "try again later".
+_PERMANENT_HTTP = {400, 422}
 
 
 def push_once() -> dict:
@@ -164,6 +249,7 @@ def push_once() -> dict:
     hq_url = (getattr(settings, "HQ_SYNC_URL", "") or "").rstrip("/")
     if not hq_url:
         return {"skipped": True, "reason": "HQ_SYNC_URL empty"}
+    warn_if_insecure_hq_url()
 
     from city_sync.control import city_is_paused
 
@@ -196,9 +282,20 @@ def push_once() -> dict:
             _requeue_network_failure(rows, f"HTTP {resp.status_code}: {resp.text[:500]}")
             return {"claimed": len(rows), "error": f"http_{resp.status_code}"}
         if resp.status_code in {401, 403}:
+            # Usually a key being rotated: keep the events and retry.
             _requeue_network_failure(rows, f"auth_failed HTTP {resp.status_code}")
             return {"claimed": len(rows), "error": "auth_failed"}
-        data = resp.json() if resp.content else {}
+        if resp.status_code in _PERMANENT_HTTP:
+            _reject_batch(rows, f"HTTP {resp.status_code}: {resp.text[:500]}")
+            return {"claimed": len(rows), "error": f"http_{resp.status_code}"}
+        if resp.status_code >= 400:
+            # 404/408/409/413/429 ...: configuration or load problems, not bad data.
+            _requeue_network_failure(rows, f"HTTP {resp.status_code}: {resp.text[:500]}")
+            return {"claimed": len(rows), "error": f"http_{resp.status_code}"}
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
             _requeue_network_failure(rows, f"bad_response HTTP {resp.status_code}")
@@ -233,6 +330,7 @@ def send_heartbeat() -> dict:
     hq_url = (getattr(settings, "HQ_SYNC_URL", "") or "").rstrip("/")
     if not hq_url:
         return {"skipped": True, "reason": "no_url"}
+    warn_if_insecure_hq_url()
 
     from city_sync.control import apply_hq_control, heartbeat_extras
     from city_sync.media_sync import media_stats

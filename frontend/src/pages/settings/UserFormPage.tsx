@@ -30,11 +30,10 @@ import { useToast } from "@/hooks/use-toast"
 import { getStoredToken } from "@/lib/api"
 import { getStoredUser } from "@/lib/auth"
 import {
-  getUserLocationFilter,
   isLocationAdmin,
   rolesAvailableToLocationAdmin,
 } from "@/lib/location-access"
-import { DEFAULT_STAFF_LOGIN_PASSWORD, usernameFromFullName } from "@/lib/staff-api"
+import { generateStaffLoginPassword, usernameFromFullName } from "@/lib/staff-api"
 import { ROUTES, getUserDetailPath } from "@/routes/config"
 import {
   COLLECTORATE_OPTIONS,
@@ -72,7 +71,7 @@ type FormState = {
 
 const emptyForm: FormState = {
   username: "",
-  password: DEFAULT_STAFF_LOGIN_PASSWORD,
+  password: "",
   full_name: "",
   cnic: "",
   office_phone_1: "",
@@ -130,6 +129,7 @@ export default function UserFormPage() {
   const [saving, setSaving] = useState(false)
   const [form, setForm] = useState<FormState>(() => ({
     ...emptyForm,
+    password: generateStaffLoginPassword(),
     location: actorIsLocationAdmin && actor?.location ? actor.location : "",
   }))
 
@@ -641,7 +641,7 @@ export default function UserFormPage() {
                   placeholder={
                     isEditing
                       ? "Leave blank to keep current"
-                      : DEFAULT_STAFF_LOGIN_PASSWORD
+                      : "Temporary password"
                   }
                   autoComplete="new-password"
                   className="h-11 pr-20 font-mono text-sm tracking-widest"
@@ -683,9 +683,9 @@ export default function UserFormPage() {
               </div>
               {!isEditing ? (
                 <p className="text-xs text-muted-foreground">
-                  Default temporary password is{" "}
+                  Random temporary password{" "}
                   <span className="font-mono font-medium text-foreground">
-                    {DEFAULT_STAFF_LOGIN_PASSWORD}
+                    {form.password}
                   </span>{" "}
                   — shown so you can share it with the user.
                 </p>

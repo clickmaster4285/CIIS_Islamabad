@@ -4,19 +4,32 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
 
 
-def _emit(*domains: str, throttle_sec: float = 0.0) -> None:
+def _send(domains: list[str], throttle_sec: float) -> None:
     try:
         from .sio_app import emit_invalidate
 
-        emit_invalidate(list(domains), throttle_sec=throttle_sec)
+        emit_invalidate(domains, throttle_sec=throttle_sec)
     except Exception:
         logger.debug("[realtime] signal emit skipped", exc_info=True)
+
+
+def _emit(*domains: str, throttle_sec: float = 0.0) -> None:
+    # After commit: browsers refetch on this event, and before commit they would read
+    # the old rows (or rows that are then rolled back).
+    # Note: without SOCKETIO_REDIS_URL the emit reaches only browsers connected to this
+    # process; changes saved by a separate worker process do not push live updates.
+    domain_list = list(domains)
+    try:
+        transaction.on_commit(lambda: _send(domain_list, throttle_sec))
+    except Exception:
+        logger.debug("[realtime] could not defer emit", exc_info=True)
 
 
 def _connect(model, *domains: str, throttle_sec: float = 0.0) -> None:

@@ -53,13 +53,9 @@ function saveRows(rows: PerishableRow[]) {
 const STATUSES = ["Active", "Expiring Soon", "Disposed"]
 
 export default function PerishableRegisterPage() {
-  const [rows, setRows] = useState<PerishableRow[]>([])
+  const [rows, setRows] = useState<PerishableRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ id: "", desc: "", expiry: "", status: "Active" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

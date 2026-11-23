@@ -88,20 +88,19 @@ function generateReceiptNumber(): string {
 }
 
 export default function GoodsReceiptHandoverPage() {
-  const [records, setRecords] = useState<StoredReceipt[]>([])
-  const [showModal, setShowModal] = useState(false)
-  const [showFlow, setShowFlow] = useState(false)
-  const [formData, setFormData] = useState<ReceiptRegistrationForm>(getDefaultForm())
-
-  useEffect(() => {
+  const [records, setRecords] = useState<StoredReceipt[]>(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY)
       if (stored) {
         const parsed = JSON.parse(stored)
-        if (Array.isArray(parsed)) setRecords(parsed)
+        if (Array.isArray(parsed)) return parsed
       }
     } catch {}
-  }, [])
+    return []
+  })
+  const [showModal, setShowModal] = useState(false)
+  const [showFlow, setShowFlow] = useState(false)
+  const [formData, setFormData] = useState<ReceiptRegistrationForm>(getDefaultForm())
 
   useEffect(() => {
     if (records.length > 0) localStorage.setItem(STORAGE_KEY, JSON.stringify(records))

@@ -152,7 +152,8 @@ interface SidebarProps {
 export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenChange }: SidebarProps) {
   const pathname = useLocation().pathname
   const navigate = useNavigate()
-  const [authTick, setAuthTick] = useState(0)
+  // Bumped on auth updates only to re-render (storage is re-read each render).
+  const [, setAuthTick] = useState(0)
   useEffect(() => {
     const onUserUpdated = () => setAuthTick((n) => n + 1)
     window.addEventListener(AUTH_USER_UPDATED_EVENT, onUserUpdated)
@@ -163,21 +164,24 @@ export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenC
   const role = storedUser?.role
   const modulesKey = (storedUser?.allowed_modules ?? []).join("\0")
   const navSections = useMemo(
-    () => getNavSectionsForRole(role, storedUser?.allowed_modules),
-    [role, modulesKey, authTick]
+    () => getNavSectionsForRole(role, modulesKey ? modulesKey.split("\0") : []),
+    [role, modulesKey]
   )
   const [expandedItems, setExpandedItems] = useState<string[]>(() =>
     getAncestorMenusForPath(pathname, getNavSectionsForRole(role, storedUser?.allowed_modules))
   )
   const [favorites, setFavorites] = useState<FavoriteItem[]>(loadFavorites)
 
-  useEffect(() => {
+  // Expand the active route's parent menus when the route or menu changes (adjusted during render).
+  const [prevNav, setPrevNav] = useState({ pathname, navSections })
+  if (prevNav.pathname !== pathname || prevNav.navSections !== navSections) {
+    setPrevNav({ pathname, navSections })
     const ancestors = getAncestorMenusForPath(pathname, navSections)
     setExpandedItems((prev) => {
       const missing = ancestors.filter((label) => !prev.includes(label))
       return missing.length === 0 ? prev : [...prev, ...missing]
     })
-  }, [pathname, navSections])
+  }
 
   useEffect(() => {
     onMobileOpenChange?.(false)

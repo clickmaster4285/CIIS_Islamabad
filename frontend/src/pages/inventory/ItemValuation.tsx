@@ -55,13 +55,9 @@ function saveRows(rows: ValuationRow[]) {
 const STATUSES = ["Pending", "Approved", "Rejected"]
 
 export default function ItemValuationPage() {
-  const [rows, setRows] = useState<ValuationRow[]>([])
+  const [rows, setRows] = useState<ValuationRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ itemId: "", desc: "", value: "", date: "", status: "Pending" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

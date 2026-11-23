@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.test import Client
 from django.utils import timezone
 
@@ -22,7 +22,20 @@ from city_sync.reference_sync import publish_reference, seed_default_reference
 class Command(BaseCommand):
     help = "Run local pilot checks for city_sync (identity, idempotency, media checksum, reference)."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--i-know-this-is-not-production",
+            action="store_true",
+            dest="not_production",
+            help="Run even with DEBUG=False. The checks write test events, replicas and media.",
+        )
+
     def handle(self, *args, **options):
+        if not getattr(settings, "DEBUG", False) and not options.get("not_production"):
+            raise CommandError(
+                "Refusing to run: these checks write test sync events, HQ replica rows and media "
+                "into this database. Use DEBUG=True, or pass --i-know-this-is-not-production."
+            )
         results = []
 
         def check(name: str, ok: bool, detail: str = ""):

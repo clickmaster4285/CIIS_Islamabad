@@ -175,7 +175,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
         username = (value or "").strip()
         if not username:
             raise serializers.ValidationError("Username is required.")
-        qs = User.objects.filter(username__iexact=username, is_deleted=False)
+        # Deleted accounts keep their username (soft delete), and the DB column is unique,
+        # so a deleted name must still count as taken.
+        qs = User.objects.filter(username__iexact=username)
         if self.instance:
             qs = qs.exclude(pk=self.instance.pk)
         if qs.exists():
@@ -246,6 +248,13 @@ class UserCreateSerializer(serializers.ModelSerializer):
                 attrs["location"] = scope
             new_role = attrs.get("role")
             role_changing = new_role and (self.instance is None or new_role != self.instance.role)
+            if (
+                role_changing
+                and self.instance is not None
+                and self.instance.pk == actor.pk
+                and not is_global_admin(actor)
+            ):
+                raise serializers.ValidationError({"role": "You cannot change your own role."})
             if role_changing and not location_admin_may_assign_role(actor, new_role):
                 raise serializers.ValidationError(
                     {"role": "You cannot assign this role."}
@@ -544,7 +553,9 @@ class StaffUpdateSerializer(AssignedLocationMixin, serializers.ModelSerializer):
     class Meta:
         model = Staff
         fields = "__all__"
-        read_only_fields = ["created_at", "cnic", "staff_photos", *_STAFF_FACE_PRIVATE_FIELDS]
+        # The login link changes only through link_user / unlink_user / create_user,
+        # which check scope and account rank; a plain PATCH must not re-point it.
+        read_only_fields = ["created_at", "cnic", "user", "staff_photos", *_STAFF_FACE_PRIVATE_FIELDS]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -650,15 +661,27 @@ class StaffListSerializer(serializers.ModelSerializer):
 # -----------------------------
 class LinkUserToStaffSerializer(serializers.Serializer):
     user_id = serializers.IntegerField()
-    
+
     def validate_user_id(self, value):
-        try:
-            user = User.objects.get(id=value)
-            if hasattr(user, 'staff_profile'):
-                raise serializers.ValidationError("This user is already linked to a staff member.")
-            return value
-        except User.DoesNotExist:
+        from .permissions import may_manage_account
+
+        user = User.objects.filter(id=value, is_deleted=False).first()
+        request = self.context.get("request")
+        actor = getattr(request, "user", None) if request else None
+        scope = get_location_scope(actor) if actor is not None else None
+        if user is None or (scope and (user.location or "") != scope):
             raise serializers.ValidationError("User not found.")
+        if actor is not None and not may_manage_account(actor, user):
+            raise serializers.ValidationError("You cannot link this account.")
+        if hasattr(user, "staff_profile"):
+            raise serializers.ValidationError("This user is already linked to a staff member.")
+        return value
+
+
+def staff_in_actor_scope(actor, staff) -> bool:
+    from .permissions import staff_in_scope
+
+    return staff_in_scope(actor, staff)
 
 
 # -----------------------------
@@ -695,6 +718,23 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["location_code"]
+
+    def _actor(self):
+        request = self.context.get("request")
+        return getattr(request, "user", None) if request else None
+
+    def validate_user(self, value):
+        actor = self._actor()
+        scope = get_location_scope(actor) if actor is not None else None
+        if value is not None and scope and (value.location or "") != scope:
+            raise serializers.ValidationError("User not found.")
+        return value
+
+    def validate_staff(self, value):
+        actor = self._actor()
+        if value is not None and actor is not None and not staff_in_actor_scope(actor, value):
+            raise serializers.ValidationError("Staff not found.")
+        return value
 
     def get_username(self, obj):
         if obj.user_id:
@@ -747,13 +787,28 @@ class LeaveRequestSerializer(serializers.ModelSerializer):
             "approved_by", "approved_at", "rejection_reason",
             "created_at", "updated_at", "location_code",
         ]
-        read_only_fields = ["approved_by", "approved_at", "location_code"]
+        # Status moves only through the approve / reject actions (which forbid self-approval).
+        read_only_fields = ["status", "approved_by", "approved_at", "rejection_reason", "location_code"]
+
+    def validate_staff(self, value):
+        request = self.context.get("request")
+        actor = getattr(request, "user", None) if request else None
+        if value is not None and actor is not None and not staff_in_actor_scope(actor, value):
+            raise serializers.ValidationError("Staff not found.")
+        return value
 
 
 class LeaveRequestCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = LeaveRequest
         fields = ["staff", "leave_type", "from_date", "to_date", "days", "reason"]
+
+    def validate_staff(self, value):
+        request = self.context.get("request")
+        actor = getattr(request, "user", None) if request else None
+        if value is not None and actor is not None and not staff_in_actor_scope(actor, value):
+            raise serializers.ValidationError("Staff not found.")
+        return value
 
 
 # -----------------------------
@@ -775,8 +830,13 @@ class PayrollEntrySerializer(serializers.ModelSerializer):
         ]
 
 
+# Status only moves forward through the API: DRAFT → PROCESSED happens in process_run,
+# PROCESSED → LOCKED may be set here; nothing ever goes back.
+_PAYROLL_STATUS_STEPS = {"DRAFT": {"DRAFT"}, "PROCESSED": {"PROCESSED", "LOCKED"}, "LOCKED": {"LOCKED"}}
+
+
 class PayrollRunSerializer(serializers.ModelSerializer):
-    entries = PayrollEntrySerializer(many=True, read_only=True)
+    entries = serializers.SerializerMethodField()
     entries_count = serializers.SerializerMethodField()
 
     class Meta:
@@ -787,9 +847,42 @@ class PayrollRunSerializer(serializers.ModelSerializer):
             "created_by", "created_at", "processed_at",
             "entries", "entries_count",
         ]
+        read_only_fields = [
+            "total_gross", "total_net", "employee_count", "created_by", "created_at", "processed_at",
+        ]
+
+    def _scoped_entries(self, obj):
+        from .permissions import staff_location_q
+
+        qs = obj.entries.select_related("staff")
+        request = self.context.get("request")
+        scope = get_location_scope(getattr(request, "user", None)) if request else None
+        if scope:
+            qs = qs.filter(staff_location_q(scope, prefix="staff__"))
+        return qs
+
+    def get_entries(self, obj):
+        return PayrollEntrySerializer(self._scoped_entries(obj), many=True).data
 
     def get_entries_count(self, obj):
-        return obj.entries.count()
+        return self._scoped_entries(obj).count()
+
+    def validate_status(self, value):
+        current = (self.instance.status if self.instance else "DRAFT") or "DRAFT"
+        if value not in _PAYROLL_STATUS_STEPS.get(current, {current}):
+            raise serializers.ValidationError(f"A {current} payroll run cannot be moved to {value}.")
+        return value
+
+    def validate(self, attrs):
+        if self.instance is not None and self.instance.status == "LOCKED":
+            changed = {k for k, v in attrs.items() if getattr(self.instance, k) != v}
+            if changed:
+                raise serializers.ValidationError("A locked payroll run cannot be changed.")
+        if self.instance is not None and self.instance.status == "PROCESSED":
+            period = {"period_label", "period_start", "period_end"}
+            if any(k in attrs and getattr(self.instance, k) != attrs[k] for k in period):
+                raise serializers.ValidationError("The period of a processed payroll run cannot be changed.")
+        return attrs
 
 
 class PayrollRunCreateSerializer(serializers.ModelSerializer):

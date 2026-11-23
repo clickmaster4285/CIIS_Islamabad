@@ -9,8 +9,10 @@ from .staff_photos import staff_photo_paths
 
 logger = logging.getLogger(__name__)
 
-_profile_image_before_save: dict[int, str] = {}
-_staff_photos_before_save: dict[int, str] = {}
+# The "before" values travel on the instance itself. Module-level dicts keyed by
+# pk / id() leaked entries when a save failed and could mix up two unsaved objects
+# that reused the same id().
+_BEFORE_ATTR = "_face_sync_before"
 
 
 def _photos_fingerprint(staff: Staff) -> str:
@@ -19,30 +21,26 @@ def _photos_fingerprint(staff: Staff) -> str:
 
 @receiver(pre_save, sender=Staff)
 def cache_staff_profile_image(sender, instance: Staff, **kwargs):
-    cache_key = instance.pk if instance.pk else id(instance)
+    previous_image, previous_photos = "", "[]"
     if instance.pk:
         try:
-            old = Staff.objects.filter(pk=instance.pk).values_list("profile_image", flat=True).first()
-            _profile_image_before_save[cache_key] = str(old or "")
             row = Staff.objects.filter(pk=instance.pk).values("staff_photos", "profile_image").first()
             if row:
+                previous_image = str(row.get("profile_image") or "")
                 prev_staff = Staff(staff_photos=row.get("staff_photos") or [], profile_image=row.get("profile_image"))
-                _staff_photos_before_save[cache_key] = _photos_fingerprint(prev_staff)
-            else:
-                _staff_photos_before_save[cache_key] = "[]"
+                previous_photos = _photos_fingerprint(prev_staff)
         except Exception:
-            _profile_image_before_save[cache_key] = ""
-            _staff_photos_before_save[cache_key] = "[]"
-    else:
-        _profile_image_before_save[cache_key] = ""
-        _staff_photos_before_save[cache_key] = "[]"
+            logger.debug("Could not read previous staff photos for %s", instance.pk, exc_info=True)
+    setattr(instance, _BEFORE_ATTR, (previous_image, previous_photos))
 
 
 @receiver(post_save, sender=Staff)
 def enroll_staff_face_on_save(sender, instance: Staff, created: bool, **kwargs):
-    cache_key = instance.pk if instance.pk else id(instance)
-    previous_image = _profile_image_before_save.pop(cache_key, "")
-    previous_photos = _staff_photos_before_save.pop(cache_key, "[]")
+    previous_image, previous_photos = getattr(instance, _BEFORE_ATTR, ("", "[]"))
+    try:
+        delattr(instance, _BEFORE_ATTR)
+    except AttributeError:
+        pass
     current_image = str(instance.profile_image.name if instance.profile_image else "")
     current_photos = _photos_fingerprint(instance)
 
@@ -55,8 +53,8 @@ def enroll_staff_face_on_save(sender, instance: Staff, created: bool, **kwargs):
         return
 
     try:
-        from ml.face_sync import sync_staff_faces_after_save
+        from .face_sync_async import schedule_staff_face_sync
 
-        sync_staff_faces_after_save(instance, force=image_changed or photos_changed)
+        schedule_staff_face_sync(instance.pk, force=True)
     except Exception:
-        logger.exception("Failed to enroll faces for staff %s", instance.pk)
+        logger.exception("Failed to schedule face enrollment for staff %s", instance.pk)

@@ -18,6 +18,7 @@ import {
 import {
   fetchTrackedObjectDetail,
   formatDuration,
+  secondsSince,
   objectTypeLabel,
   type ObjectMovementWithClip,
 } from "@/lib/object-tracking-api"
@@ -109,7 +110,7 @@ export default function ObjectTrackingDetailPage() {
                   <Clock3 className="h-5 w-5" />
                   {obj.is_present
                     ? formatDuration(
-                        Math.max(0, (Date.now() - new Date(obj.entry_at).getTime()) / 1000),
+                        secondsSince(obj.entry_at),
                       )
                     : formatDuration(obj.duration_seconds)}
                 </CardTitle>
@@ -229,7 +230,7 @@ export default function ObjectTrackingDetailPage() {
                         <TableCell>
                           {v.status === "active"
                             ? formatDuration(
-                                Math.max(0, (Date.now() - new Date(v.entry_at).getTime()) / 1000),
+                                secondsSince(v.entry_at),
                               )
                             : formatDuration(v.duration_seconds)}
                         </TableCell>

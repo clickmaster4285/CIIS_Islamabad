@@ -200,7 +200,7 @@ export default function CalendarViewPage() {
     })
   }, [currentMonth])
 
-  const selectedEvents = eventsByDate.get(selectedDate) ?? []
+  const selectedEvents = useMemo(() => eventsByDate.get(selectedDate) ?? [], [eventsByDate, selectedDate])
 
   const detailQueries = useQueries({
     queries: selectedEvents.map((event) => ({

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Any
 
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
 
 from detentions.models import DepositAccountEntry, DetentionMemo, DetentionMemoGoodsLine
+from detentions.image_utils import compress_image
 from detentions.serializers import _located_camera_payload, create_deposit_account_entry
+from detentions.uploads import KIND_ANY, KIND_DOCUMENT, KIND_IMAGE, KIND_PDF, KIND_VIDEO, validate_upload
 from cameras.models import Camera, DetectionEvent
 
 from .models import (
@@ -25,6 +29,9 @@ from .models import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _is_uuid(value: str) -> bool:
     try:
         uuid.UUID(str(value))
@@ -36,13 +43,14 @@ def _is_uuid(value: str) -> bool:
 def _find_note_sheet_item(obj: NoteSheet, client_line_id: str) -> NoteSheetItem | None:
     if not client_line_id:
         return None
-    existing = obj.items.filter(client_line_id=client_line_id).first()
+    live = obj.items.filter(is_deleted=False)
+    existing = live.filter(client_line_id=client_line_id).first()
     if existing is not None:
         return existing
     if not _is_uuid(client_line_id):
         return None
     try:
-        return obj.items.filter(pk=client_line_id).first()
+        return live.filter(pk=client_line_id).first()
     except (ValueError, TypeError, ValidationError):
         return None
 
@@ -88,6 +96,8 @@ def _parse_detected_at(value):
 def _note_sheet_item_to_dict(item: NoteSheetItem, request=None) -> dict:
     images = []
     for img in item.images.all():
+        if img.is_deleted:
+            continue
         url = _absolute_media_url(request, img.image)
         if url:
             images.append(url)
@@ -178,13 +188,15 @@ def _note_sheet_timeline(obj: NoteSheet) -> list[dict]:
     return steps
 
 
-def note_sheet_to_dict(obj: NoteSheet, request=None) -> dict:
+def note_sheet_to_dict(obj: NoteSheet, request=None, *, loc_map: dict[str, str] | None = None) -> dict:
+    """``loc_map`` (lower-case username -> location) avoids one user query per row in lists."""
     from .notifications import note_sheet_submitter_location, user_can_approve_note_sheet
 
-    items = list(obj.items.all())
-    attachments = list(obj.attachments.all())
+    items = [i for i in obj.items.all() if not i.is_deleted]
+    attachments = [a for a in obj.attachments.all() if not a.is_deleted]
     evidence = obj.evidence_collected if isinstance(obj.evidence_collected, list) else []
     user = getattr(request, "user", None) if request is not None else None
+    submitter_loc = note_sheet_submitter_location(obj, loc_map=loc_map)
     return {
         "id": str(obj.id),
         "locationCode": obj.location_code or "",
@@ -238,11 +250,11 @@ def note_sheet_to_dict(obj: NoteSheet, request=None) -> dict:
         "submittedAt": _iso(obj.submitted_at),
         "viewedAt": _iso(obj.viewed_at),
         # Server-side gate for Approve/Reject UI (role + submitter location).
-        "submitterLocation": note_sheet_submitter_location(obj),
+        "submitterLocation": submitter_loc,
         "canApprove": bool(
             obj.status == NoteSheet.STATUS_SUBMITTED
             and user is not None
-            and user_can_approve_note_sheet(user, obj)
+            and user_can_approve_note_sheet(user, obj, submitter_loc=submitter_loc)
         ),
         # Links / audit
         "detentionMemoId": str(obj.detention_memo_id) if obj.detention_memo_id else "",
@@ -256,7 +268,9 @@ def note_sheet_to_dict(obj: NoteSheet, request=None) -> dict:
 
 def assessment_to_dict(obj: DetentionAssessment, request=None) -> dict:
     memo = obj.detention_memo
-    attachments = list(obj.attachments.all()) if hasattr(obj, "attachments") else []
+    attachments = (
+        [a for a in obj.attachments.all() if not a.is_deleted] if hasattr(obj, "attachments") else []
+    )
     return {
         "id": str(obj.id),
         "locationCode": obj.location_code or "",
@@ -418,8 +432,10 @@ class NoteSheetWriteSerializer(serializers.Serializer):
         choices=[c[0] for c in NoteSheet.PRIORITY_CHOICES],
         required=False,
     )
+    # Only Draft (no change) or Submitted (= send for approval) may come from the client;
+    # Approved / Rejected are set by the approval endpoint only.
     status = serializers.ChoiceField(
-        choices=[c[0] for c in NoteSheet.STATUS_CHOICES],
+        choices=[NoteSheet.STATUS_DRAFT, NoteSheet.STATUS_SUBMITTED],
         required=False,
     )
     subject = serializers.CharField(required=False, allow_blank=True)
@@ -458,9 +474,7 @@ class NoteSheetWriteSerializer(serializers.Serializer):
 
     preparedSignature = serializers.CharField(required=False, allow_blank=True)
     preparedDate = serializers.CharField(required=False, allow_blank=True)
-    forwardTo = serializers.CharField(required=False, allow_blank=True)
-    forwardToUserId = serializers.IntegerField(required=False, allow_null=True)
-    approvalRemarks = serializers.CharField(required=False, allow_blank=True)
+    # forwardTo / forwardToUserId / approvalRemarks are server-managed (ignored if sent).
 
     items = NoteSheetItemWriteSerializer(many=True, required=False)
 
@@ -483,12 +497,7 @@ class AssessmentWriteSerializer(serializers.Serializer):
         choices=[c[0] for c in DetentionAssessment.RELEVANCE_CHOICES],
         required=False,
     )
-    status = serializers.ChoiceField(
-        choices=[c[0] for c in DetentionAssessment.STATUS_CHOICES],
-        required=False,
-    )
-    createdBy = serializers.CharField(required=False, allow_blank=True)
-    updatedBy = serializers.CharField(required=False, allow_blank=True)
+    # status / createdBy / updatedBy are server-managed (ignored if sent).
     goodsValuation = serializers.ListField(
         child=serializers.DictField(),
         required=False,
@@ -515,10 +524,7 @@ class RecoveryMemoWriteSerializer(serializers.Serializer):
     goodsDescription = serializers.CharField(required=False, allow_blank=True)
     quantity = serializers.CharField(required=False, allow_blank=True)
     remarks = serializers.CharField(required=False, allow_blank=True)
-    approvalStatus = serializers.ChoiceField(
-        choices=[c[0] for c in RecoveryMemo.STATUS_CHOICES],
-        required=False,
-    )
+    # approvalStatus is changed only by the approval endpoint (ignored if sent).
     createDeposit = serializers.BooleanField(required=False, default=False)
 
 
@@ -582,6 +588,40 @@ _FILE_TYPE_KEYS = {
 }
 
 
+# Upload whitelist per form key (images, pdf, video, office docs).
+_UPLOAD_KIND_BY_KEY = {
+    "photo": KIND_IMAGE,
+    "video": KIND_VIDEO,
+    "pdf": KIND_PDF,
+    "invoice": KIND_DOCUMENT,
+    "delivery_challan": KIND_DOCUMENT,
+    "import_document": KIND_DOCUMENT,
+    "cnic": KIND_DOCUMENT,
+    "other": KIND_ANY,
+    "documents": KIND_ANY,
+    "attachments": KIND_ANY,
+}
+
+
+def _goods_image_uploads(files, client_line_id: str) -> list:
+    prefix = f"goods_image_{client_line_id}_"
+    return [files[key] for key in list(files.keys()) if key.startswith(prefix)]
+
+
+def validate_seizure_uploads(request) -> None:
+    """Reject disallowed / oversized uploads before anything is saved."""
+    files = getattr(request, "FILES", None)
+    if not files:
+        return
+    for key, kind in _UPLOAD_KIND_BY_KEY.items():
+        for uploaded in files.getlist(key):
+            validate_upload(uploaded, kind, field=key)
+    for key in list(files.keys()):
+        if key.startswith("goods_image_"):
+            for uploaded in files.getlist(key):
+                validate_upload(uploaded, KIND_IMAGE, field="goods_images")
+
+
 def save_note_sheet_uploads(request, obj: NoteSheet) -> list[NoteSheetAttachment]:
     created: list[NoteSheetAttachment] = []
     files = getattr(request, "FILES", None)
@@ -628,7 +668,6 @@ def apply_note_sheet(obj: NoteSheet, data: dict, username: str = "") -> NoteShee
         "office": "office",
         "caseNo": "case_no",
         "priority": "priority",
-        "status": "status",
         "subject": "subject",
         "preparedBy": "prepared_by",
         "badgeId": "badge_id",
@@ -652,23 +691,16 @@ def apply_note_sheet(obj: NoteSheet, data: dict, username: str = "") -> NoteShee
         "content": "content",
         "preparedSignature": "prepared_signature",
         "preparedDate": "prepared_date",
-        "forwardTo": "forward_to",
-        "approvalRemarks": "approval_remarks",
     }
+    # status / forward_to / approval fields are never taken from the client: the
+    # view moves Draft -> Submitted and the approval endpoint decides the rest.
     for camel, attr in field_map.items():
         if camel not in data:
             continue
         value = data.get(camel)
-        if camel in ("priority", "status", "recommendation") and not value:
+        if camel in ("priority", "recommendation") and not value:
             continue
         setattr(obj, attr, value if value is not None else "")
-
-    if "forwardToUserId" in data:
-        raw_id = data.get("forwardToUserId")
-        try:
-            obj.forward_to_user_id = int(raw_id) if raw_id not in (None, "") else None
-        except (TypeError, ValueError):
-            obj.forward_to_user_id = None
 
     if "evidenceCollected" in data:
         evidence = data.get("evidenceCollected")
@@ -762,7 +794,10 @@ def apply_note_sheet(obj: NoteSheet, data: dict, username: str = "") -> NoteShee
                     created_item.client_line_id = str(created_item.id)
                     created_item.save(update_fields=["client_line_id"])
                 keep_ids.append(created_item.id)
-        obj.items.exclude(id__in=keep_ids).delete()
+        # Soft delete removed lines (keeps their images; syncs as a deletion).
+        for gone in obj.items.filter(is_deleted=False).exclude(id__in=keep_ids):
+            gone.is_deleted = True
+            gone.save()
     return obj
 
 
@@ -774,11 +809,6 @@ def save_note_sheet_goods_images(request, obj: NoteSheet, items_payload: list | 
     if not files:
         return
 
-    try:
-        from detentions.image_utils import compress_image
-    except ImportError:
-        compress_image = None
-
     for row in items_payload:
         if not isinstance(row, dict):
             continue
@@ -789,19 +819,13 @@ def save_note_sheet_goods_images(request, obj: NoteSheet, items_payload: list | 
         if not goods_line:
             continue
 
-        remaining = 10 - goods_line.images.count()
+        remaining = 10 - goods_line.images.filter(is_deleted=False).count()
         if remaining <= 0:
             continue
 
-        prefix = f"goods_image_{client_line_id}_"
-        for key in list(files.keys()):
-            if not key.startswith(prefix) or remaining <= 0:
-                continue
-            uploaded = files[key]
-            if compress_image:
-                uploaded = compress_image(uploaded, max_width=1920, max_height=1080, quality=85)
+        for uploaded in _goods_image_uploads(files, client_line_id)[:remaining]:
+            uploaded = compress_image(uploaded, max_width=1920, max_height=1080, quality=85)
             NoteSheetItemImage.objects.create(item=goods_line, image=uploaded)
-            remaining -= 1
 
 
 def apply_goods_valuation(memo: DetentionMemo, goods_valuation: list | None) -> None:
@@ -815,10 +839,11 @@ def apply_goods_valuation(memo: DetentionMemo, goods_valuation: list | None) -> 
         if not line_id:
             continue
         line = None
-        if _is_uuid(line_id):
-            line = DetentionMemoGoodsLine.objects.filter(memo=memo, pk=line_id).first()
+        live = DetentionMemoGoodsLine.objects.filter(memo=memo, is_deleted=False)
+        if line_id.isdigit():
+            line = live.filter(pk=int(line_id)).first()
         if line is None:
-            line = DetentionMemoGoodsLine.objects.filter(memo=memo, client_line_id=line_id).first()
+            line = live.filter(client_line_id=line_id).first()
         if line is None:
             continue
         line.pct_code = (row.get("pctCode") or "").strip()
@@ -843,13 +868,12 @@ def apply_assessment(
         obj.findings = data.get("findings") or ""
     if "documentRelevance" in data and data["documentRelevance"]:
         obj.document_relevance = data["documentRelevance"]
-    # Status is controlled by approval endpoint; ignore client status except on create default
-    if not obj.pk and data.get("status") in dict(DetentionAssessment.STATUS_CHOICES):
-        obj.status = data["status"]
-    actor = (data.get("updatedBy") or data.get("createdBy") or username or "").strip()
+    # Status is controlled by the approval endpoint only. Audit names come from the
+    # logged-in user (``username``), never from the request body.
+    actor = (username or "").strip()
     if actor:
         if not obj.created_by:
-            obj.created_by = (data.get("createdBy") or actor).strip()
+            obj.created_by = actor
         obj.updated_by = actor
     obj.save()
     if "goodsValuation" in data and obj.detention_memo_id:
@@ -877,14 +901,9 @@ def save_assessment_uploads(request, obj: DetentionAssessment) -> list[Detention
     if not files:
         return created
 
-    try:
-        from ml.image_utils import compress_image
-    except Exception:
-        compress_image = None
-
     for key, file_type in _ASSESSMENT_FILE_TYPE_KEYS.items():
         for uploaded in files.getlist(key):
-            if compress_image and file_type == DetentionAssessmentAttachment.TYPE_PHOTO:
+            if file_type == DetentionAssessmentAttachment.TYPE_PHOTO:
                 uploaded = compress_image(uploaded, max_width=1920, max_height=1080, quality=85)
             created.append(
                 DetentionAssessmentAttachment.objects.create(
@@ -910,24 +929,33 @@ def apply_recovery(obj: RecoveryMemo, data: dict, username: str = "") -> Recover
         obj.quantity = data.get("quantity") or ""
     if "remarks" in data:
         obj.remarks = data.get("remarks") or ""
-    if "approvalStatus" in data and data["approvalStatus"]:
-        obj.approval_status = data["approvalStatus"]
+    # approval_status is changed only by the approval endpoint. assessmentId is checked
+    # against the memo by the view before it gets here.
     if "assessmentId" in data:
-        aid = data.get("assessmentId")
-        obj.assessment_id = aid
-    actor = (data.get("updatedBy") or data.get("createdBy") or username or "").strip()
+        obj.assessment_id = data.get("assessmentId")
+    actor = (username or "").strip()
     if actor:
         if not getattr(obj, "created_by", None):
-            obj.created_by = (data.get("createdBy") or actor).strip()
+            obj.created_by = actor
         obj.updated_by = actor
     obj.save()
     return obj
 
 
 def maybe_create_deposit_for_recovery(recovery: RecoveryMemo) -> DepositAccountEntry | None:
-    if recovery.deposit_account_id:
-        return recovery.deposit_account
-    memo = recovery.detention_memo
+    """Create the recovery's deposit entry once (row lock stops a double create)."""
+    with transaction.atomic():
+        locked = RecoveryMemo.objects.select_for_update().get(pk=recovery.pk)
+        if locked.deposit_account_id:
+            recovery.deposit_account_id = locked.deposit_account_id
+            return locked.deposit_account
+        entry = _create_recovery_deposit(locked)
+    recovery.deposit_account = entry
+    return entry
+
+
+def _create_recovery_deposit(locked: RecoveryMemo) -> DepositAccountEntry:
+    memo = locked.detention_memo
     entry = create_deposit_account_entry(
         {
             "detentionMemoId": str(memo.id),
@@ -937,12 +965,30 @@ def maybe_create_deposit_for_recovery(recovery: RecoveryMemo) -> DepositAccountE
             "customsStation": memo.place_of_detention or "",
             "depositDate": timezone.now().date().isoformat(),
             "status": "Pending",
-            "remarks": f"Auto-created from recovery memo ({recovery.category})",
+            "remarks": f"Auto-created from recovery memo ({locked.category})",
         }
     )
-    recovery.deposit_account = entry
-    recovery.save(update_fields=["deposit_account", "updated_at"])
+    locked.deposit_account = entry
+    locked.save(update_fields=["deposit_account", "updated_at"])
     return entry
+
+
+_LEGACY_COLUMNS_CACHE: dict[str, bool] = {}
+
+
+def _legacy_column_exists(cursor, column: str) -> bool:
+    """information_schema lookup, cached for the life of the process."""
+    if column not in _LEGACY_COLUMNS_CACHE:
+        cursor.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'seizure_management_seizurereport'
+              AND column_name = %s
+            """,
+            [column],
+        )
+        _LEGACY_COLUMNS_CACHE[column] = bool(cursor.fetchone())
+    return _LEGACY_COLUMNS_CACHE[column]
 
 
 def _sync_seizure_report_legacy_columns(obj: SeizureReport, data: dict | None = None) -> None:
@@ -965,15 +1011,7 @@ def _sync_seizure_report_legacy_columns(obj: SeizureReport, data: dict | None = 
     ]
     with connection.cursor() as cursor:
         for column, value in updates:
-            cursor.execute(
-                """
-                SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'seizure_management_seizurereport'
-                  AND column_name = %s
-                """,
-                [column],
-            )
-            if not cursor.fetchone():
+            if not _legacy_column_exists(cursor, column):
                 continue
             cursor.execute(
                 f"""

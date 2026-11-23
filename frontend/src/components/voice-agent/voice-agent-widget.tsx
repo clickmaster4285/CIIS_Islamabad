@@ -85,7 +85,7 @@ export function VoiceAgentWidget() {
   const onAssistantPage = useLocation().pathname === "/assistant"
   const [open, setOpen] = useState(false)
   const [typed, setTyped] = useState("")
-  const [pos, setPos] = useState<Pos>(() => loadPos(false))
+  const [pos, setPos] = useState<Pos>(() => clampPos(loadPos(false)))
   const [dragging, setDragging] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{
@@ -97,9 +97,12 @@ export function VoiceAgentWidget() {
     moved: boolean
   } | null>(null)
 
-  useEffect(() => {
+  // Re-clamp the orb when moving to/from the assistant page (adjusted during render).
+  const [prevOnAssistantPage, setPrevOnAssistantPage] = useState(onAssistantPage)
+  if (prevOnAssistantPage !== onAssistantPage) {
+    setPrevOnAssistantPage(onAssistantPage)
     setPos((p) => clampPos(p))
-  }, [onAssistantPage])
+  }
 
   useEffect(() => {
     const onResize = () => setPos((p) => clampPos(p))

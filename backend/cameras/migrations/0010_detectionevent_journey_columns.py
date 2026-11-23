@@ -54,6 +54,26 @@ class Migration(migrations.Migration):
             database_operations=[
                 migrations.RunSQL(
                     sql=[
+                        # Columns already exist on long-running databases (added by
+                        # hand); create them on fresh ones (e.g. the test DB).
+                        (
+                            "ALTER TABLE cameras_detectionevent "
+                            "ADD COLUMN IF NOT EXISTS local_track_id integer NULL "
+                            "CHECK (local_track_id >= 0);"
+                        ),
+                        (
+                            "ALTER TABLE cameras_detectionevent "
+                            "ADD COLUMN IF NOT EXISTS person_qr varchar(32) NOT NULL DEFAULT '';"
+                        ),
+                        (
+                            "ALTER TABLE cameras_detectionevent "
+                            "ADD COLUMN IF NOT EXISTS track_event varchar(16) NOT NULL "
+                            "DEFAULT 'detection';"
+                        ),
+                        (
+                            "ALTER TABLE cameras_detectionevent "
+                            "ADD COLUMN IF NOT EXISTS person_identity_id bigint NULL;"
+                        ),
                         (
                             "ALTER TABLE cameras_detectionevent "
                             "ALTER COLUMN person_qr SET DEFAULT '';"

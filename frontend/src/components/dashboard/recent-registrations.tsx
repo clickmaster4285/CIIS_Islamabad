@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { MoreHorizontal } from "lucide-react"
-import { fetchVisitors, getVisitorCreatedBy, type VisitorRecord } from "@/lib/visitor-api"
+import { fetchVisitors, type VisitorRecord } from "@/lib/visitor-api"
 
 interface Registration {
   id: number

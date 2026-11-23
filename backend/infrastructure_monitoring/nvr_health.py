@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -10,19 +11,27 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 from xml.etree.ElementTree import Element
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.auth import HTTPDigestAuth
 
 logger = logging.getLogger(__name__)
 
-# Suppress insecure-request warnings for LAN NVRs with self-signed certs / plain HTTP
-try:
-    import urllib3
+# NVR clocks run on site local time (Asia/Karachi); naive NVR timestamps use this zone.
+NVR_LOG_FIRST_PULL_HOURS = 72
+NVR_LOG_PULL_OVERLAP = timedelta(minutes=10)
+_DISK_ID_RE = re.compile(r"^\d{1,3}$")
 
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-except Exception:
-    pass
+
+def nvr_local_tz():
+    """Timezone NVRs are configured in (settings.TIME_ZONE, default Asia/Karachi)."""
+    try:
+        from django.conf import settings
+
+        return ZoneInfo(getattr(settings, "TIME_ZONE", None) or "Asia/Karachi")
+    except Exception:
+        return ZoneInfo("Asia/Karachi")
 
 
 def _tag(el: Element) -> str:
@@ -60,6 +69,33 @@ def _http_request(
     data: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int | None, str]:
+    code, text, _exc = _http_request_ex(
+        method,
+        ip,
+        path,
+        username=username,
+        password=password,
+        port=port,
+        timeout=timeout,
+        data=data,
+        headers=headers,
+    )
+    return code, text
+
+
+def _http_request_ex(
+    method: str,
+    ip: str,
+    path: str,
+    *,
+    username: str,
+    password: str,
+    port: int = 80,
+    timeout: float = 8.0,
+    data: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int | None, str, Exception | None]:
+    """Like _http_request but also returns the network exception (None on an HTTP answer)."""
     url = f"http://{ip}:{port}{path}"
     hdrs = {"Content-Type": "application/xml"} if data else {}
     if headers:
@@ -69,6 +105,7 @@ def _http_request(
     auths = [HTTPDigestAuth(username, password or "")] if username else [None]
 
     last_err = ""
+    last_exc: Exception | None = None
     for auth in auths:
         try:
             res = requests.request(
@@ -78,17 +115,51 @@ def _http_request(
                 data=data,
                 headers=hdrs or None,
                 timeout=timeout,
-                verify=False,
             )
             # Retry with other auth if unauthorized
             if res.status_code == 401 and auth is not None:
                 last_err = "401 unauthorized"
                 continue
-            return res.status_code, res.text or ""
+            return res.status_code, res.text or "", None
         except Exception as exc:
             last_err = str(exc)
-            logger.debug("NVR HTTP %s %s failed: %s", method, url, exc)
-    return None, last_err
+            last_exc = exc
+            logger.debug("NVR HTTP %s %s:%s%s failed: %s", method, ip, port, path.split("?", 1)[0], exc)
+    return None, last_err, last_exc
+
+
+def _dropped_after_send(exc: Exception | None) -> bool:
+    """
+    True when the request reached the NVR and the connection dropped while waiting for
+    the answer (normal for a reboot). Refused / DNS / connect-timeout errors mean the
+    command never arrived.
+    """
+    if exc is None:
+        return False
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return False
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        try:
+            import urllib3.exceptions as u3
+        except Exception:  # pragma: no cover
+            u3 = None
+        reason = exc.args[0] if exc.args else None
+        if u3 is not None:
+            if isinstance(reason, u3.ProtocolError):
+                return True  # "Connection aborted" / RemoteDisconnected / reset mid-response
+            if isinstance(reason, u3.MaxRetryError):
+                inner = reason.reason
+                if isinstance(inner, (u3.NewConnectionError, u3.ConnectTimeoutError)):
+                    return False
+                if isinstance(inner, u3.ProtocolError):
+                    return True
+        text = str(exc).lower()
+        if "refused" in text or "resolve" in text or "getaddrinfo" in text or "newconnectionerror" in text:
+            return False
+        return "aborted" in text or "remotedisconnected" in text or "reset by peer" in text
+    return False
 
 
 def _with_query(path: str, query: str = "") -> str:
@@ -168,6 +239,8 @@ def execute_nvr_command(
         return {
             "ok": True,
             "action": action,
+            # Internal: the view persists these instead of enriching a second time.
+            "_metrics": metrics,
             "message": "Diagnostics complete — health refreshed from NVR",
             "summary": {
                 "hdd_status": metrics.get("hdd_status"),
@@ -211,8 +284,10 @@ def execute_nvr_command(
 
     # —— Reboot ——
     if action in ("reboot", "restart", "restart_nvr"):
+        exc = None
         if "dahua" in brand:
-            code, body = _http_get(
+            code, body, exc = _http_request_ex(
+                "GET",
                 ip,
                 "/cgi-bin/magicBox.cgi?action=reboot",
                 username=username,
@@ -231,7 +306,7 @@ def execute_nvr_command(
                 ("/ISAPI/System/reboot", None),
                 ("/ISAPI/System/reboot?format=json", '{"Reboot":{}}'),
             ):
-                code, body = _http_request(
+                code, body, exc = _http_request_ex(
                     "PUT",
                     ip,
                     path,
@@ -246,56 +321,31 @@ def execute_nvr_command(
                 )
                 if code in (200, 201, 202, 204):
                     break
-        ok = code in (200, 201, 202, 204) or (code is None and "timeout" in (body or "").lower())
-        # Many NVRs drop connection mid-reboot — treat connection errors as accepted
-        if code is None and body:
-            ok = True
+                if code is None:
+                    # Unreachable / auth failure (other variants won't help), or dropped
+                    # mid-request (the NVR got the command and is rebooting).
+                    break
+        # Many NVRs drop the connection mid-reboot: only a drop AFTER the request was
+        # sent counts as accepted. Refused / DNS / connect timeout / 401 = failure.
+        dropped = code is None and _dropped_after_send(exc)
+        ok = code in (200, 201, 202, 204) or dropped
+        if ok:
+            message = "Reboot command sent to NVR" + (" (connection closed while rebooting)" if dropped else "")
+        elif code is None:
+            message = f"Reboot failed: NVR not reachable ({(body or 'no response')[:120]})"
+        else:
+            message = f"Reboot failed (HTTP {code})"
         return {
             "ok": ok,
             "action": "reboot",
-            "message": "Reboot command sent to NVR" if ok else f"Reboot failed (HTTP {code})",
+            "message": message,
             "http_status": code,
             "detail": (body or "")[:300],
         }
 
     # —— Sync time ——
     if action in ("sync_time",):
-        now = datetime.now(timezone.utc).astimezone()
-        local = now.strftime("%Y-%m-%dT%H:%M:%S")
-        # Hikvision Time XML
-        time_xml = (
-            '<?xml version="1.0" encoding="UTF-8"?>'
-            '<Time xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">'
-            f"<localTime>{local}</localTime>"
-            "<timeMode>manual</timeMode>"
-            "</Time>"
-        )
-        code, body = _http_put(
-            ip,
-            "/ISAPI/System/time",
-            time_xml,
-            username=username,
-            password=password,
-            port=http_port,
-            timeout=12,
-        )
-        if code not in (200, 201, 204) and "dahua" in brand:
-            code, body = _http_get(
-                ip,
-                f"/cgi-bin/global.cgi?action=setCurrentTime&time={quote(local)}",
-                username=username,
-                password=password,
-                port=http_port,
-                timeout=12,
-            )
-        ok = code in (200, 201, 204)
-        return {
-            "ok": ok,
-            "action": "sync_time",
-            "message": f"NVR time set to {local}" if ok else f"Sync time failed (HTTP {code})",
-            "http_status": code,
-            "detail": (body or "")[:300],
-        }
+        return _sync_nvr_time(ip, username, password, http_port, brand)
 
     # —— Format HDD ——
     if action in ("format_hdd", "format"):
@@ -306,6 +356,12 @@ def execute_nvr_command(
                 "message": "disk_id is required for format_hdd",
             }
         did = str(disk_id).strip()
+        if not _DISK_ID_RE.fullmatch(did):
+            return {
+                "ok": False,
+                "action": "format_hdd",
+                "message": "disk_id must be a number (1-3 digits)",
+            }
         format_xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             '<formatProgress xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">'
@@ -389,6 +445,102 @@ def execute_nvr_command(
     }
 
 
+def _sync_nvr_time(ip: str, username: str, password: str, http_port: int, brand: str) -> dict[str, Any]:
+    """
+    Sync the NVR clock without pinning it to manual mode.
+
+    Hikvision: when NTP servers are configured, switch/keep timeMode=NTP so the NVR keeps
+    itself in sync. Otherwise send the site's local time WITH its UTC offset and keep the
+    NVR's existing timeMode (manual is only used when the NVR is in NTP mode with no NTP
+    server, where a manual time is the only way to set the clock).
+    """
+    tz = nvr_local_tz()
+    now_local = datetime.now(tz)
+    local_iso = now_local.isoformat(timespec="seconds")  # e.g. 2026-11-23T10:00:00+05:00
+    auth = {"username": username, "password": password, "port": http_port}
+
+    if "dahua" not in brand:
+        cur_mode = ""
+        cur_tz_xml = ""
+        code, body = _http_get(ip, "/ISAPI/System/time", timeout=10, **auth)
+        if code == 200 and body:
+            try:
+                root = ET.fromstring(body)
+                cur_mode = _find_text(root, "timeMode")
+                tz_val = _find_text(root, "timeZone")
+                if tz_val:
+                    cur_tz_xml = f"<timeZone>{tz_val}</timeZone>"
+            except ET.ParseError:
+                pass
+        ntp_configured = False
+        code, body = _http_get(ip, "/ISAPI/System/time/ntpServers", timeout=10, **auth)
+        if code == 200 and body:
+            try:
+                root = ET.fromstring(body)
+                for el in root.iter():
+                    if _tag(el).lower() in ("hostname", "ipaddress", "ipv6address") and (el.text or "").strip() not in ("", "0.0.0.0", "::"):
+                        ntp_configured = True
+                        break
+            except ET.ParseError:
+                pass
+
+        if ntp_configured:
+            time_xml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<Time xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">'
+                "<timeMode>NTP</timeMode>"
+                f"{cur_tz_xml}"
+                "</Time>"
+            )
+            message_ok = "NVR set to NTP time sync (uses its configured NTP server)"
+        else:
+            mode = cur_mode if cur_mode and cur_mode.lower() != "ntp" else "manual"
+            time_xml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<Time xmlns="http://www.isapi.org/ver20/XMLSchema" version="2.0">'
+                f"<timeMode>{mode}</timeMode>"
+                f"<localTime>{local_iso}</localTime>"
+                f"{cur_tz_xml}"
+                "</Time>"
+            )
+            message_ok = f"NVR time set to {local_iso}"
+        code, body = _http_put(ip, "/ISAPI/System/time", time_xml, timeout=12, **auth)
+        if code in (200, 201, 204):
+            return {
+                "ok": True,
+                "action": "sync_time",
+                "message": message_ok,
+                "http_status": code,
+                "detail": (body or "")[:300],
+                "time_mode": "NTP" if ntp_configured else (cur_mode or "manual"),
+            }
+        if "dahua" not in brand and code is not None and code != 404:
+            return {
+                "ok": False,
+                "action": "sync_time",
+                "message": f"Sync time failed (HTTP {code})",
+                "http_status": code,
+                "detail": (body or "")[:300],
+            }
+
+    # Dahua CGI (or ISAPI endpoint missing): set the NVR's local wall-clock time
+    dahua_time = now_local.strftime("%Y-%m-%d %H:%M:%S")
+    code, body = _http_get(
+        ip,
+        f"/cgi-bin/global.cgi?action=setCurrentTime&time={quote(dahua_time)}",
+        timeout=12,
+        **auth,
+    )
+    ok = code in (200, 201, 204)
+    return {
+        "ok": ok,
+        "action": "sync_time",
+        "message": f"NVR time set to {local_iso}" if ok else f"Sync time failed (HTTP {code})",
+        "http_status": code,
+        "detail": (body or "")[:300],
+    }
+
+
 def fetch_channel_snapshot_jpeg(
     device, channel: int
 ) -> tuple[bytes | None, str]:
@@ -411,7 +563,6 @@ def fetch_channel_snapshot_jpeg(
                     f"{url_base}{path}",
                     auth=auth,
                     timeout=12,
-                    verify=False,
                     headers={"Accept": "image/jpeg"},
                 )
                 if res.status_code == 401:
@@ -1071,17 +1222,13 @@ def fetch_hikvision_network(
             if scored:
                 scored.sort(key=lambda x: x[0], reverse=True)
                 best = scored[0][1]
+                # Only report what the NVR actually said. A "down" NIC that carries the
+                # IP we are polling is contradicted by the answer itself -> "up".
                 oper = best.get("oper") or ""
-                if not oper:
-                    en = (best.get("enabled") or "").lower()
-                    if en in ("false", "0", "no"):
-                        oper = "down"
-                    else:
-                        # Management HTTP succeeded — active path is up
-                        oper = "up"
-                # If best score is still a down NIC but we got HTTP 200, force up
-                if oper == "down":
+                if oper == "down" and best.get("ip") and best["ip"].strip() == str(ip).strip():
                     oper = "up"
+                elif oper == "down":
+                    oper = ""  # some other NIC; the management path's state is not measured
                 out["network_interface_status"] = oper
                 out["network_addressing"] = best.get("addressing") or ""
                 out["network_mac"] = best.get("mac") or ""
@@ -1103,12 +1250,11 @@ def fetch_hikvision_network(
         except ET.ParseError as exc:
             logger.debug("network interfaces parse failed: %s", exc)
 
-    # HTTP answered → never leave interface as down
+    # HTTP answered: the device is reachable (network_ok). The NIC link state stays
+    # whatever the device reported ("" = not measured); it is not invented here.
     if code == 200:
-        out.setdefault("network_interface_status", "up")
+        out.setdefault("network_interface_status", "")
         out["network_ok"] = True
-        if out.get("network_interface_status") == "down":
-            out["network_interface_status"] = "up"
 
     iface_id = str(out.get("network_iface_id") or "1")
 
@@ -1236,7 +1382,7 @@ def fetch_dahua_network(
         )
         if "dhcp" in str(parsed.get("Network.eth0.DhcpEnable", "")).lower():
             out["network_addressing"] = "dhcp"
-        out["network_interface_status"] = "up" if label or link else "up"
+        out.setdefault("network_interface_status", "")  # config only; link state not measured
         out["network_ok"] = True
 
     # NetApp work state
@@ -1257,7 +1403,9 @@ def fetch_dahua_network(
                 if label:
                     out["network_link_speed"] = label
             if "link" in kl and "status" in kl:
-                out["network_interface_status"] = v or out.get("network_interface_status")
+                out["network_interface_status"] = (
+                    _normalize_link_oper_status(v) or v or out.get("network_interface_status")
+                )
             if "rx" in kl and ("byte" in kl or "octet" in kl):
                 out["network_rx"] = _format_bytes(v) or v
             if "tx" in kl and ("byte" in kl or "octet" in kl):
@@ -1447,42 +1595,32 @@ def fetch_hikvision_channels(
         port=http_port,
         timeout=10,
     )
+    # Exact mapping: track 101/102 -> channel 1, 1601 -> channel 16 (tid // 100).
+    # Only ENABLED tracks count; this says recording is configured, not that a file
+    # is being written right now.
     recording_ids: set[str] = set()
     if code == 200 and body:
         try:
             root = ET.fromstring(body)
             for tr in root.iter():
-                if _tag(tr).lower() not in ("track", "recordingtrack", "tracklist"):
-                    if _find_direct(tr, "id", "Channel", "channel") == "" and _tag(tr).lower() != "track":
-                        continue
-                tid = _find_direct(tr, "id", "Channel", "channel", "channelID") or _find_text(
-                    tr, "id", "Channel", "channelID"
-                )
-                enabled = _find_text(tr, "Enable", "enabled", "recording", "DefaultRecordingMode")
-                desc = _find_text(tr, "description", "TrackDescription", "Type")
-                # Track IDs often like 101, 201 for channel 1 main/sub
-                if tid:
-                    # Map 101 → channel 1 style and also keep full id
-                    recording_ids.add(tid)
-                    if len(tid) >= 3 and tid.isdigit():
-                        recording_ids.add(str(int(tid) // 100))
-                        recording_ids.add(tid[: len(tid) - 2] if len(tid) > 2 else tid)
-                if enabled and not _truthy(enabled) and "disable" in enabled.lower():
+                if _tag(tr).lower() != "track":
                     continue
-                if desc and "record" in desc.lower():
-                    if tid:
-                        recording_ids.add(tid)
+                tid = _find_direct(tr, "id")
+                enabled = _find_direct(tr, "Enable", "enable", "enabled")
+                if enabled and not _truthy(enabled):
+                    continue
+                ch_direct = _find_direct(tr, "Channel", "channel", "channelID")
+                if ch_direct.isdigit():
+                    recording_ids.add(str(int(ch_direct)))
+                elif tid.isdigit():
+                    n = int(tid)
+                    recording_ids.add(str(n // 100) if n >= 100 else str(n))
         except ET.ParseError:
             pass
 
     for cid, entry in by_id.items():
-        rec = cid in recording_ids
-        # Also match track id patterns: channel 1 ↔ 101
-        if not rec and cid.isdigit():
-            rec = f"{cid}01" in recording_ids or any(
-                rid.startswith(cid) for rid in recording_ids if rid.isdigit()
-            )
-        entry["recording"] = bool(rec)
+        key = str(int(cid)) if cid.isdigit() else cid
+        entry["recording"] = key in recording_ids
         items.append(entry)
 
     # Sort by numeric channel id when possible
@@ -1494,6 +1632,19 @@ def fetch_hikvision_channels(
     return items
 
 
+def _log_window(since: datetime | None, hours: int) -> tuple[datetime, datetime]:
+    """Search window in NVR local time: [since or now-hours, now + small slack]."""
+    tz = nvr_local_tz()
+    end = datetime.now(tz) + timedelta(minutes=5)  # NVR clock may run slightly ahead
+    if since is not None:
+        start = since.astimezone(tz) if since.tzinfo else since.replace(tzinfo=tz)
+    else:
+        start = end - timedelta(hours=max(1, hours))
+    if start >= end:
+        start = end - timedelta(minutes=15)
+    return start, end
+
+
 def fetch_hikvision_logs(
     ip: str,
     *,
@@ -1503,15 +1654,19 @@ def fetch_hikvision_logs(
     page_size: int = 100,
     hours: int = 48,
     max_total: int = 5000,
+    since: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """
     Pull ALL log types from the NVR via ISAPI logSearch with pagination.
 
+    ``since``: only search from this time (incremental pull); else the last ``hours``.
+    Hikvision interprets search times as its own local clock even with a "Z" suffix,
+    so the window is written in site local time.
+
     Maps to NVR UI columns:
       Time | Major Type | Subtype | Channel No. | Local/Remote User | Remote Host IP
     """
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(hours=max(1, hours))
+    start, end = _log_window(since, hours)
     start_s = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_s = end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1752,29 +1907,33 @@ def _map_major_type(raw: str) -> str:
 
 
 def _parse_log_time(raw: str) -> datetime | None:
+    """
+    Parse an NVR log timestamp. Explicit offsets are honoured; naive times (and the
+    "Z" Hikvision appends to its local clock) are the NVR's local time (settings.TIME_ZONE).
+    """
     if not raw or raw == "—":
         return None
-    text = raw.strip().replace("Z", "+00:00")
+    tz = nvr_local_tz()
+    text = raw.strip()
+    if text.endswith("Z"):
+        text = text[:-1]  # Hikvision: local wall-clock time despite the "Z"
     for fmt in (
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%f%z",
         "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S",
     ):
         try:
-            dt = datetime.strptime(text.replace("+00:00", ""), fmt) if "%z" not in fmt else datetime.strptime(text, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
+            dt = datetime.strptime(text, fmt)
         except ValueError:
             continue
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=tz)
     try:
         # fromisoformat handles many cases
         dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=tz)
     except ValueError:
         return None
 
@@ -1910,50 +2069,78 @@ def _parse_hikvision_log_xml(body: str) -> list[dict[str, Any]]:
 
 
 def persist_nvr_logs(device, logs: list[dict[str, Any]]) -> int:
-    """Upsert NVR log rows into InfraNvrLog. Returns number newly created."""
+    """Insert new NVR log rows (existing fingerprints are left untouched). Returns new rows."""
     from .models import InfraNvrLog
 
-    created = 0
+    rows: dict[str, InfraNvrLog] = {}
     for row in logs or []:
+        if not isinstance(row, dict):
+            continue
         fp = row.get("fingerprint") or _log_fingerprint(row)
+        if fp in rows:
+            continue
         dt = _parse_log_time(str(row.get("time") or ""))
         if dt is None:
             dt = datetime.now(timezone.utc)
-        obj, was_created = InfraNvrLog.objects.get_or_create(
+        rows[fp] = InfraNvrLog(
             device=device,
             fingerprint=fp,
-            defaults={
-                "log_time": dt,
-                "major_type": (row.get("major_type") or "")[:128],
-                "subtype": (row.get("subtype") or row.get("minor_type") or "")[:256],
-                "channel_no": (row.get("channel_no") or row.get("channel") or "")[:32],
-                "local_remote_user": (
-                    row.get("local_remote_user") or row.get("user") or ""
-                )[:128],
-                "remote_host_ip": (row.get("remote_host_ip") or "")[:64],
-                "description": row.get("description") or "",
-                "raw": row,
-            },
+            log_time=dt,
+            major_type=(row.get("major_type") or "")[:128],
+            subtype=(row.get("subtype") or row.get("minor_type") or "")[:256],
+            channel_no=(row.get("channel_no") or row.get("channel") or "")[:32],
+            local_remote_user=(row.get("local_remote_user") or row.get("user") or "")[:128],
+            remote_host_ip=(row.get("remote_host_ip") or "")[:64],
+            description=row.get("description") or "",
+            raw=row,
         )
-        if was_created:
-            created += 1
-        else:
-            # Keep raw updated
-            obj.raw = row
-            obj.save(update_fields=["raw"])
-    return created
+    if not rows:
+        return 0
+    existing: set[str] = set()
+    fps = list(rows)
+    for i in range(0, len(fps), 1000):
+        existing.update(
+            InfraNvrLog.objects.filter(device=device, fingerprint__in=fps[i : i + 1000]).values_list(
+                "fingerprint", flat=True
+            )
+        )
+    new_rows = [obj for fp, obj in rows.items() if fp not in existing]
+    if new_rows:
+        InfraNvrLog.objects.bulk_create(new_rows, batch_size=500, ignore_conflicts=True)
+    return len(new_rows)
+
+
+def nvr_log_pull_since(device) -> datetime | None:
+    """Start of the next incremental pull: newest stored log time minus a small overlap."""
+    from .models import InfraNvrLog
+
+    now = datetime.now(timezone.utc)
+    # Ignore rows dated in the future (NVR clock drift, or rows saved before naive NVR
+    # times were read as local time) so they cannot push the window past "now".
+    newest = (
+        InfraNvrLog.objects.filter(device=device, log_time__lte=now)
+        .order_by("-log_time")
+        .values_list("log_time", flat=True)
+        .first()
+    )
+    if newest is None:
+        return None
+    since = newest - NVR_LOG_PULL_OVERLAP
+    floor = now - timedelta(hours=NVR_LOG_FIRST_PULL_HOURS)
+    return max(since, floor)
 
 
 def load_stored_nvr_logs(device, *, limit: int = 5000) -> list[dict[str, Any]]:
     from .models import InfraNvrLog
 
+    tz = nvr_local_tz()
     qs = InfraNvrLog.objects.filter(device=device).order_by("-log_time", "-id")[:limit]
     out = []
     for i, row in enumerate(qs, start=1):
         out.append(
             {
                 "no": i,
-                "time": row.log_time.strftime("%Y-%m-%d %H:%M:%S") if row.log_time else "—",
+                "time": row.log_time.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S") if row.log_time else "—",
                 "major_type": row.major_type or "—",
                 "subtype": row.subtype or "—",
                 "minor_type": row.subtype or "—",
@@ -2561,6 +2748,7 @@ def probe_hikvision_isapi(
     username: str,
     password: str,
     http_port: int = 80,
+    logs_since: datetime | None = None,
 ) -> dict[str, Any]:
     """System/storage/network + channels + logs from Hikvision-compatible NVR."""
     metrics: dict[str, Any] = {"vendor_probe": "hikvision_isapi"}
@@ -2635,8 +2823,9 @@ def probe_hikvision_isapi(
             password=password,
             http_port=http_port,
             page_size=100,
-            hours=72,
+            hours=NVR_LOG_FIRST_PULL_HOURS,
             max_total=5000,
+            since=logs_since,
         )
         metrics["nvr_logs"] = logs
         metrics["nvr_logs_count"] = len(logs)
@@ -2742,10 +2931,11 @@ def fetch_dahua_logs(
     password: str,
     http_port: int = 80,
     max_results: int = 5000,
-    hours: int = 72,
+    hours: int = NVR_LOG_FIRST_PULL_HOURS,
+    since: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    end = datetime.now()
-    start = end - timedelta(hours=max(1, hours))
+    # Dahua expects its own local wall-clock time
+    start, end = _log_window(since, hours)
     start_s = start.strftime("%Y-%m-%d %H:%M:%S")
     end_s = end.strftime("%Y-%m-%d %H:%M:%S")
     code, body = _http_get(
@@ -2833,6 +3023,7 @@ def probe_dahua_cgi(
     username: str,
     password: str,
     http_port: int = 80,
+    logs_since: datetime | None = None,
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {"vendor_probe": "dahua_cgi"}
     code, body = _http_get(
@@ -2899,7 +3090,9 @@ def probe_dahua_cgi(
         metrics["channels_error"] = str(exc)[:200]
 
     try:
-        logs = fetch_dahua_logs(ip, username=username, password=password, http_port=http_port)
+        logs = fetch_dahua_logs(
+            ip, username=username, password=password, http_port=http_port, since=logs_since
+        )
         metrics["nvr_logs"] = logs
         metrics["nvr_logs_count"] = len(logs)
         metrics["nvr_logs_ok"] = True
@@ -2913,12 +3106,17 @@ def probe_dahua_cgi(
 # ─── Orchestration ───────────────────────────────────────────────────────────
 
 
-def enrich_nvr_metrics(device) -> dict[str, Any]:
+def enrich_nvr_metrics(device, *, status: str | None = None) -> dict[str, Any]:
     """
     Probe the NVR appliance directly for health, camera channels, and logs.
     Does NOT use CIIS Camera Management camera records for channel status.
+
+    ``status``: the status this poll just determined (the poller passes it before the
+    row is saved); defaults to the stored device.status.
     """
     from .models import DeviceStatus
+
+    cur_status = status or device.status
 
     # Drop stale probe fields so a new poll cannot keep wrong Full/down/Unknown values
     _stale_keys = {
@@ -2984,19 +3182,38 @@ def enrich_nvr_metrics(device) -> dict[str, Any]:
         return metrics
 
     try:
+        logs_since = nvr_log_pull_since(device)
+    except Exception:
+        logs_since = None
+
+    try:
         if "dahua" in brand:
             metrics.update(
-                probe_dahua_cgi(ip, username=username, password=password, http_port=http_port)
+                probe_dahua_cgi(
+                    ip,
+                    username=username,
+                    password=password,
+                    http_port=http_port,
+                    logs_since=logs_since,
+                )
             )
         else:
             hik = probe_hikvision_isapi(
-                ip, username=username, password=password, http_port=http_port
+                ip,
+                username=username,
+                password=password,
+                http_port=http_port,
+                logs_since=logs_since,
             )
             metrics.update(hik)
             # If ISAPI deviceInfo failed, try Dahua as fallback
             if not hik.get("device_info_ok") and not hik.get("channels_ok"):
                 dahua = probe_dahua_cgi(
-                    ip, username=username, password=password, http_port=http_port
+                    ip,
+                    username=username,
+                    password=password,
+                    http_port=http_port,
+                    logs_since=logs_since,
                 )
                 # Prefer whichever returned channels
                 if (dahua.get("channels") or {}).get("total", 0) > (
@@ -3032,31 +3249,29 @@ def enrich_nvr_metrics(device) -> dict[str, Any]:
         metrics["nvr_logs_persist_error"] = str(exc)[:200]
         metrics["nvr_logs"] = []
 
-    # Always refresh from live device status (never keep stale "Unknown")
-    if device.status == DeviceStatus.ONLINE:
+    # Status from this poll (never keep stale "Unknown")
+    try:
+        status_label = DeviceStatus(cur_status).label
+    except ValueError:
+        status_label = str(cur_status or "Unknown")
+    if cur_status == DeviceStatus.ONLINE:
         metrics["nvr_status"] = "Online"
-    elif device.status == DeviceStatus.OFFLINE:
+    elif cur_status == DeviceStatus.OFFLINE:
         metrics["nvr_status"] = "Offline"
     else:
-        metrics["nvr_status"] = device.get_status_display() or "Unknown"
+        metrics["nvr_status"] = status_label or "Unknown"
     if not metrics.get("system_state") or str(metrics.get("system_state")).lower() in (
         "unknown",
         "",
     ):
-        metrics["system_state"] = "normal" if device.status == DeviceStatus.ONLINE else metrics["nvr_status"]
-
-    # Reachable NVR cannot report hard-down NIC
-    if device.status == DeviceStatus.ONLINE and str(
-        metrics.get("network_interface_status") or ""
-    ).lower() in ("down", "disconnect", "disconnected", "error", "fault"):
-        metrics["network_interface_status"] = "up"
+        metrics["system_state"] = "normal" if cur_status == DeviceStatus.ONLINE else metrics["nvr_status"]
 
     # Normalize HDD rows + persist health scorecard for list/detail UIs
     if isinstance(metrics.get("hdd_list"), list):
         metrics["hdd_list"] = normalize_hdd_list(metrics["hdd_list"])
         metrics["hdd_count"] = len(metrics["hdd_list"])
     metrics["health"] = compute_nvr_health(
-        metrics, device_status=str(device.status or metrics.get("nvr_status") or "")
+        metrics, device_status=str(cur_status or metrics.get("nvr_status") or "")
     )
 
     return metrics
@@ -3121,20 +3336,11 @@ def build_nvr_detail_payload(device) -> dict[str, Any]:
 
     hdd_list = normalize_hdd_list(m.get("hdd_list") if isinstance(m.get("hdd_list"), list) else [])
     # Sanitize stale wrong signals before scoring (online NVR ≠ NIC down / Unknown)
+    # NIC link state: show what the NVR reported. Addressing words (static/dhcp) are not
+    # a link state, and nothing reported means "not measured" — never an invented "up".
     iface = str(m.get("network_interface_status") or "").lower().strip()
-    if device.status == "online" and iface in (
-        "down",
-        "disconnect",
-        "disconnected",
-        "error",
-        "fault",
-        "static",
-        "dhcp",
-        "dynamic",
-    ):
-        iface = "up"
-    elif iface in ("static", "dhcp", "dynamic", ""):
-        iface = "up" if device.status == "online" else ""
+    if iface in ("static", "dhcp", "dynamic"):
+        iface = ""
     nvr_status = status_label if device.status == "online" else (m.get("nvr_status") or status_label)
     if str(nvr_status).lower() in ("unknown", ""):
         nvr_status = status_label
@@ -3249,7 +3455,7 @@ def build_nvr_detail_payload(device) -> dict[str, Any]:
             "hdd_list": hdd_list,
         },
         "network_health": {
-            "interface_status": iface or ("up" if device.status == "online" else "—"),
+            "interface_status": iface or "not measured",
             "link_speed": (
                 m.get("network_link_speed")
                 if m.get("network_link_speed") not in (None, "", "0", 0)

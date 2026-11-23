@@ -154,6 +154,16 @@ def _camera_cooldown_active(key: str) -> bool:
     return time.monotonic() - last < _camera_mark_cooldown()
 
 
+_AUTO_NOTE_TAGS = ("Half day", "Early leave", "Overtime")
+
+
+def _merge_auto_notes(existing: str | None, tags: list[str]) -> str:
+    """Keep whatever HR wrote; replace only the engine's own tags (check-out repeats all day)."""
+    parts = [p.strip() for p in (existing or "").split(";")]
+    kept = [p for p in parts if p and p not in _AUTO_NOTE_TAGS]
+    return "; ".join([*kept, *tags])
+
+
 class AttendanceDecisionEngine:
     """
     First recognition of the day → check-in (present/late).
@@ -162,17 +172,44 @@ class AttendanceDecisionEngine:
     """
 
     @classmethod
-    def is_on_time(cls, check_in_time: datetime, staff: Staff | None = None) -> bool:
-        local_time = timezone.localtime(check_in_time).time()
-        deadline = _late_after()
+    def shift_start_for(cls, moment: datetime, staff: Staff | None = None) -> datetime:
+        """Aware start of the shift this moment belongs to.
+
+        Day shifts start on the moment's local date. A night shift (end before start,
+        e.g. 22:00-06:00) belongs to whichever start is nearest, so 00:30 counts
+        against yesterday's 22:00 and 21:50 against today's.
+        """
+        local = timezone.localtime(moment)
+        tz = local.tzinfo
         shift_start = getattr(staff, "work_shift_start", None) if staff is not None else None
-        if shift_start is not None:
-            grace = datetime.combine(check_in_time.date(), _late_after()) - datetime.combine(
-                check_in_time.date(), _work_start()
-            )
-            deadline_dt = datetime.combine(check_in_time.date(), shift_start) + grace
-            deadline = deadline_dt.time()
-        return local_time <= deadline
+        shift_end = getattr(staff, "work_shift_end", None) if staff is not None else None
+        start = shift_start or _work_start()
+        today = timezone.make_aware(datetime.combine(local.date(), start), tz)
+        if shift_start is None or shift_end is None or shift_end > shift_start:
+            return today
+        candidates = [today - timedelta(days=1), today, today + timedelta(days=1)]
+        return min(candidates, key=lambda c: abs((local - c).total_seconds()))
+
+    @classmethod
+    def shift_length(cls, staff: Staff | None = None) -> timedelta:
+        start = getattr(staff, "work_shift_start", None) if staff is not None else None
+        end = getattr(staff, "work_shift_end", None) if staff is not None else None
+        if start is None or end is None:
+            start, end = _work_start(), _work_end()
+        day = datetime(2000, 1, 1)
+        length = datetime.combine(day, end) - datetime.combine(day, start)
+        if length <= timedelta(0):
+            length += timedelta(days=1)  # crosses midnight
+        return length
+
+    @classmethod
+    def is_on_time(cls, check_in_time: datetime, staff: Staff | None = None) -> bool:
+        # Grace = ATTENDANCE_LATE_AFTER - ATTENDANCE_WORK_START (30 min by default),
+        # applied to the employee's own shift start when one is set.
+        day = datetime(2000, 1, 1)
+        grace = datetime.combine(day, _late_after()) - datetime.combine(day, _work_start())
+        deadline = cls.shift_start_for(check_in_time, staff) + grace
+        return check_in_time <= deadline
 
     @classmethod
     def determine_status(cls, check_in_time: datetime, staff: Staff | None = None) -> str:
@@ -181,26 +218,83 @@ class AttendanceDecisionEngine:
         return Attendance.STATUS_LATE
 
     @classmethod
+    def half_day_hours(cls, staff: Staff | None = None) -> float:
+        """ATTENDANCE_HALF_DAY_HOURS if set, else half the employee's shift, else 4 h."""
+        configured = getattr(settings, "ATTENDANCE_HALF_DAY_HOURS", None)
+        if configured not in (None, ""):
+            try:
+                return max(0.0, float(configured))
+            except (TypeError, ValueError):
+                pass
+        has_shift = (
+            staff is not None
+            and getattr(staff, "work_shift_start", None) is not None
+            and getattr(staff, "work_shift_end", None) is not None
+        )
+        if has_shift:
+            return cls.shift_length(staff).total_seconds() / 3600.0 / 2
+        return 4.0
+
+    @classmethod
     def apply_checkout_rules(cls, record: Attendance, staff: Staff | None, now: datetime, *, zone: str = "mixed") -> None:
         if not record.check_in or not record.check_out:
             return
         hours = (record.check_out - record.check_in).total_seconds() / 3600.0
-        shift_end = getattr(staff, "work_shift_end", None) if staff is not None else None
-        end = shift_end or _work_end()
-        local_out = timezone.localtime(record.check_out).time()
-        notes: list[str] = []
-        if zone == "exit" and hours < 4:
+        # Full datetimes, so a night shift's end on the next calendar day compares correctly.
+        shift_end = cls.shift_start_for(record.check_in, staff) + cls.shift_length(staff)
+        tags: list[str] = []
+        if zone == "exit" and hours < cls.half_day_hours(staff):
             record.status = Attendance.STATUS_HALF_DAY
-            notes.append("Half day")
-        elif zone == "exit" and local_out < end:
-            notes.append("Early leave")
-        if local_out > end:
-            notes.append("Overtime")
-        if notes:
-            record.notes = "; ".join(notes)
+            tags.append("Half day")
+        else:
+            if record.status == Attendance.STATUS_HALF_DAY:
+                # A later check-out made it a full day again.
+                record.status = cls.determine_status(record.check_in, staff)
+            if zone == "exit" and record.check_out < shift_end:
+                tags.append("Early leave")
+        if record.check_out > shift_end:
+            tags.append("Overtime")
+        record.notes = _merge_auto_notes(record.notes, tags)
 
     @classmethod
-    def _get_or_create_today(cls, staff: Staff, source: str, now: datetime) -> Attendance:
+    def _merge_duplicate_rows(cls, staff: Staff, user: User, today) -> Attendance | None:
+        """Today has a staff-only row and a user-only row: fold the user row into the staff row."""
+        with transaction.atomic():
+            rows = list(
+                Attendance.objects.select_for_update()
+                .filter(Q(staff=staff) | Q(user=user), date=today)
+                .order_by("pk")
+            )
+            staff_row = next((r for r in rows if r.staff_id == staff.pk), None)
+            user_row = next((r for r in rows if r.user_id == user.pk and r is not staff_row), None)
+            if staff_row is None or user_row is None:
+                return None
+            if user_row.staff_id not in (None, staff.pk):
+                # The login's row belongs to another staff record: leave both alone.
+                return staff_row
+            if user_row.check_in and (not staff_row.check_in or user_row.check_in < staff_row.check_in):
+                staff_row.check_in = user_row.check_in
+                staff_row.check_in_confidence = user_row.check_in_confidence
+                staff_row.status = user_row.status
+                staff_row.source = user_row.source
+            if user_row.check_out and (not staff_row.check_out or user_row.check_out > staff_row.check_out):
+                staff_row.check_out = user_row.check_out
+                staff_row.check_out_confidence = user_row.check_out_confidence
+            if user_row.notes and user_row.notes not in (staff_row.notes or ""):
+                staff_row.notes = "; ".join(p for p in (staff_row.notes, user_row.notes) if p)
+            if not staff_row.image and user_row.image:
+                staff_row.image = user_row.image.name
+            if not staff_row.video and user_row.video:
+                staff_row.video = user_row.video.name
+            user_row.delete()  # frees (user, date) before the staff row takes the user
+            staff_row.user = user
+            staff_row.save()
+            logger.info("Merged duplicate attendance rows for %s on %s", staff.full_name, today)
+            return staff_row
+
+    @classmethod
+    def _get_or_create_today(cls, staff: Staff, source: str, now: datetime) -> tuple[Attendance, bool]:
+        """Today's row for this staff member, and whether this call created it."""
         today = timezone.localdate(now)
         user = staff.user if staff.user_id and staff.user and not staff.user.is_deleted else None
         # Today's row may be keyed by staff only (marked before the account was linked) or by user only.
@@ -210,11 +304,15 @@ class AttendanceDecisionEngine:
             if not rows:
                 try:
                     with transaction.atomic():
-                        return Attendance.objects.create(user=user, staff=staff, date=today, source=source)
+                        return Attendance.objects.create(user=user, staff=staff, date=today, source=source), True
                 except IntegrityError:
                     if attempt:
                         raise
                     continue  # created at the same moment by another camera; read it back
+            if user is not None and len(rows) > 1:
+                merged = cls._merge_duplicate_rows(staff, user, today)
+                if merged is not None:
+                    return merged, False
             # Prefer the row that already holds the user, so filling gaps never clashes.
             record = next((r for r in rows if user is not None and r.user_id == user.pk), rows[0])
             updates = []
@@ -226,7 +324,7 @@ class AttendanceDecisionEngine:
                 updates.append("user")
             if updates:
                 record.save(update_fields=[*updates, "updated_at"])
-            return record
+            return record, False
         raise RuntimeError("unreachable")
 
     @classmethod
@@ -260,11 +358,13 @@ class AttendanceDecisionEngine:
                 "record": None,
             }
 
-        record = cls._get_or_create_today(staff, source, now)
+        record, created = cls._get_or_create_today(staff, source, now)
 
         if record.check_in is None:
             if zone == "exit":
-                if record.pk:
+                # Drop only the empty row this call just made; an existing row (manual
+                # entry, notes, leave marker) is never deleted by a camera.
+                if created and record.pk:
                     record.delete()
                 return {
                     "action": "ignored",
@@ -405,10 +505,7 @@ def mark_attendance_for_user(
 def _attendance_camera_purposes():
     from cameras.models import CameraPurpose
 
-    purposes = {
-        CameraPurpose.ATTENDANCE,
-        CameraPurpose.FACE_RECOGNITION,
-    }
+    purposes = {CameraPurpose.ATTENDANCE}
     if getattr(settings, "ATTENDANCE_MARK_ON_FACE_RECOGNITION_CAMERAS", True):
         purposes.add(CameraPurpose.FACE_RECOGNITION)
     return purposes
@@ -421,12 +518,3 @@ def _camera_allows_attendance(camera) -> bool:
     return getattr(settings, "ATTENDANCE_MARK_ON_ALL_CAMERAS", False)
 
 
-def try_mark_attendance_from_detection(
-    camera,
-    label: str,
-    class_name: str,
-    confidence: float,
-) -> tuple[AttendanceAction | None, Attendance | None]:
-    """Detection labels are not a face match. InsightFace CCTV is the only punch path."""
-    del camera, label, class_name, confidence
-    return None, None

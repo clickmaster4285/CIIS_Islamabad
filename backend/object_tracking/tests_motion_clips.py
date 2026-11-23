@@ -323,7 +323,8 @@ class MotionClipApiTests(MotionClipTestBase):
     def setUp(self):
         super().setUp()
         user = User.objects.create_user(
-            username="clips", password="pass12345", email="c@example.com", role="ADMIN", phone="03000000001"
+            username="clips", password="pass12345", email="c@example.com", role="ADMIN", phone="03000000001",
+            location="",  # Super Admin (unscoped); the test cameras have no location
         )
         self.auth = {"HTTP_AUTHORIZATION": f"Token {Token.objects.create(user=user).key}"}
         self.car, _ = self.object_with_visit(code="GV1")

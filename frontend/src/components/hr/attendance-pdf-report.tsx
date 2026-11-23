@@ -98,7 +98,7 @@ export function periodLabel(period: AttendancePeriod, anchorDate: string): strin
     const { start, end } = getWeekRange(anchorDate)
     return `Weekly report — ${start} to ${end}`
   }
-  const { start, end } = getMonthRange(anchorDate)
+  const { start } = getMonthRange(anchorDate)
   return `Monthly report — ${start.slice(0, 7)}`
 }
 

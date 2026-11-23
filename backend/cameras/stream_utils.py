@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from typing import Iterator
@@ -39,11 +38,25 @@ def ffmpeg_path() -> str:
     return path
 
 
-def camera_label_from_url(url: str, index: int) -> str:
-    match = re.search(r"@([\d.]+)", url)
-    if match:
-        return f"Camera {index + 1} ({match.group(1)})"
-    return f"Camera {index + 1}"
+def rtsp_input_extra() -> list[str]:
+    """RTSP input flags with a socket timeout so a dead NVR never hangs ffmpeg forever."""
+    timeout_us = os.getenv("FFMPEG_STIMEOUT_US", "10000000").strip() or "10000000"
+    timeout_flag = os.getenv("FFMPEG_TIMEOUT_FLAG", "timeout").strip().lstrip("-") or "timeout"
+    threads = os.getenv("FFMPEG_THREADS", "1").strip() or "1"
+    return [
+        "-threads",
+        threads,
+        "-rtsp_transport",
+        "tcp",
+        f"-{timeout_flag}",
+        timeout_us,
+        "-fflags",
+        "+discardcorrupt+genpts",
+        "-flags",
+        "low_delay",
+        "-err_detect",
+        "ignore_err",
+    ]
 
 
 # ——— GPU (NVDEC/NVENC) acceleration — same convention as ml_services/live_stream.py:
@@ -146,12 +159,7 @@ def capture_jpeg_frame(stream_url: str, timeout: float = 12.0) -> bytes | None:
         "-loglevel",
         "error",
         *hwaccel_input_flags(),
-        "-rtsp_transport",
-        "tcp",
-        "-fflags",
-        "+discardcorrupt",
-        "-err_detect",
-        "ignore_err",
+        *(rtsp_input_extra() if url.lower().startswith("rtsp") else []),
         "-i",
         url,
         "-frames:v",
@@ -186,20 +194,34 @@ def _stream_fps() -> int:
         return 25
 
 
+def _preview_width_cap() -> int:
+    try:
+        from django.conf import settings
+
+        return max(320, int(getattr(settings, "CAMERA_PREVIEW_WIDTH_CAP", 1280) or 1280))
+    except (TypeError, ValueError):
+        return 1280
+
+
 def _preview_max_width() -> int:
-    """0 = native NVR main-stream resolution (4K passthrough)."""
+    """Preview scale width. Configured CAMERA_PREVIEW_MAX_WIDTH, never above the cap (0 = cap)."""
+    cap = _preview_width_cap()
+    raw = None
     try:
         from django.conf import settings
 
         raw = getattr(settings, "CAMERA_PREVIEW_MAX_WIDTH", None)
-        if raw is not None:
-            return max(0, int(raw))
     except Exception:
-        pass
+        raw = None
+    if raw is None:
+        raw = os.getenv("CAMERA_PREVIEW_MAX_WIDTH", "0")
     try:
-        return max(0, int(os.getenv("CAMERA_PREVIEW_MAX_WIDTH", "0")))
+        width = max(0, int(raw))
     except (TypeError, ValueError):
-        return 0
+        width = 0
+    if width <= 0 or width > cap:
+        return cap
+    return width
 
 
 def _preview_vf() -> str:
@@ -211,7 +233,11 @@ def _preview_vf() -> str:
 
 
 def generate_mjpeg_frames(rtsp_url: str) -> Iterator[bytes]:
-    """Yield multipart MJPEG chunks from an NVR main RTSP source via ffmpeg."""
+    """Yield multipart MJPEG chunks from an NVR main RTSP source via ffmpeg.
+
+    ffmpeg is killed in ``finally`` — closing the generator (client disconnect →
+    StreamingHttpResponse.close()) raises GeneratorExit at the yield and ends the process.
+    """
     exe = ffmpeg_path()
     cmd = [
         exe,
@@ -220,12 +246,7 @@ def generate_mjpeg_frames(rtsp_url: str) -> Iterator[bytes]:
         "-loglevel",
         "error",
         *hwaccel_input_flags(),
-        "-rtsp_transport",
-        "tcp",
-        "-fflags",
-        "+discardcorrupt",
-        "-err_detect",
-        "ignore_err",
+        *rtsp_input_extra(),
         "-i",
         rtsp_url,
         "-an",

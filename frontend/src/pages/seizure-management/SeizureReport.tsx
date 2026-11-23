@@ -32,7 +32,6 @@ export default function SeizureReportPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
     fetchSeizureReports()
       .then(setRows)
       .catch(() => setRows([]))

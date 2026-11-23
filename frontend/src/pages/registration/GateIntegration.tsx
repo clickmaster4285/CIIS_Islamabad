@@ -30,7 +30,7 @@ import { Badge } from "@/components/ui/badge"
 import { ROUTES } from "@/routes/config"
 import type { Gate, GateType, DeviceType } from "@/lib/gate-types"
 import { GATE_TYPES, DEVICE_TYPES } from "@/lib/gate-types"
-import { loadGates, saveGates, loadZones, ensureDefaultZones } from "@/lib/gate-storage"
+import { loadGates, saveGates, ensureDefaultZones } from "@/lib/gate-storage"
 
 function generateGateId(): string {
   return `gate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`

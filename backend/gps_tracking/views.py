@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from math import asin, cos, radians, sin, sqrt
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -20,6 +20,8 @@ HISTORY_KEEP_DAYS = 45
 MAX_HISTORY_POINTS = 800
 MOVING_SPEED_KMH = 1.5
 MOVING_DISTANCE_M = 25
+# recordedAt may be at most this far ahead of the server clock (then it is pinned to now).
+MAX_FUTURE_SKEW_SEC = 5 * 60
 
 
 def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -142,6 +144,30 @@ def _user_location(user) -> str:
     return (getattr(user, "location", None) or "").strip()
 
 
+class _DuplicatePing(Exception):
+    """Raised inside the ping transaction to roll it back and answer "duplicate"."""
+
+
+def _get_or_create_latest(user, *, defaults: dict):
+    """get_or_create of the one-per-officer row; survives two first requests racing."""
+    try:
+        return OfficerGpsLatest.objects.get_or_create(user=user, defaults=defaults)
+    except IntegrityError:
+        return OfficerGpsLatest.objects.get(user=user), False
+
+
+def _locked_latest(user, *, defaults: dict):
+    """The officer's OfficerGpsLatest row, locked (call inside a transaction); created when missing."""
+    row = OfficerGpsLatest.objects.select_for_update().filter(user=user).first()
+    if row is not None:
+        return row, False
+    try:
+        with transaction.atomic():
+            return OfficerGpsLatest.objects.create(user=user, **defaults), True
+    except IntegrityError:
+        return OfficerGpsLatest.objects.select_for_update().get(user=user), False
+
+
 class GpsMeAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -159,8 +185,8 @@ class GpsDutyAPIView(APIView):
             return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
         action = ser.validated_data["action"]
         now = timezone.now()
-        row, _created = OfficerGpsLatest.objects.get_or_create(
-            user=request.user,
+        row, _created = _get_or_create_latest(
+            request.user,
             defaults={
                 "latitude": 0,
                 "longitude": 0,
@@ -207,16 +233,13 @@ class GpsPingAPIView(APIView):
         from logs.enforcement import (
             DeviceRevoked,
             SessionRevoked,
-            remember_event_id,
             require_active_mobile_session,
             touch_gps,
         )
-        from logs.models import MobileAccessSession
+        from logs.models import MobileAccessSession, MobileEventReceipt
 
-        event_id = (data.get("event_id") or request.data.get("event_id") or "").strip() or None
-        if event_id and not remember_event_id(request.user, event_id, "gps"):
-            row = OfficerGpsLatest.objects.filter(user=request.user).first()
-            return Response({**me_payload(request.user, row), "duplicate": True})
+        raw_event = data.get("event_id") or request.data.get("event_id") or ""
+        event_id = str(raw_event).strip()[:64] or None
 
         session_id = (data.get("session_id") or "").strip() or None
         device_uuid = (data.get("device_uuid") or "").strip() or None
@@ -254,7 +277,17 @@ class GpsPingAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        recorded_at = data.get("recordedAt") or data.get("client_timestamp") or timezone.now()
+        server_now = timezone.now()
+        recorded_at = data.get("recordedAt") or data.get("client_timestamp") or server_now
+        # Phone clocks drift: a fix a little ahead is pinned to now; one far ahead is refused
+        # (it would show as "live" on the map for hours). Old fixes (offline queue) are kept.
+        if recorded_at > server_now + timedelta(seconds=MAX_FUTURE_SKEW_SEC):
+            return Response(
+                {"detail": "recordedAt is in the future. Check the date and time on the phone."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if recorded_at > server_now:
+            recorded_at = server_now
         battery = data.get("batteryPct")
         if battery is None:
             battery = data.get("battery_level")
@@ -266,67 +299,88 @@ class GpsPingAPIView(APIView):
             heading = data.get("heading")
         altitude = data.get("altitudeM")
         loc = _user_location(request.user)
-        server_now = timezone.now()
 
-        with transaction.atomic():
-            row, _created = OfficerGpsLatest.objects.select_for_update().get_or_create(
-                user=request.user,
-                defaults={
-                    "latitude": lat,
-                    "longitude": lng,
-                    "recorded_at": recorded_at,
-                    "on_duty": True,
-                    "duty_started_at": recorded_at,
-                    "location": loc,
-                },
-            )
-            if not row.on_duty:
-                row.on_duty = True
-                if not row.duty_started_at:
-                    row.duty_started_at = timezone.now()
-            row.latitude = lat
-            row.longitude = lng
-            row.accuracy_m = accuracy
-            row.speed_kmh = speed
-            row.heading_deg = heading
-            row.altitude_m = altitude
-            row.recorded_at = recorded_at
-            row.battery_pct = battery
-            row.location = loc
-            row.save(
-                update_fields=[
-                    "latitude",
-                    "longitude",
-                    "accuracy_m",
-                    "speed_kmh",
-                    "heading_deg",
-                    "altitude_m",
-                    "recorded_at",
-                    "battery_pct",
-                    "location",
-                    "on_duty",
-                    "duty_started_at",
-                    "updated_at",
-                ]
-            )
-            OfficerGpsHistory.objects.create(
-                user=request.user,
-                latitude=lat,
-                longitude=lng,
-                accuracy_m=accuracy,
-                speed_kmh=speed,
-                heading_deg=heading,
-                altitude_m=altitude,
-                recorded_at=recorded_at,
-                battery_pct=battery,
-                event_id=event_id,
-                device_uuid=device_uuid or "",
-                session_id=session_id or (session.session_id if session else ""),
-                client_timestamp=data.get("client_timestamp") or recorded_at,
-                server_timestamp=server_now,
-            )
-            cutoff = timezone.now() - timedelta(days=HISTORY_KEEP_DAYS)
-            OfficerGpsHistory.objects.filter(user=request.user, recorded_at__lt=cutoff).delete()
+        try:
+            with transaction.atomic():
+                # Receipt only after every check passed, in the same transaction as the write:
+                # a refused or failed ping can be sent again with the same event_id.
+                if event_id:
+                    receipt, fresh = MobileEventReceipt.objects.get_or_create(
+                        event_id=event_id, defaults={"event_type": "gps", "user": request.user}
+                    )
+                    if not fresh:
+                        if receipt.user_id != request.user.pk:
+                            return Response(
+                                {"detail": "event_id is already used by another account."},
+                                status=status.HTTP_409_CONFLICT,
+                            )
+                        raise _DuplicatePing()
+
+                row, created = _locked_latest(
+                    request.user,
+                    defaults={
+                        "latitude": lat,
+                        "longitude": lng,
+                        "recorded_at": recorded_at,
+                        "on_duty": True,
+                        "duty_started_at": recorded_at,
+                        "location": loc,
+                    },
+                )
+                if not row.on_duty:
+                    row.on_duty = True
+                    if not row.duty_started_at:
+                        row.duty_started_at = server_now
+                row.location = loc
+                update_fields = ["location", "on_duty", "duty_started_at", "updated_at"]
+                has_fix = not (row.latitude == 0 and row.longitude == 0)
+                # A late (queued) fix goes into the trail but never moves the live marker back.
+                if created or not has_fix or row.recorded_at is None or recorded_at >= row.recorded_at:
+                    row.latitude = lat
+                    row.longitude = lng
+                    row.accuracy_m = accuracy
+                    row.speed_kmh = speed
+                    row.heading_deg = heading
+                    row.altitude_m = altitude
+                    row.recorded_at = recorded_at
+                    row.battery_pct = battery
+                    update_fields += [
+                        "latitude",
+                        "longitude",
+                        "accuracy_m",
+                        "speed_kmh",
+                        "heading_deg",
+                        "altitude_m",
+                        "recorded_at",
+                        "battery_pct",
+                    ]
+                row.save(update_fields=update_fields)
+                try:
+                    with transaction.atomic():
+                        OfficerGpsHistory.objects.create(
+                            user=request.user,
+                            latitude=lat,
+                            longitude=lng,
+                            accuracy_m=accuracy,
+                            speed_kmh=speed,
+                            heading_deg=heading,
+                            altitude_m=altitude,
+                            recorded_at=recorded_at,
+                            battery_pct=battery,
+                            event_id=event_id,
+                            device_uuid=device_uuid or "",
+                            session_id=session_id or (session.session_id if session else ""),
+                            client_timestamp=data.get("client_timestamp") or recorded_at,
+                            server_timestamp=server_now,
+                        )
+                except IntegrityError:
+                    # event_id already in the trail (sent before receipts existed): roll back.
+                    raise _DuplicatePing()
+                cutoff = timezone.now() - timedelta(days=HISTORY_KEEP_DAYS)
+                OfficerGpsHistory.objects.filter(user=request.user, recorded_at__lt=cutoff).delete()
+        except _DuplicatePing:
+            row = OfficerGpsLatest.objects.filter(user=request.user).first()
+            return Response({**me_payload(request.user, row), "duplicate": True})
 
         if session:
             touch_gps(session, lat, lng, accuracy, battery)
@@ -511,9 +565,11 @@ class GpsHistoryAPIView(APIView):
                     }
 
         # Resolve street/area names once for the report (cached after first hit).
+        # Only a few uncached points are looked up per request (GPS_GEOCODE_MAX_FETCH); the
+        # rest fill in on later views as the cache warms. The "closest" point goes first.
         to_name = list(payload)
         if closest is not None:
-            to_name.append(closest)
+            to_name.insert(0, closest)
         _attach_location_names(to_name)
 
         return Response(

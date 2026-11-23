@@ -320,6 +320,7 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
 
   useEffect(() => {
     if (!showAllCitiesToggle || !isAuthenticated()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear the server list when the feature becomes unavailable
       setConnectedServers([])
       return
     }

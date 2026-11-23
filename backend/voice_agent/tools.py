@@ -18,7 +18,7 @@ from datetime import timedelta
 from typing import Any, Callable
 
 from django.contrib.postgres.search import TrigramWordSimilarity
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.db.models.functions import Greatest
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -510,11 +510,21 @@ def person_journey(ctx: ToolContext, args: dict) -> dict:
         match |= Q(uuid=uuid.UUID(key))
     except ValueError:
         pass
-    person = JourneyPerson.objects.filter(match).first()
+    people = JourneyPerson.objects.filter(match)
+    scoped = bool(policy.location_scope(ctx.user))
+    if scoped:
+        # Only people seen on this officer's cameras (last seen here, or with an event here).
+        seen_here = JourneyEvent.objects.filter(
+            policy.camera_scope_q(ctx.user, prefix="camera__"), journey_person=OuterRef("pk")
+        )
+        people = people.annotate(_seen_here=Exists(seen_here)).filter(
+            policy.camera_scope_q(ctx.user, prefix="latest_camera__") | Q(_seen_here=True)
+        )
+    person = people.first()
     if person is None:
-        raise ToolError(f"No person with code '{key}'. Use search_people first.")
+        raise ToolError(f"No person with code '{key}' in your authorised location. Use search_people first.")
     events = JourneyEvent.objects.filter(journey_person=person).select_related("camera")
-    if policy.location_scope(ctx.user):
+    if scoped:
         events = events.filter(policy.camera_scope_q(ctx.user, prefix="camera__"))
     start = _parse_time(args.get("start_time", ""))
     if start:
@@ -610,9 +620,13 @@ def create_incident(ctx: ToolContext, args: dict) -> dict:
     camera = None
     event = None
     if args.get("detection_event_id"):
+        try:
+            event_pk = int(str(args["detection_event_id"]).strip())
+        except (TypeError, ValueError) as exc:
+            raise ToolError("detection_event_id must be a number returned by a search tool.") from exc
         event = (
             DetectionEvent.objects.select_related("camera")
-            .filter(policy.camera_scope_q(ctx.user, prefix="camera__"), pk=args["detection_event_id"])
+            .filter(policy.camera_scope_q(ctx.user, prefix="camera__"), pk=event_pk)
             .first()
         )
         if event is None:

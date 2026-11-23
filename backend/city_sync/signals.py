@@ -6,6 +6,9 @@ import logging
 
 from django.apps import apps
 from django.conf import settings
+from django.db import router, transaction
+from django.db.models import F, Value
+from django.db.models.functions import Greatest
 from django.db.models.signals import post_delete, post_save, pre_delete, pre_save
 
 from city_sync.identity import location_code
@@ -16,6 +19,7 @@ from city_sync.syncable import (
     SYNCED_ENTITY_TYPES,
     entity_type_for_model,
     media_field_path,
+    media_url_to_path,
     new_entity_id,
 )
 
@@ -44,20 +48,62 @@ def _pre_save(sender, instance, **kwargs):
         else:
             instance.entity_id = new_entity_id()
 
-    if instance.pk:
-        try:
-            old = sender.objects.filter(pk=instance.pk).values("version").first()
-        except Exception:  # noqa: BLE001
-            old = None
-        if old is not None:
-            prev = int(old.get("version") or 0)
-            current = int(getattr(instance, "version", 1) or 1)
-            if current <= prev:
-                instance.version = prev + 1
-        elif not getattr(instance, "version", None):
-            instance.version = 1
-    elif not getattr(instance, "version", None):
-        instance.version = 1
+    _reserve_version(sender, instance, entity_type)
+
+
+def _media_name(value) -> str:
+    """Same normalisation as syncable.media_field_path, for a raw DB value."""
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return media_url_to_path(value)
+    return getattr(value, "name", "") or ""
+
+
+def _reserve_version(sender, instance, entity_type: str) -> None:
+    """
+    Give this save the next version, atomically.
+
+    The old read-then-write let two concurrent saves both pick prev+1 (two different
+    payloads with one version -> conflict at HQ). Here one UPDATE bumps the stored version
+    and the new value is read back inside the same (savepoint) transaction, so the row
+    lock serialises concurrent writers and each save gets a distinct version. The stored
+    version is also correct when the caller's save(update_fields=...) omits "version".
+    Also remembers the stored media file names so post_save only re-uploads changed files.
+    """
+    current = int(getattr(instance, "version", 1) or 1)
+    instance._city_sync_old_media = None
+    pk = getattr(instance, "pk", None)
+    if pk is None:
+        instance.version = current if current >= 1 else 1
+        return
+    media_fields = [
+        f for f in (SYNC_MEDIA_FIELDS.get(entity_type) or []) if _has_concrete_field(sender, f)
+    ]
+    try:
+        with transaction.atomic(using=router.db_for_write(sender, instance=instance)):
+            manager = sender._base_manager
+            bumped = manager.filter(pk=pk).update(
+                version=Greatest(F("version") + 1, Value(current))
+            )
+            if not bumped:
+                instance.version = current if current >= 1 else 1
+                return
+            row = manager.filter(pk=pk).values("version", *media_fields).first()
+    except Exception:  # noqa: BLE001 - never block the business write on the sync bump
+        logger.exception("Could not reserve a sync version for %s pk=%s", entity_type, pk)
+        return
+    if row is None:
+        return
+    instance.version = int(row.pop("version") or current)
+    instance._city_sync_old_media = {k: _media_name(v) for k, v in row.items()}
+
+
+def _has_concrete_field(model, name: str) -> bool:
+    try:
+        return model._meta.get_field(name).concrete
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _post_save(sender, instance, created, **kwargs):
@@ -85,16 +131,21 @@ def _post_save(sender, instance, created, **kwargs):
             if entity_type in EVIDENCE_ENTITY_TYPES
             else MediaQueue.PRIORITY_ROUTINE
         )
+        old_media = getattr(instance, "_city_sync_old_media", None) or {}
         for fname in fields:
             name = media_field_path(instance, fname)
-            if name:
-                enqueue_media_file(
-                    absolute_or_media_path=name,
-                    record_entity_type=entity_type,
-                    record_entity_id=instance.entity_id,
-                    priority=priority,
-                    wait_outbox_done=True,
-                )
+            if not name:
+                continue
+            # Only a new or replaced file is uploaded; saving other fields does not re-hash it.
+            if not created and fname in old_media and old_media[fname] == name:
+                continue
+            enqueue_media_file(
+                absolute_or_media_path=name,
+                record_entity_type=entity_type,
+                record_entity_id=instance.entity_id,
+                priority=priority,
+                wait_outbox_done=True,
+            )
     except Exception:  # noqa: BLE001
         logger.exception("Media enqueue failed for %s pk=%s", entity_type, instance.pk)
 
@@ -186,5 +237,11 @@ def _connect_downlink() -> None:
 
 try:
     connect_signals()
-except Exception:  # noqa: BLE001
-    logger.debug("city_sync signals deferred", exc_info=True)
+except Exception as _exc:  # noqa: BLE001
+    from django.core.exceptions import AppRegistryNotReady
+
+    if isinstance(_exc, AppRegistryNotReady):
+        # Imported before the app registry is ready; CitySyncConfig.ready() connects them.
+        logger.debug("city_sync signals deferred", exc_info=True)
+    else:
+        logger.error("city_sync signals could not be connected at import", exc_info=True)

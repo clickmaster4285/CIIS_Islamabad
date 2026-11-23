@@ -169,6 +169,17 @@ class ObjectVisit(models.Model):
         self.duration_seconds = max(0.0, (end - start).total_seconds()) if start else 0.0
 
 
+class ObjectCodeCounter(models.Model):
+    """Last number handed out per code prefix (GP / GV / GO), so a new code costs one locked
+    row instead of scanning every GlobalObject code."""
+
+    prefix = models.CharField(max_length=8, primary_key=True)
+    value = models.PositiveBigIntegerField(default=0)
+
+    def __str__(self) -> str:
+        return f"{self.prefix}{self.value}"
+
+
 class MotionClip(models.Model):
     """Video recorded by the ML service while objects moved on one camera (pre-roll + motion)."""
 

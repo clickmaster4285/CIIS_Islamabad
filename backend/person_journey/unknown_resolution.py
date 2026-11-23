@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 
 from .matching import find_best_match
@@ -15,6 +19,8 @@ _BBOX_IOU_THRESHOLD = 0.22
 _BBOX_CENTER_THRESHOLD = 0.55
 _BBOX_MATCH_SECONDS = 900
 _TRACK_MATCH_MINUTES = 20
+
+logger = logging.getLogger(__name__)
 
 
 def bbox_iou(a: list, b: list) -> float:
@@ -67,10 +73,13 @@ def journey_pipeline_handles_unknowns() -> bool:
     return bool(getattr(settings, "PERSON_JOURNEY_WORKER_ENABLED", False))
 
 
-def journey_pipeline_active() -> bool:
-    """True only when ML journey pipelines are actually ingesting tracks (not merely reachable)."""
-    if not journey_pipeline_handles_unknowns():
-        return False
+_PIPELINE_TTL_SECONDS = 30.0
+_pipeline_lock = threading.Lock()
+_pipeline_state: dict = {"value": None, "at": 0.0, "refreshing": False}
+
+
+def _probe_journey_pipeline() -> bool:
+    """One HTTP call to the ML node: are journey pipelines running and posting to us?"""
     try:
         from ml.client import _request, ml_service_enabled
 
@@ -85,6 +94,40 @@ def journey_pipeline_active() -> bool:
         return pipelines > 0 and bool(ingest_url)
     except Exception:
         return False
+
+
+def _refresh_pipeline_state() -> bool:
+    value = _probe_journey_pipeline()
+    with _pipeline_lock:
+        _pipeline_state.update(value=value, at=time.monotonic(), refreshing=False)
+    return value
+
+
+def journey_pipeline_active(*, allow_blocking: bool | None = None) -> bool:
+    """
+    True only when ML journey pipelines are actually ingesting tracks (not merely reachable).
+
+    Cached for 30 s per process. The HTTP probe never runs inside a DB transaction (signal handlers,
+    atomic ingest): there a stale or missing value is used and the refresh happens on a background thread.
+    """
+    if not journey_pipeline_handles_unknowns():
+        return False
+    now = time.monotonic()
+    with _pipeline_lock:
+        value = _pipeline_state["value"]
+        fresh = value is not None and now - _pipeline_state["at"] < _PIPELINE_TTL_SECONDS
+        if fresh:
+            return bool(value)
+        if allow_blocking is None:
+            allow_blocking = not connection.in_atomic_block
+        start_background = not allow_blocking and not _pipeline_state["refreshing"]
+        if start_background:
+            _pipeline_state["refreshing"] = True
+    if allow_blocking:
+        return _refresh_pipeline_state()
+    if start_background:
+        threading.Thread(target=_refresh_pipeline_state, name="journey-pipeline-probe", daemon=True).start()
+    return bool(value)
 
 
 def live_ingest_unknowns_enabled() -> bool:
@@ -103,7 +146,7 @@ def generic_unknown_handled_elsewhere() -> bool:
 
 
 def match_unknown_by_track(camera, track_id, now=None) -> JourneyPerson | None:
-    if not track_id or not camera:
+    if track_id is None or not camera:
         return None
     now = now or timezone.now()
     try:
@@ -118,6 +161,7 @@ def match_unknown_by_track(camera, track_id, now=None) -> JourneyPerson | None:
             status=TrackStatus.ACTIVE,
             journey_person__person_type=PersonType.UNKNOWN,
             journey_person__status=PersonStatus.ACTIVE,
+            journey_person__is_deleted=False,
         )
         .select_related("journey_person")
         .order_by("-started_at")
@@ -133,6 +177,7 @@ def match_unknown_by_track(camera, track_id, now=None) -> JourneyPerson | None:
             track_id=track_id,
             journey_person__person_type=PersonType.UNKNOWN,
             journey_person__status=PersonStatus.ACTIVE,
+            journey_person__is_deleted=False,
             started_at__gte=since,
         )
         .select_related("journey_person")
@@ -162,6 +207,7 @@ def match_unknown_by_bbox(
             status=TrackStatus.ACTIVE,
             journey_person__person_type=PersonType.UNKNOWN,
             journey_person__status=PersonStatus.ACTIVE,
+            journey_person__is_deleted=False,
             started_at__gte=since,
         )
         .select_related("journey_person")
@@ -175,6 +221,7 @@ def match_unknown_by_bbox(
         JourneyEvent.objects.filter(
             journey_person__person_type=PersonType.UNKNOWN,
             journey_person__status=PersonStatus.ACTIVE,
+            journey_person__is_deleted=False,
             camera=camera,
             created_at__gte=since,
         )
@@ -226,7 +273,7 @@ def resolve_unknown_person(
         )
 
     if matched:
-        if reid_embedding and not matched.reid_embedding:
+        if reid_embedding and not matched.reid_embedding and len(reid_embedding) == ml_reid_dim():
             matched.reid_embedding = reid_embedding
             matched.save(update_fields=["reid_embedding", "updated_at"])
         if face_embedding and not matched.face_embedding:
@@ -260,25 +307,39 @@ def resolve_unknown_person(
     return person, True
 
 
+def ml_reid_dim() -> int:
+    """Dimension of the ML pipeline's OSNet ReID vectors (what the identity gallery holds)."""
+    return int(getattr(settings, "JOURNEY_REID_DIM", 512))
+
+
+def backend_reid_compatible() -> bool:
+    """The backend's colour/edge descriptor only helps if it lives in the same space as the ML vectors."""
+    from .reid_utils import REID_DIM
+
+    return REID_DIM == ml_reid_dim()
+
+
 def update_person_embeddings_from_crop(person: JourneyPerson, crop_bytes: bytes) -> list[float]:
-    """Extract ReID from a person crop, store it, then merge cross-camera duplicates."""
+    """
+    Extract ReID from a person crop, store it, then merge cross-camera duplicates.
+
+    Only vectors of the ML dimension are stored: the backend descriptor (256-d) would overwrite the ML OSNet
+    vector (512-d) with something nothing else can compare against, and identify() then had nothing to match.
+    """
     from .reid_utils import extract_reid_embedding_from_bytes
 
-    reid = extract_reid_embedding_from_bytes(crop_bytes)
-    if not reid:
+    if not backend_reid_compatible():
         return []
-    if not person.reid_embedding:
-        person.reid_embedding = reid
-        person.save(update_fields=["reid_embedding", "updated_at"])
-    else:
-        # Refresh embedding periodically so matching stays current
-        person.reid_embedding = reid
-        person.save(update_fields=["reid_embedding", "updated_at"])
+    reid = extract_reid_embedding_from_bytes(crop_bytes)
+    if not reid or len(reid) != ml_reid_dim():
+        return []
+    person.reid_embedding = reid
+    person.save(update_fields=["reid_embedding", "updated_at"])
 
     try:
         from .services import try_merge_unknown_duplicates
 
         try_merge_unknown_duplicates(person)
     except Exception:
-        pass
+        logger.debug("Unknown duplicate merge failed for %s", person.pk, exc_info=True)
     return reid

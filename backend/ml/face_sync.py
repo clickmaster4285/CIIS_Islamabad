@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +106,10 @@ def _extract_embedding_for_path(path: str) -> dict[str, Any] | None:
 
 def _sync_primary_embedding_fields(staff: Staff, entries: list[dict[str, Any]], paths: list[str]) -> None:
     first = entries[0] if entries else None
-    Staff.objects.filter(pk=staff.pk).update(
+    from city_sync.outbox import sync_update
+
+    sync_update(
+        Staff.objects.filter(pk=staff.pk),
         face_embeddings=entries,
         face_embedding=(first or {}).get("embedding"),
         face_embedding_dim=int((first or {}).get("dim") or 0),
@@ -115,13 +119,41 @@ def _sync_primary_embedding_fields(staff: Staff, entries: list[dict[str, Any]], 
     )
 
 
+def _active_local_staff():
+    """Staff this server's ML should know: own location rows, not soft-deleted."""
+    return Staff.objects.filter(local_rows_q(), is_deleted=False)
+
+
+def unique_identity_label(staff: Staff) -> str:
+    """Disambiguated label for staff sharing a name: "Name (personal_number)" or "Name #pk"."""
+    name = (staff.face_identity_label or staff_identity_label(staff)).strip()
+    number = (staff.personal_number or "").strip()
+    if number:
+        return f"{name} ({number})"
+    return f"{name} #{staff.pk}"
+
+
 def collect_db_face_embeddings() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+    """Embeddings for the ML gallery. Each identity label maps to exactly one staff row.
+
+    Names stay as the label (UI / overlays unchanged); when two active staff share a label,
+    both are pushed as unique_identity_label() so a match can never resolve to the wrong person.
+    """
+    staff_rows: list[tuple[Staff, str]] = []
     # City copies at HQ (other location_code) never feed this server's ML matching.
-    for staff in Staff.objects.filter(local_rows_q()).iterator():
+    for staff in _active_local_staff().iterator():
         identity = (staff.face_identity_label or staff_identity_label(staff)).strip()
-        if not identity:
-            continue
+        if identity and staff_has_face_embedding(staff):
+            staff_rows.append((staff, identity))
+
+    counts: dict[str, int] = {}
+    for _staff, identity in staff_rows:
+        counts[identity.casefold()] = counts.get(identity.casefold(), 0) + 1
+
+    rows: list[dict[str, Any]] = []
+    for staff, identity in staff_rows:
+        if counts[identity.casefold()] > 1:
+            identity = unique_identity_label(staff)
 
         entries = getattr(staff, "face_embeddings", None)
         if isinstance(entries, list) and entries:
@@ -139,6 +171,48 @@ def collect_db_face_embeddings() -> list[dict[str, Any]]:
     return rows
 
 
+_SUFFIX_NUMBER_RE = re.compile(r"^(?P<name>.+?) \((?P<number>[^()]+)\)$")
+_SUFFIX_PK_RE = re.compile(r"^(?P<name>.+?) #(?P<pk>\d+)$")
+
+
+def _single(qs) -> Staff | None:
+    hits = list(qs.select_related("user")[:2])
+    return hits[0] if len(hits) == 1 else None
+
+
+def resolve_staff_for_face_label(label: str) -> Staff | None:
+    """Map an ML face label to one active local Staff row, or None when unknown/ambiguous.
+
+    Order: disambiguated label ("Name (number)" / "Name #pk") → face_identity_label →
+    full_name → username. A plain name shared by several staff resolves to None.
+    """
+    lbl = (label or "").strip()
+    if not lbl:
+        return None
+    base = _active_local_staff()
+
+    m = _SUFFIX_NUMBER_RE.match(lbl)
+    if m:
+        hit = _single(base.filter(personal_number__iexact=m.group("number").strip()))
+        if hit is not None:
+            return hit
+    m = _SUFFIX_PK_RE.match(lbl)
+    if m:
+        hit = base.filter(pk=int(m.group("pk"))).select_related("user").first()
+        if hit is not None:
+            return hit
+
+    for field in ("face_identity_label__iexact", "full_name__iexact", "user__username__iexact"):
+        qs = base.filter(**{field: lbl})
+        hits = list(qs.select_related("user")[:2])
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            logger.debug("Face label %r is ambiguous (%s) — not resolved", lbl, field)
+            return None
+    return None
+
+
 def push_face_embeddings_to_ml() -> dict[str, Any] | None:
     if not ml_service_enabled():
         return None
@@ -151,7 +225,9 @@ def refresh_staff_identity_label(staff: Staff) -> bool:
         return False
     if (staff.face_identity_label or "").strip() == identity:
         return False
-    Staff.objects.filter(pk=staff.pk).update(face_identity_label=identity)
+    from city_sync.outbox import sync_update
+
+    sync_update(Staff.objects.filter(pk=staff.pk), face_identity_label=identity)
     return True
 
 
@@ -213,7 +289,7 @@ def enroll_staff_face(staff: Staff, *, push_ml: bool = True, force: bool = False
 def enroll_missing_staff_faces(*, push_ml: bool = True) -> tuple[int, int]:
     enrolled = 0
     skipped = 0
-    for staff in Staff.objects.filter(local_rows_q()).select_related("user").iterator():
+    for staff in _active_local_staff().select_related("user").iterator():
         if not staff_needs_face_enrollment(staff):
             skipped += 1
             continue
@@ -234,7 +310,7 @@ def enroll_missing_staff_faces(*, push_ml: bool = True) -> tuple[int, int]:
 def enroll_all_staff_faces(*, push_ml: bool = True, force: bool = False) -> tuple[int, int]:
     enrolled = 0
     skipped = 0
-    for staff in Staff.objects.filter(local_rows_q()).select_related("user").iterator():
+    for staff in _active_local_staff().select_related("user").iterator():
         if not staff_photo_paths(staff):
             skipped += 1
             continue

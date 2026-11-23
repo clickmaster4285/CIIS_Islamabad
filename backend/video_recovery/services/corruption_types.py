@@ -82,7 +82,8 @@ CORRUPTION_CATALOG: list[dict[str, Any]] = [
         "key": "frozen_duplicate",
         "name": "Frozen/duplicate frames",
         "symptom": "Same image repeated",
-        "primary_technique": "interpolation",
+        # Static CCTV scenes legitimately repeat; such frames are flagged, never replaced.
+        "primary_technique": "flag_only",
     },
     {
         "id": 12,
@@ -225,20 +226,24 @@ def _has_block_artifacts(gray) -> bool:
 
 
 def mark_frozen_duplicate_frames(entries: list[dict[str, Any]], *, threshold: float = 2.0) -> list[dict[str, Any]]:
-    """Type 11 — detect consecutive near-duplicate frames and mark for interpolation."""
+    """Type 11 — flag consecutive near-duplicate frames.
+
+    The frame keeps its status, path and index: in a static CCTV scene identical frames are
+    real footage, so they are reported (frozen_duplicate=True) but never replaced.
+    """
     try:
         import cv2
         import numpy as np
     except ImportError:
         return entries
 
-    from .damage_map import MISSING
+    from .damage_map import MISSING, UNRECOVERABLE
 
     prev_img = None
     out: list[dict[str, Any]] = []
     for entry in entries:
         path = entry.get("path")
-        if not path or entry.get("status") == MISSING:
+        if not path or entry.get("status") in (MISSING, UNRECOVERABLE):
             out.append(entry)
             prev_img = None
             continue
@@ -249,15 +254,11 @@ def mark_frozen_duplicate_frames(entries: list[dict[str, Any]], *, threshold: fl
         if prev_img is not None and prev_img.shape == img.shape:
             diff = float(np.mean(cv2.absdiff(prev_img, img)))
             if diff < threshold:
-                out.append(
-                    {
-                        **entry,
-                        "status": MISSING,
-                        "corruption_type": "frozen_duplicate",
-                        "original_path": path,
-                        "path": None,
-                    }
-                )
+                flagged = {**entry, "frozen_duplicate": True}
+                if not flagged.get("corruption_type"):
+                    flagged["corruption_type"] = "frozen_duplicate"
+                out.append(flagged)
+                prev_img = img
                 continue
         out.append(entry)
         prev_img = img
@@ -367,11 +368,10 @@ def _technique_applied(
     if key == "undecodable_frames":
         return "recovery_then_regeneration"
     if key == "frozen_duplicate":
-        return "frame_interpolation"
-    if key in ("green_screen", "black_white", "block_pixel"):
-        return "ai_restoration"
-    if key == "blur_noise":
-        return "ai_restoration"
+        return "flagged_kept_original"
+    if key in ("green_screen", "black_white", "block_pixel", "blur_noise"):
+        # Decodable frames are only restored when explicitly enabled; otherwise flagged.
+        return "ai_restoration" if int(regen_stats.get("restored") or 0) > 0 else "flagged_kept_original"
     return catalog_entry(key).get("primary_technique", "recovery")
 
 

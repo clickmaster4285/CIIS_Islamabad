@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { Camera, FileText, X, Upload, Video, VideoOff, AlertCircle } from "lucide-react"
-import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { cn, getCameraErrorMessage, requestUserMedia } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
@@ -34,15 +33,6 @@ export interface AddStaffStep2DocumentsFormData {
 }
 
 type DocumentField = "cnicFront" | "cnicBack" | "appointmentLetter" | "additionalDocument"
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result ?? ""))
-    reader.onerror = () => reject(new Error("Failed to read file"))
-    reader.readAsDataURL(file)
-  })
-}
 
 function isImageDataUrl(s: string): boolean {
   return typeof s === "string" && s.startsWith("data:image/")
@@ -279,24 +269,6 @@ export function AddStaffStep2DocumentsUpload({
     stopCamera()
     setCameraFor(null)
     setCameraError(null)
-  }
-
-  const getFieldValue = (field: DocumentField): UploadValue => {
-    switch (field) {
-      case "cnicFront": return cnicFront
-      case "cnicBack": return cnicBack
-      case "appointmentLetter": return appointmentLetter
-      case "additionalDocument": return additionalDocument
-    }
-  }
-
-  const getInputRef = (field: DocumentField) => {
-    switch (field) {
-      case "cnicFront": return cnicFrontInputRef
-      case "cnicBack": return cnicBackInputRef
-      case "appointmentLetter": return appointmentLetterInputRef
-      case "additionalDocument": return additionalDocumentInputRef
-    }
   }
 
   const getFieldTitle = (field: DocumentField): string => {

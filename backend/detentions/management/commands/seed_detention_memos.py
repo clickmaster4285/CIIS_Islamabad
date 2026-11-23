@@ -1,6 +1,7 @@
 """Seed sample detention memos with multiple goods lines (and matching warehouse stock)."""
 
 from django.core.management.base import BaseCommand
+from detentions.management.seed_guard import add_guard_argument, check_seed_allowed
 from django.db import transaction
 
 from detentions.models import DetentionMemo, DetentionMemoGoodsLine
@@ -176,9 +177,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Create memos even if sample case numbers already exist.",
         )
+        add_guard_argument(parser)
 
     @transaction.atomic
     def handle(self, *args, **options):
+        check_seed_allowed(options)
         force = options["force"]
         created_memos = 0
         created_lines = 0

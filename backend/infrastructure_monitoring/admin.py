@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin
 
 from .models import (
@@ -18,8 +19,29 @@ class InfraSiteAdmin(admin.ModelAdmin):
     search_fields = ("code", "name")
 
 
+class InfraDeviceAdminForm(forms.ModelForm):
+    """Password is write-only here: never rendered back, blank keeps the stored one."""
+
+    password = forms.CharField(
+        required=False,
+        widget=forms.PasswordInput(render_value=False),
+        help_text="Leave blank to keep the current password.",
+    )
+
+    class Meta:
+        model = InfraDevice
+        fields = "__all__"
+
+    def clean_password(self):
+        value = self.cleaned_data.get("password") or ""
+        if not value and self.instance and self.instance.pk:
+            return self.instance.password
+        return value
+
+
 @admin.register(InfraDevice)
 class InfraDeviceAdmin(admin.ModelAdmin):
+    form = InfraDeviceAdminForm
     list_display = (
         "name",
         "device_type",

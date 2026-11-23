@@ -16,16 +16,13 @@ import {
     Zap,
     TrendingUp,
     TrendingDown,
-    Droplets,
     Wind,
     Bell,
     Search,
     ChevronDown,
-    Calendar,
     RefreshCw,
     BarChart3,
-    LineChart,
-    AlertCircle
+    LineChart
 } from 'lucide-react';
 
 interface ThermalAlert {
@@ -45,7 +42,7 @@ interface ThermalAlert {
     acknowledged: boolean;
     resolved: boolean;
     trend?: 'rising' | 'falling' | 'stable';
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
 }
 
 const ThermalAlerts: React.FC = () => {

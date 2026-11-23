@@ -186,6 +186,12 @@ def assign_camera_to_server(
 
 
 def preview_auto_distribute(*, site_id: int | None = None, location_code: str = "") -> dict:
+    """Balanced plan that keeps cameras where they already are when that server has room.
+
+    Each server's capacity is reduced by the cameras it already runs from outside this
+    scope (``assigned_count`` minus in-scope assignments), so the plan never overfills a
+    node that serves other sites. Only unassigned / orphaned / over-capacity cameras move.
+    """
     cameras = list(_active_cameras_qs(site_id=site_id, location_code=location_code))
     servers = list(_ml_servers_qs(site_id=site_id, location_code=location_code))
     if (site_id or location_code) and not servers:
@@ -197,12 +203,32 @@ def preview_auto_distribute(*, site_id: int | None = None, location_code: str = 
 
     n_servers = len(servers)
     n_cams = len(cameras)
+    server_ids = {s.id for s in servers}
+    in_scope_by_server: dict[int, int] = {s.id: 0 for s in servers}
+    for cam in cameras:
+        if cam.ml_server_id in in_scope_by_server:
+            in_scope_by_server[cam.ml_server_id] += 1
+
+    capacities: dict[int, int] = {}
+    for s in servers:
+        outside = max(0, int(getattr(s, "assigned_count", 0) or 0) - in_scope_by_server[s.id])
+        if s.max_cameras:
+            capacities[s.id] = max(0, int(s.max_cameras) - outside)
+        else:
+            capacities[s.id] = n_cams
+
     plan: dict[int, list[int]] = {s.id: [] for s in servers}
-    capacities = {
-        s.id: (int(s.max_cameras) if s.max_cameras else n_cams) for s in servers
-    }
-    cam_ids = [c.id for c in cameras]
-    for cam_id in cam_ids:
+    to_place: list[int] = []
+    # 1) keep current assignments that fit
+    for cam in cameras:
+        sid = cam.ml_server_id
+        if sid in server_ids and len(plan[sid]) < capacities[sid]:
+            plan[sid].append(cam.id)
+        else:
+            to_place.append(cam.id)
+
+    # 2) place the rest on the least-loaded server with room
+    for cam_id in to_place:
         candidates = sorted(
             servers,
             key=lambda s: (
@@ -221,9 +247,13 @@ def preview_auto_distribute(*, site_id: int | None = None, location_code: str = 
             s = min(servers, key=lambda x: (len(plan[x.id]), x.id))
             plan[s.id].append(cam_id)
 
+    current = {c.id: c.ml_server_id for c in cameras}
     recommended = []
+    moves = 0
     for s in servers:
         ids = plan[s.id]
+        moving = [cid for cid in ids if current.get(cid) != s.id]
+        moves += len(moving)
         recommended.append(
             {
                 "ml_server_id": s.id,
@@ -231,12 +261,17 @@ def preview_auto_distribute(*, site_id: int | None = None, location_code: str = 
                 "max_cameras": s.max_cameras,
                 "camera_count": len(ids),
                 "camera_ids": ids,
+                "moving_camera_ids": moving,
+                "existing_load_outside_scope": max(
+                    0, int(getattr(s, "assigned_count", 0) or 0) - in_scope_by_server[s.id]
+                ),
             }
         )
     return {
         "total_cameras": n_cams,
         "ml_server_count": n_servers,
         "strategy": "balanced_capacity",
+        "planned_moves": moves,
         "recommended": recommended,
     }
 
@@ -257,20 +292,29 @@ def apply_auto_distribute(
         allowed = {int(x) for x in camera_ids}
 
     moved = 0
+    unchanged = 0
     results = []
     warnings: list[str] = []
     for block in preview["recommended"]:
         server_id = block["ml_server_id"]
+        moving = set(block.get("moving_camera_ids") or [])
         for cam_id in block["camera_ids"]:
             if allowed is not None and cam_id not in allowed:
                 continue
+            if cam_id not in moving:
+                unchanged += 1  # already on this server: no re-route, no ML churn
+                continue
             try:
                 result = assign_camera_to_server(cam_id, server_id, enforce_capacity=False)
+                if result.get("previous_ml_server_id") == server_id:
+                    unchanged += 1
+                    continue
                 moved += 1
                 results.append(
                     {
                         "camera_id": cam_id,
                         "ml_server_id": server_id,
+                        "previous_ml_server_id": result.get("previous_ml_server_id"),
                         "routing": result.get("routing"),
                     }
                 )
@@ -284,6 +328,7 @@ def apply_auto_distribute(
         **preview,
         "applied": True,
         "moved": moved,
+        "unchanged": unchanged,
         "results": results,
         "warnings": warnings,
     }

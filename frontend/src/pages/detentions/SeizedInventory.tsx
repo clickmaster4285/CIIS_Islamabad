@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Link } from "react-router-dom"
 import { Eye } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -12,7 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { ROUTES, getSeizedInventoryDetailPath } from "@/routes/config"
+import { getSeizedInventoryDetailPath } from "@/routes/config"
 
 const STORAGE_KEY = "wms_seized_inventory"
 
@@ -39,11 +39,7 @@ function loadRows(): SeizedItem[] {
 }
 
 export default function SeizedInventoryPage() {
-  const [rows, setRows] = useState<SeizedItem[]>([])
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
+  const [rows] = useState<SeizedItem[]>(() => loadRows())
 
   const formatSeizedDate = (d: string) => {
     if (!d) return "—"

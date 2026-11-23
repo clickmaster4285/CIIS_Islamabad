@@ -8,7 +8,7 @@
  */
 function resolveApiBaseUrl(): string {
   const raw = import.meta.env?.VITE_API_BASE_URL
-  let base =
+  const base =
     raw !== undefined && raw !== null ? String(raw).trim().replace(/\/$/, "") : ""
 
   if (typeof window === "undefined" || !base) return base

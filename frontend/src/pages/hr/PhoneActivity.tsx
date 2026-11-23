@@ -145,7 +145,6 @@ function RecordingPlayer({ rec }: { rec: CallRecordingRecord }) {
     return <span className="text-xs text-muted-foreground">No audio</span>
   }
   if (url) {
-    // eslint-disable-next-line jsx-a11y/media-has-caption
     return <audio src={url} controls autoPlay className="h-9 w-64 max-w-full" />
   }
   return (

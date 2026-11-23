@@ -48,7 +48,7 @@ class LeaveRequestTests(TestCase):
         return LeaveRequest.objects.get(entity_id=rid)
 
     def test_leave_type_matched_by_code(self):
-        sick = LeaveType.objects.create(name="Sick Leave", code="SICK")
+        sick, _ = LeaveType.objects.get_or_create(code="SICK", defaults={"name": "Sick Leave"})
         req = self._leave({"code": "sick", "name": "Sick"})
         self.assertEqual(req.leave_type_id, sick.pk)
         self.assertIsNone(req.approved_by_id)
@@ -200,7 +200,7 @@ class CameraDirectoryCityTests(TestCase):
         from city_sync.outbox import model_to_payload
 
         staff = Staff.objects.create(full_name="City staff")
-        leave_type = LeaveType.objects.create(name="Casual", code="CASUAL")
+        leave_type, _ = LeaveType.objects.get_or_create(code="CASUAL", defaults={"name": "Casual"})
         req = LeaveRequest.objects.create(
             staff=staff, leave_type=leave_type, from_date=date(2026, 10, 1), to_date=date(2026, 10, 1), days=1
         )

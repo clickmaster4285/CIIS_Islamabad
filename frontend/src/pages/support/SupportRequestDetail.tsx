@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import {
@@ -236,15 +236,18 @@ export default function SupportRequestDetail() {
   const [department, setDepartment] = useState("")
   const [assigneeId, setAssigneeId] = useState("")
   const [resolution, setResolution] = useState("")
-  const [verifyNotes, setVerifyNotes] = useState("")
+  const [verifyNotes] = useState("")
   const [clientNotes, setClientNotes] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [priorityOpen, setPriorityOpen] = useState(false)
   const [assignOpen, setAssignOpen] = useState(false)
   const [handleOpen, setHandleOpen] = useState(false)
 
-  useEffect(() => {
-    if (!ticket) return
+  // Re-seed the triage fields whenever a new ticket object arrives
+  // (adjust-state-during-render pattern instead of an effect).
+  const [syncedTicket, setSyncedTicket] = useState<typeof ticket>(undefined)
+  if (ticket && ticket !== syncedTicket) {
+    setSyncedTicket(ticket)
     setCategory(ticket.category || ticket.suggested_category || "")
     setPriority(ticket.priority || ticket.suggested_priority || "")
     setDepartment(
@@ -254,7 +257,7 @@ export default function SupportRequestDetail() {
           ? ticket.suggested_department
           : "SUPPORT"
     )
-  }, [ticket])
+  }
 
   const assignableQ = useQuery({
     queryKey: ["support", "assignable", department],

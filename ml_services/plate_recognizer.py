@@ -11,9 +11,10 @@ import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import cv2
 import numpy as np
@@ -279,17 +280,85 @@ _DATETIME_OCR_RE = re.compile(
 )
 
 
-def _strip_region_noise(key: str) -> str:
-    out = key
-    for token in _REGION_NOISE:
-        out = out.replace(token, "")
-    return out
+_REGION_SET = frozenset(_REGION_NOISE)
+# Long region names are never a plate series, so they may be stripped even when OCR glued them
+# onto the start/end of the plate ("PUNJABLEA1234"). Short ones (ICT, ISB, PAK, CITY) only as
+# whole tokens — "ISB123" and "ICT123" are different plates, not both "123".
+_REGION_LONG = tuple(sorted((t for t in _REGION_NOISE if len(t) >= 5), key=len, reverse=True))
 
 
-def looks_like_datetime_ocr(text: str) -> bool:
-    """True when OCR text is likely a camera timestamp / OSD, not a plate."""
+def _plausible_remainder(key: str) -> bool:
+    """A region word is only noise if what is left still looks like a plate (letters + digits)."""
+    return bool(re.search(r"[A-Z]", key)) and bool(re.search(r"\d", key))
+
+
+def _strip_region_noise(text: str) -> str:
+    """Remove city/region words at the START or END of the plate only (never mid-plate)."""
+    tokens = [plate_key(t) for t in clean_plate_text(text).split()]
+    tokens = [t for t in tokens if t]
+    while len(tokens) > 1 and tokens[0] in _REGION_SET and _plausible_remainder("".join(tokens[1:])):
+        tokens.pop(0)
+    while len(tokens) > 1 and tokens[-1] in _REGION_SET and _plausible_remainder("".join(tokens[:-1])):
+        tokens.pop()
+    key = "".join(tokens)
+    changed = True
+    while changed:
+        changed = False
+        for word in _REGION_LONG:
+            if key.startswith(word) and _plausible_remainder(key[len(word):]):
+                key, changed = key[len(word):], True
+            elif key.endswith(word) and _plausible_remainder(key[: -len(word)]):
+                key, changed = key[: -len(word)], True
+    return key
+
+
+_DATE_TOKEN_RE = re.compile(
+    r"^("
+    r"(19|20)\d{2}|"  # year
+    r"\d{1,2}|"  # day / hour / minute fragment
+    r"\d{1,2}[:.]\d{2}([:.]\d{2})?|"  # HH:MM(:SS)
+    r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|"  # dd-mm-yyyy
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|"  # yyyy-mm-dd
+    r"AM|PM"
+    r")$",
+    re.IGNORECASE,
+)
+_DATE_ANCHOR_RE = re.compile(r"^((19|20)\d{2}|\d{1,2}[:.]\d{2}([:.]\d{2})?|.*[-/].*)$")
+
+
+def _whole_text_is_datetime(raw: str) -> bool:
+    """True only when EVERY token is a date/time piece (e.g. "TUE 23 NOV 2026", "05082026")."""
+    key = plate_key(raw)
+    if key.isdigit() and len(key) >= 6:
+        return True
+    tokens = [t for t in re.split(r"\s+", raw.upper().strip()) if t]
+    if not tokens:
+        return False
+    anchored = False
+    for tok in tokens:
+        if tok in _OSD_DATE_TOKENS:
+            anchored = True
+            continue
+        if not _DATE_TOKEN_RE.match(tok):
+            return False
+        if _DATE_ANCHOR_RE.match(tok):
+            anchored = True
+    return anchored
+
+
+def looks_like_datetime_ocr(text: str, *, from_osd_band: bool = False) -> bool:
+    """True when OCR text is likely a camera timestamp / OSD, not a plate.
+
+    Outside the OSD band only text that is *entirely* a date/time is rejected, so real plate
+    series such as "MAR 123" / "SUN 4567" / "LEA 2019" survive. Text known to come from the OSD
+    band (``from_osd_band=True``) gets the aggressive substring / weekday-prefix rules.
+    """
     raw = str(text or "").strip()
     if not raw:
+        return False
+    if _whole_text_is_datetime(raw):
+        return True
+    if not from_osd_band:
         return False
     if _DATETIME_OCR_RE.search(raw):
         return True
@@ -300,9 +369,6 @@ def looks_like_datetime_ocr(text: str) -> bool:
     for token in _OSD_DATE_TOKENS:
         if key.startswith(token) and re.search(r"\d", key[len(token) :]):
             return True
-    # Pure digit clocks / dates after cleanup (e.g. 05082026)
-    if key.isdigit() and len(key) >= 6:
-        return True
     return False
 
 
@@ -336,8 +402,8 @@ def bbox_in_osd_band(
 
 
 def canonicalize_plate(text: str) -> str:
-    """Normalize plate text: A-Z0-9 only, strip common city/region OCR noise."""
-    return _strip_region_noise(plate_key(text))
+    """Normalize plate text: A-Z0-9 only, strip city/region words at the start/end."""
+    return _strip_region_noise(str(text or ""))
 
 
 def format_plate_display(text: str) -> str:
@@ -351,8 +417,10 @@ def format_plate_display(text: str) -> str:
     return clean_plate_text(text)
 
 
-def is_valid_plate(text: str, min_len: int = 5, *, camera_key: str = "") -> bool:
-    if looks_like_datetime_ocr(text):
+def is_valid_plate(
+    text: str, min_len: int = 5, *, camera_key: str = "", from_osd_band: bool = False
+) -> bool:
+    if looks_like_datetime_ocr(text, from_osd_band=from_osd_band):
         return False
     if looks_like_camera_overlay(text, camera_key=camera_key):
         return False
@@ -364,7 +432,7 @@ def is_valid_plate(text: str, min_len: int = 5, *, camera_key: str = "") -> bool
     if not re.search(r"[A-Z0-9]", key):
         return False
     letters = re.sub(r"\d", "", key)
-    if letters in _OSD_DATE_TOKENS:
+    if from_osd_band and letters in _OSD_DATE_TOKENS:
         return False
     return True
 
@@ -582,6 +650,116 @@ def draw_plate_box(frame: np.ndarray, box: tuple[int, int, int, int], text: str,
     cv2.putText(frame, label, (x1 + 4, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
 
+class CsvLockTimeout(TimeoutError):
+    pass
+
+
+CSV_LOCK_TIMEOUT_SEC = _env_float("ML_PLATE_CSV_LOCK_TIMEOUT", 10.0)
+CSV_LOCK_STALE_SEC = _env_float("ML_PLATE_CSV_LOCK_STALE", 30.0)
+
+
+@contextmanager
+def captures_csv_lock(
+    target: Path | str,
+    *,
+    timeout: float | None = None,
+    stale_after: float | None = None,
+    poll: float = 0.05,
+) -> Iterator[Path]:
+    """Cross-process lock for captures.csv — same protocol as backend cameras.locks.exclusive_file_lock.
+
+    * lock file = "<target>.lock" next to the CSV ("captures.csv.lock");
+    * acquire = atomic create with O_CREAT | O_EXCL, then write "<pid> <unix_ts>";
+    * a lock file whose mtime is older than ``stale_after`` s is presumed dead: delete + retry;
+    * retry every ``poll`` s until ``timeout`` (then CsvLockTimeout);
+    * release = delete the lock file. Held only for one read-modify-write of the CSV.
+    """
+    timeout = CSV_LOCK_TIMEOUT_SEC if timeout is None else float(timeout)
+    stale_after = CSV_LOCK_STALE_SEC if stale_after is None else float(stale_after)
+    lock_path = Path(f"{target}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + max(0.1, timeout)
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            except OSError:
+                age = 0.0
+            if age > stale_after:
+                try:
+                    lock_path.unlink()
+                    print(f"[plate] Removed stale lock {lock_path} (age {age:.0f}s)")
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise CsvLockTimeout(f"Timed out after {timeout:.0f}s waiting for {lock_path}")
+            time.sleep(poll)
+            continue
+        except PermissionError:
+            # Windows: the holder is deleting the lock file right now.
+            if time.monotonic() >= deadline:
+                raise CsvLockTimeout(f"Timed out after {timeout:.0f}s waiting for {lock_path}")
+            time.sleep(poll)
+            continue
+        try:
+            os.write(fd, f"{os.getpid()} {int(time.time())}\n".encode("ascii"))
+        finally:
+            os.close(fd)
+        break
+    try:
+        yield lock_path
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+def write_csv_atomic(path: Path, rows: list[dict[str, Any]], *, replace_retry_sec: float = 2.0) -> None:
+    """Write rows to a temp file in the same folder, fsync, then os.replace() over the CSV.
+
+    Readers see either the old or the new file, never a truncated one. On Windows os.replace
+    fails while another process has the CSV open, so it is retried briefly; as a last resort
+    the file is rewritten in place (logged).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+            f.flush()
+            os.fsync(f.fileno())
+        deadline = time.monotonic() + max(0.0, replace_retry_sec)
+        while True:
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+        print(f"[plate] WARNING: could not atomically replace {path} (file busy) — writing in place")
+        with path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class PlateEngine:
     """YOLO plate detector + PaddleOCR PP-OCRv5 reader with media snapshot saving."""
 
@@ -685,13 +863,15 @@ class PlateEngine:
         cam = (camera_key or "").strip().lower()
         if not cam:
             return
-        stale = [
-            slot
-            for slot, visit in self._visits.items()
-            if str(visit.get("camera_key") or "").strip().lower() == cam
-        ]
-        for slot in stale:
-            self._visits.pop(slot, None)
+        # Same lock as save_snapshot: the visit dict must not change size while it iterates.
+        with self._save_lock:
+            stale = [
+                slot
+                for slot, visit in self._visits.items()
+                if str(visit.get("camera_key") or "").strip().lower() == cam
+            ]
+            for slot in stale:
+                self._visits.pop(slot, None)
 
     def ocr_plate(self, crop: np.ndarray) -> tuple[str, float]:
         if self.reader is None or crop is None or crop.size == 0:
@@ -840,31 +1020,32 @@ class PlateEngine:
         return restored
 
     def _write_csv_rows(self, rows: list[dict[str, Any]]) -> None:
-        path = self._captures_csv()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({field: row.get(field, "") for field in CSV_FIELDS})
+        write_csv_atomic(self._captures_csv(), rows)
 
     def _upsert_csv_row(self, record: dict[str, Any], *, match_plate_rel: str = "") -> None:
+        """Read-modify-write of captures.csv under the cross-process lock (see captures_csv_lock)."""
         path = self._captures_csv()
-        rows: list[dict[str, Any]] = []
-        if path.is_file():
-            with path.open("r", encoding="utf-8", newline="") as f:
-                rows = list(csv.DictReader(f))
-        target = (match_plate_rel or "").replace("\\", "/")
-        updated = False
-        if target:
-            for row in rows:
-                if str(row.get("plate_image") or "").replace("\\", "/") == target:
-                    row.update(record)
-                    updated = True
-                    break
-        if not updated:
-            rows.append(record)
-        self._write_csv_rows(rows)
+        try:
+            with captures_csv_lock(path):
+                rows: list[dict[str, Any]] = []
+                if path.is_file():
+                    with path.open("r", encoding="utf-8", newline="") as f:
+                        rows = list(csv.DictReader(f))
+                target = (match_plate_rel or "").replace("\\", "/")
+                updated = False
+                if target:
+                    for row in rows:
+                        if str(row.get("plate_image") or "").replace("\\", "/") == target:
+                            row.update(record)
+                            updated = True
+                            break
+                if not updated:
+                    rows.append(record)
+                write_csv_atomic(path, rows)
+        except CsvLockTimeout as exc:
+            # Skip this row rather than race the backend. The visit stays open in memory, so the
+            # next better read re-tries (and appends the row if it is still missing).
+            print(f"[plate] ERROR: {exc} — captures.csv row for {record.get('plate_number')} not written")
 
     def _visit_payload(self, visit: dict[str, Any]) -> dict[str, str]:
         plate_rel = str(visit.get("plate_rel") or "")
@@ -1033,7 +1214,7 @@ class PlateEngine:
                 bbox = (x1, y1, x2, y2)
                 if not bbox_is_plausible_plate(bbox, height, width):
                     continue
-                if self.osd_filter and bbox_in_osd_band(
+                in_osd_band = bbox_in_osd_band(
                     bbox,
                     height,
                     width,
@@ -1041,7 +1222,8 @@ class PlateEngine:
                     left_frac=self.osd_left,
                     right_frac=self.osd_right,
                     bottom_frac=self.osd_bottom,
-                ):
+                )
+                if self.osd_filter and in_osd_band:
                     continue
                 crop = frame[y1:y2, x1:x2]
                 if crop.size == 0:
@@ -1061,11 +1243,13 @@ class PlateEngine:
                     continue
 
                 plate_text, ocr_conf = self.ocr_plate(crop)
-                if looks_like_datetime_ocr(plate_text) or looks_like_camera_overlay(
+                if looks_like_datetime_ocr(plate_text, from_osd_band=in_osd_band) or looks_like_camera_overlay(
                     plate_text, camera_key=camera_key
                 ):
                     continue
-                if not is_valid_plate(plate_text, self.min_plate_len, camera_key=camera_key):
+                if not is_valid_plate(
+                    plate_text, self.min_plate_len, camera_key=camera_key, from_osd_band=in_osd_band
+                ):
                     continue
 
                 accepted = (

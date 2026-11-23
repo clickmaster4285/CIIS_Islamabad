@@ -207,9 +207,9 @@ def row_health(*, is_hq_row: bool, state: str, raw: dict, heartbeat_age: int | N
     if infra:
         if offline and not is_hq_row:
             infra_health = "Critical"
-        elif infra["total"] and infra["online"] == 0:
+        elif infra.get("total") and not infra.get("online"):
             infra_health = "Critical"
-        elif infra["issues"]:
+        elif infra.get("issues"):
             infra_health = "Degraded"
         else:
             infra_health = "Good"

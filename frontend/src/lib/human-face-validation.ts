@@ -217,7 +217,7 @@ function skinRatioInBox(
 
 function getFaceRegionPixels(
   img: HTMLImageElement,
-  face: ParsedFace
+  _face: ParsedFace
 ): Uint8ClampedArray | null {
   const canvas = document.createElement("canvas")
   canvas.width = img.naturalWidth || img.width

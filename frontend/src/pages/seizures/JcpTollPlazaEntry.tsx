@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { 
   Car, 
   Camera, 
@@ -9,26 +9,17 @@ import {
   MapPin, 
   AlertTriangle, 
   Clock, 
-  Filter,
   Search,
   Download,
-  ChevronDown,
   Eye,
   CheckCircle,
-  XCircle,
-  Gauge,
   TrendingUp,
-  Calendar,
-  Image as ImageIcon,
-  Shield,
   Ban,
   ZoomIn,
   Maximize2,
   Truck,
   Scale,
-  Ruler,
   Package,
-  FileText,
   ClipboardCheck
 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -38,11 +29,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Separator } from "@/components/ui/separator"
-import { Progress } from "@/components/ui/progress"
 import {
   Dialog,
   DialogContent,
@@ -197,9 +186,9 @@ interface ANPREntry {
   }
 }
 
+type OversizeDetails = NonNullable<ANPREntry["oversizeDetails"]>
+
 export default function JcpTollPlazaEntryPage() {
-  const [entries, setEntries] = useState<ANPREntry[]>([])
-  const [filteredEntries, setFilteredEntries] = useState<ANPREntry[]>([])
   const [showModal, setShowModal] = useState(false)
   const [selectedLocation, setSelectedLocation] = useState<string>("all")
   const [selectedStatus, setSelectedStatus] = useState<string>("all")
@@ -234,8 +223,8 @@ export default function JcpTollPlazaEntryPage() {
     cargoType: "General"
   })
 
-  // Initialize with realistic dummy records including oversize vehicles
-  useEffect(() => {
+  // Initialize with realistic dummy records including oversize vehicles (once on mount)
+  const [entries, setEntries] = useState<ANPREntry[]>(() => {
     // Create entries with varied data including oversize vehicles
     const initialEntries: ANPREntry[] = [
       {
@@ -602,15 +591,13 @@ export default function JcpTollPlazaEntryPage() {
 
     // Sort by timestamp (newest first)
     const sortedEntries = initialEntries.sort((a, b) => b.timestamp - a.timestamp)
-    
-    setEntries(sortedEntries)
-    setFilteredEntries(sortedEntries)
-    
+
     localStorage.setItem("anprEntries", JSON.stringify(sortedEntries))
-  }, [])
+    return sortedEntries
+  })
 
   // Apply filters
-  useEffect(() => {
+  const filteredEntries = useMemo(() => {
     let filtered = [...entries]
     
     if (selectedLocation !== 'all') {
@@ -658,7 +645,7 @@ export default function JcpTollPlazaEntryPage() {
       filtered = filtered.filter(e => e.isOversize === true && e.oversizeDetails?.examinationRequired === true)
     }
     
-    setFilteredEntries(filtered)
+    return filtered
   }, [entries, selectedLocation, selectedStatus, selectedOversizeFilter, searchTerm, dateRange, activeTab])
 
   // Save to localStorage whenever entries change
@@ -702,9 +689,9 @@ export default function JcpTollPlazaEntryPage() {
       location: formData.location,
       tollPlaza: formData.tollPlaza,
       lane: formData.lane,
-      status: formData.status as any,
+      status: formData.status as ANPREntry["status"],
       confidence: 99.5,
-      vehicleType: formData.vehicleType as any,
+      vehicleType: formData.vehicleType as ANPREntry["vehicleType"],
       vehicleColor: formData.vehicleColor,
       speed: parseInt(formData.speed),
       imageUrl: randomImage,
@@ -726,9 +713,9 @@ export default function JcpTollPlazaEntryPage() {
           dimensions: `${formData.oversizeLength || 16.0}m x ${formData.oversizeWidth || 2.8}m x ${formData.oversizeHeight || 4.0}m`,
           permitRequired: true,
           permitPresent: false,
-          customsRouting: formData.customsRouting as any,
+          customsRouting: formData.customsRouting as OversizeDetails["customsRouting"],
           examinationRequired: true,
-          cargoType: formData.cargoType as any
+          cargoType: formData.cargoType as OversizeDetails["cargoType"]
         }
       })
     }
@@ -768,7 +755,7 @@ export default function JcpTollPlazaEntryPage() {
             ...entry,
             oversizeDetails: {
               ...entry.oversizeDetails,
-              customsRouting: customsAction as any,
+              customsRouting: customsAction as OversizeDetails["customsRouting"],
               examinationRequired: customsAction !== 'Direct'
             }
           }
@@ -799,7 +786,7 @@ export default function JcpTollPlazaEntryPage() {
     }
   }
 
-  const getOversizeBadge = (oversizeDetails: any) => {
+  const getOversizeBadge = (oversizeDetails: OversizeDetails) => {
     const routingColors = {
       'Inspection': 'bg-orange-100 text-orange-800 border-orange-200',
       'Weighbridge': 'bg-blue-100 text-blue-800 border-blue-200',

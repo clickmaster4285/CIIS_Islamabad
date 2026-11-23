@@ -38,12 +38,16 @@ def camera_matches_entry(
     stream_key: str,
     camera_id: int | None,
     code: str,
+    match_ids: bool = True,
 ) -> bool:
+    """``match_ids=False`` for ML-mode caches, whose ``id`` is only a list position."""
     if stream_key and (cam.get("ml_stream_key") or cam.get("code") or "") == stream_key:
         return True
-    if camera_id is not None and cam.get("id") == camera_id:
-        return True
     if code and (cam.get("code") or "") == code:
+        return True
+    if not match_ids:
+        return False
+    if camera_id is not None and cam.get("id") == camera_id:
         return True
     if stream_key.startswith("cam-"):
         sid = stream_key[4:]
@@ -58,7 +62,10 @@ def prune_server_camera_cache(
     stream_key: str,
     camera_id: int | None,
     code: str,
+    match_ids: bool | None = None,
 ) -> list[dict]:
+    if match_ids is None:
+        match_ids = not server.is_ml_mode()
     cached = list(server.cached_cameras or [])
     if not cached:
         return cached
@@ -71,6 +78,7 @@ def prune_server_camera_cache(
             stream_key=stream_key,
             camera_id=camera_id,
             code=code,
+            match_ids=match_ids,
         )
     ]
     if len(pruned) != len(cached):

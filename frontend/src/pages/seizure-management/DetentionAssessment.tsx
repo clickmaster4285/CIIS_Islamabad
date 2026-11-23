@@ -142,8 +142,7 @@ export default function DetentionAssessmentPage() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE)
 
-  const load = () => {
-    setLoading(true)
+  const fetchData = () => {
     Promise.all([fetchDetentionMemos(), fetchAssessments()])
       .then(([m, a]) => {
         setMemos(m)
@@ -161,8 +160,14 @@ export default function DetentionAssessmentPage() {
       .finally(() => setLoading(false))
   }
 
+  const load = () => {
+    setLoading(true)
+    fetchData()
+  }
+
+  // `loading` starts true, so the initial fetch needs no setLoading(true).
   useEffect(() => {
-    load()
+    fetchData()
   }, [])
 
   const assessmentByMemoId = useMemo(() => {
@@ -200,13 +205,16 @@ export default function DetentionAssessmentPage() {
   )
   const pageSerial = (index: number) => (page - 1) * pageSize + index + 1
 
-  useEffect(() => {
-    setPage(1)
-  }, [search, pageSize])
-
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages)
-  }, [page, totalPages])
+  // Back to page 1 when the search or page size changes, and clamp the page to
+  // the available range (adjust state during render instead of effects).
+  const [pageResetKey, setPageResetKey] = useState({ search, pageSize })
+  if (pageResetKey.search !== search || pageResetKey.pageSize !== pageSize) {
+    setPageResetKey({ search, pageSize })
+    // Same outcome as the former reset+clamp effects (the clamp ran last).
+    setPage(page > totalPages ? totalPages : 1)
+  } else if (page > totalPages) {
+    setPage(totalPages)
+  }
 
   const stats = useMemo(() => {
     const assessed = memos.filter((m) => assessmentByMemoId.has(m.id)).length

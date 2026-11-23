@@ -1,7 +1,7 @@
 "use client"
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { Navigate, useNavigate } from "react-router-dom"
+import { Navigate } from "react-router-dom"
 import {
   Camera,
   ChevronLeft,
@@ -39,7 +39,6 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
-import { Switch } from "@/components/ui/switch"
 import {
   Select,
   SelectContent,
@@ -66,7 +65,6 @@ import {
   type WallDock,
   type WallWidgetId,
 } from "@/lib/custom-wall-layout"
-import { normalizeRole } from "@/lib/role-access"
 import { ROUTES } from "@/routes/config"
 import { WebRtcPlayer, type WebRtcPlayerHandle } from "@/components/cameras/webrtc-player"
 import {
@@ -633,12 +631,31 @@ const StreamTile = memo(function StreamTile({
     }
   }, [])
 
-  useEffect(() => {
+  // Give WebRTC another chance when the camera's streams change (adjust state during render).
+  const [webrtcKey, setWebrtcKey] = useState({
+    webrtc: camera.webrtc_stream_url,
+    view: camera.view_stream_url,
+    id: camera.id,
+    server: camera.server_id,
+  })
+  if (
+    webrtcKey.webrtc !== camera.webrtc_stream_url ||
+    webrtcKey.view !== camera.view_stream_url ||
+    webrtcKey.id !== camera.id ||
+    webrtcKey.server !== camera.server_id
+  ) {
+    setWebrtcKey({
+      webrtc: camera.webrtc_stream_url,
+      view: camera.view_stream_url,
+      id: camera.id,
+      server: camera.server_id,
+    })
     setWebrtcFailed(false)
-  }, [camera.webrtc_stream_url, camera.view_stream_url, camera.id, camera.server_id])
+  }
 
   useEffect(() => {
     if (liveEnabled) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resets frame state together with the timer/ref cleanup below when live view turns off
     setError(false)
     setHasFrame(false)
     hasFrameRef.current = false
@@ -655,6 +672,7 @@ const StreamTile = memo(function StreamTile({
 
   useEffect(() => {
     if (useWebrtc || useMjpeg || !liveEnabled || !tokenizedJpeg) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- drop the stale JPEG frame when the poll loop stops, so a restart does not show it
       if (!useMjpeg && !useWebrtc) setJpegSrc(null)
       return
     }
@@ -693,7 +711,6 @@ const StreamTile = memo(function StreamTile({
       }
     }
     // hasFrame intentionally omitted — avoid resetting the poll loop every frame
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useWebrtc, useMjpeg, liveEnabled, tokenizedJpeg, retry, camera.server_id, camera.id, camera.code])
 
   const exitFullscreen = useCallback(() => setIsFullscreen(false), [])
@@ -967,9 +984,7 @@ const StreamTile = memo(function StreamTile({
 })
 
 export default function AllCitiesCamerasPage() {
-  const navigate = useNavigate()
   const user = getStoredUser()
-  const role = normalizeRole(user?.role)
   const allowed = canViewAllCitiesCameras(user?.role)
 
   const [servers, setServers] = useState<ServerSummary[]>([])
@@ -980,7 +995,7 @@ export default function AllCitiesCamerasPage() {
   const [locationFilter, setLocationFilter] = useState<string>("all")
   const [selectedCameraKeys, setSelectedCameraKeys] = useState<string[]>([])
   const [selectionReady, setSelectionReady] = useState(false)
-  const [selectionSaving, setSelectionSaving] = useState(false)
+  const [, setSelectionSaving] = useState(false)
   const [layout, setLayout] = useState<GridLayout>("auto")
   const [gridPage, setGridPage] = useState(0)
   const [showTimestamp, setShowTimestamp] = useState(true)
@@ -1141,13 +1156,6 @@ export default function AllCitiesCamerasPage() {
       if (saveTimerRef.current != null) window.clearTimeout(saveTimerRef.current)
     }
   }, [allowed, cameras.length, selectedCameraKeys, selectionReady])
-
-  const handleAllCitiesToggle = (enabled: boolean) => {
-    setAllCitiesCamerasPreference(enabled)
-    if (!enabled) {
-      navigate(role === "IT_SUPERADMIN" ? ROUTES.OPS_CENTRAL : ROUTES.DASHBOARD)
-    }
-  }
 
   const applyWallDesign = useCallback((next: CustomWallDesign) => {
     setWallDesign(next)

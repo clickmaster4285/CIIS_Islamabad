@@ -36,7 +36,7 @@ export async function fetchActivityLogs(params?: {
     const res = await fetch(url, { headers: getAuthHeaders() })
     if (!res.ok) throw new Error("Failed to fetch activity logs")
     return res.json() as Promise<ActivityLogsResponse>
-  } catch (err) {
+  } catch {
     // Backend not connected / offline: return empty logs instead of crashing.
     return { count: 0, next: null, previous: null, results: [] }
   }

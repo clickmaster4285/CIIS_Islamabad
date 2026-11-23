@@ -63,13 +63,9 @@ function saveRows(rows: AllocationRow[]) {
 }
 
 export default function StorageAllocationPage() {
-  const [rows, setRows] = useState<AllocationRow[]>([])
+  const [rows, setRows] = useState<AllocationRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ ref: "", QR_Code: "", product: "", qty: 0, wh: "Peshawar", priority: "Normal" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

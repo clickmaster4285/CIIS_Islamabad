@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
+import re
+import uuid
+from pathlib import Path
+from typing import Any, Iterator
 from urllib.parse import urlencode
 
 import requests
@@ -12,10 +16,93 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
+# ——— Redaction: never let RTSP credentials, API keys or tokens reach logs / clients ———
+
+_URL_CREDENTIALS_RE = re.compile(r"(?P<scheme>\b[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<creds>[^/\s@'\"<>]+@)")
+_SENSITIVE_PARAM_RE = re.compile(
+    r"(?P<sep>[?&])(?P<name>key|api_key|apikey|token|rtsp_url|rtsp|password|passwd|pwd|pass|user|username|auth)="
+    r"(?P<value>[^&\s'\"<>]*)",
+    re.IGNORECASE,
+)
+# A URL-encoded rtsp://user:pass@ (rtsp%3A%2F%2Fuser%3Apass%40host)
+_ENCODED_CREDENTIALS_RE = re.compile(r"(%3A%2F%2F)[^%\s&'\"]+(%3A[^%\s&'\"]*)?%40", re.IGNORECASE)
+
+
+def redact(text: Any) -> str:
+    """Strip URL credentials and sensitive query values (key, token, rtsp_url, …) from text."""
+    out = str(text or "")
+    if not out:
+        return ""
+    out = _URL_CREDENTIALS_RE.sub(lambda m: f"{m.group('scheme')}***@", out)
+    out = _SENSITIVE_PARAM_RE.sub(lambda m: f"{m.group('sep')}{m.group('name')}=***", out)
+    out = _ENCODED_CREDENTIALS_RE.sub(r"\1***%40", out)
+    return out
+
+
+def redact_url(url: str) -> str:
+    """Log-safe URL: no credentials and no query string."""
+    text = redact(url)
+    return text.split("?", 1)[0]
+
+
 class MLServiceError(Exception):
+    """ML call failure. The message is always redacted (no RTSP credentials / keys)."""
+
     def __init__(self, message: str, status_code: int | None = None):
-        super().__init__(message)
+        super().__init__(redact(message))
         self.status_code = status_code
+
+
+_GENERIC_ERROR_MESSAGES = {
+    400: "The detection engine rejected the request.",
+    404: "The detection engine does not know this camera. Sync cameras and try again.",
+    409: "Camera is not assigned to an ML server. Assign it in Camera Distribution first.",
+    503: "Detection engine temporarily unavailable.",
+}
+
+
+_INPUT_ERROR_CODES = frozenset({400, 413, 415, 422})
+
+
+def public_error_message(exc: Exception) -> str:
+    """Short client-facing message; technical detail stays in the server log.
+
+    Input errors (bad image, no face, …) keep the ML node's own (redacted) explanation;
+    connectivity / server failures never expose hosts, URLs or stack text.
+    """
+    code = int(getattr(exc, "status_code", None) or 503)
+    if code in _INPUT_ERROR_CODES:
+        text = redact(exc)
+        if text and "://" not in text:
+            return text[:300]
+    return _GENERIC_ERROR_MESSAGES.get(code, "Detection engine request failed.")
+
+
+# ——— Auth (optional X-ML-API-Key, see ml_services ML_API_KEY) ———
+
+
+def ml_api_key() -> str:
+    return str(getattr(settings, "ML_API_KEY", "") or os.environ.get("ML_API_KEY", "") or "").strip()
+
+
+def ml_auth_headers() -> dict[str, str]:
+    """Headers for every backend → ML request (empty when no ML_API_KEY is configured)."""
+    key = ml_api_key()
+    return {"X-ML-API-Key": key} if key else {}
+
+
+def _auth_query() -> dict[str, str]:
+    """?key= for JPEG/MJPEG URLs fetched by plain requests.get / ffmpeg (no custom headers)."""
+    key = ml_api_key()
+    return {"key": key} if key else {}
+
+
+def _with_query(path: str, params: dict[str, str] | None = None) -> str:
+    merged = dict(params or {})
+    merged.update(_auth_query())
+    if not merged:
+        return path
+    return f"{path}?{urlencode(merged)}"
 
 
 def known_ml_base_urls() -> list[str]:
@@ -72,24 +159,148 @@ def _live_timeout() -> tuple[float, float]:
     return (3.0, min(float(_timeout()), 30.0))
 
 
-def _live_rtsp_params(rtsp_url: str | None) -> dict[str, str]:
-    url = (rtsp_url or "").strip()
-    if not url:
-        return {}
-    return {"rtsp_url": url}
+def _send(method: str, root: str, path: str, *, timeout, **kwargs) -> requests.Response:
+    url = f"{root}{path}"
+    headers = dict(kwargs.pop("headers", None) or {})
+    headers.update(ml_auth_headers())
+    try:
+        return requests.request(method, url, timeout=timeout, headers=headers, **kwargs)
+    except requests.RequestException as exc:
+        logger.debug("ML request %s %s failed: %s", method, redact_url(url), redact(exc))
+        raise MLServiceError(f"ML service unreachable at {redact_url(root)} ({exc})", 503) from exc
 
 
 def _request(method: str, path: str, *, timeout: float | tuple[float, float] | None = None, **kwargs) -> requests.Response:
-    url = f"{_base_url()}{path}"
     req_timeout = _timeout() if timeout is None else timeout
+    return _send(method, _base_url(), path, timeout=req_timeout, **kwargs)
+
+
+def _request_at(
+    base_url: str,
+    method: str,
+    path: str,
+    *,
+    timeout: float | tuple[float, float] | None = None,
+    **kwargs,
+) -> requests.Response:
+    root = (base_url or "").strip().rstrip("/")
+    if not root:
+        raise MLServiceError("ML base URL is empty.", 503)
+    req_timeout = _timeout() if timeout is None else timeout
+    return _send(method, root, path, timeout=req_timeout, **kwargs)
+
+
+# ——— Streaming multipart (large video uploads are never loaded into memory) ———
+
+
+class _MultipartStream:
+    """File-like multipart/form-data body. requests streams it via read() with a Content-Length."""
+
+    _CHUNK = 256 * 1024
+
+    def __init__(
+        self,
+        fields: list[tuple[str, str]] | None = None,
+        files: list[tuple[str, str, str | bytes, str]] | None = None,
+    ):
+        self.boundary = uuid.uuid4().hex
+        parts: list[bytes | Path] = []
+        for name, value in fields or []:
+            parts.append(
+                (
+                    f"--{self.boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                ).encode("utf-8")
+                + str(value).encode("utf-8")
+                + b"\r\n"
+            )
+        for name, filename, source, content_type in files or []:
+            parts.append(
+                (
+                    f"--{self.boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("utf-8")
+            )
+            parts.append(source if isinstance(source, bytes) else Path(source))
+            parts.append(b"\r\n")
+        parts.append(f"--{self.boundary}--\r\n".encode("utf-8"))
+        self._parts = parts
+        self._length = sum(len(p) if isinstance(p, bytes) else p.stat().st_size for p in parts)
+        self._index = 0
+        self._buffer = b""
+        self._fh = None
+
+    @property
+    def content_type(self) -> str:
+        return f"multipart/form-data; boundary={self.boundary}"
+
+    def __len__(self) -> int:
+        return self._length
+
+    def _fill(self, size: int) -> None:
+        while len(self._buffer) < size and self._index < len(self._parts):
+            part = self._parts[self._index]
+            if isinstance(part, bytes):
+                self._buffer += part
+                self._index += 1
+                continue
+            if self._fh is None:
+                self._fh = part.open("rb")
+            chunk = self._fh.read(max(size - len(self._buffer), self._CHUNK))
+            if chunk:
+                self._buffer += chunk
+            else:
+                self._fh.close()
+                self._fh = None
+                self._index += 1
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = self._length
+        self._fill(size)
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            chunk = self.read(self._CHUNK)
+            if not chunk:
+                return
+            yield chunk
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+
+
+def _post_multipart(
+    path: str,
+    *,
+    fields: list[tuple[str, str]] | None = None,
+    files: list[tuple[str, str, str | bytes, str]] | None = None,
+    params: dict[str, str] | None = None,
+    timeout: float | tuple[float, float] | None = None,
+) -> requests.Response:
+    body = _MultipartStream(fields=fields, files=files)
     try:
-        return requests.request(method, url, timeout=req_timeout, **kwargs)
-    except requests.RequestException as exc:
-        raise MLServiceError(
-            f"ML service unreachable at {_base_url()}. "
-            f"Start the ML server: cd ml_services && python api_server.py ({exc})",
-            503,
-        ) from exc
+        return _request(
+            "POST",
+            path,
+            data=body,
+            params=params,
+            headers={"Content-Type": body.content_type},
+            timeout=timeout,
+        )
+    finally:
+        body.close()
+
+
+# ——— Health / faces / single-image endpoints ———
 
 
 def ml_health() -> dict[str, Any]:
@@ -113,26 +324,18 @@ def ml_health_any() -> dict[str, Any]:
             return data
         except MLServiceError as exc:
             last_exc = exc
-            logger.debug("ML health failed at %s: %s", base, exc)
+            logger.debug("ML health failed at %s: %s", redact_url(base), exc)
     raise MLServiceError(
         f"No reachable ML service among {len(urls)} configured node(s). Last error: {last_exc}",
         getattr(last_exc, "status_code", None) or 503,
     ) from last_exc
 
 
-def ml_health_all() -> dict[str, Any]:
-    """Probe every known ML node (does not raise if some are down)."""
-    by_server: dict[str, Any] = {}
-    for base in known_ml_base_urls():
-        try:
-            by_server[base] = {"ok": True, **ml_health_at(base)}
-        except MLServiceError as exc:
-            by_server[base] = {"ok": False, "error": str(exc)}
-    return {
-        "ok_count": sum(1 for v in by_server.values() if v.get("ok")),
-        "total": len(by_server),
-        "by_server": by_server,
-    }
+def ml_health_at(base_url: str) -> dict[str, Any]:
+    res = _request_at(base_url, "GET", "/health", timeout=5.0)
+    if res.status_code != 200:
+        raise MLServiceError(f"ML health check failed ({res.status_code})", res.status_code)
+    return res.json()
 
 
 def ml_reload_faces(embeddings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -160,16 +363,16 @@ def ml_reload_faces_all(embeddings: list[dict[str, Any]] | None = None) -> dict[
                 by_server[base] = {
                     "ok": False,
                     "error": f"HTTP {res.status_code}",
-                    "detail": res.text[:200],
+                    "detail": redact(res.text[:200]),
                 }
-                logger.warning("[face-sync] reload/faces failed at %s (%s)", base, res.status_code)
+                logger.warning("[face-sync] reload/faces failed at %s (%s)", redact_url(base), res.status_code)
                 continue
             data = res.json() if res.content else {}
             by_server[base] = {"ok": True, **(data if isinstance(data, dict) else {"result": data})}
             ok += 1
         except MLServiceError as exc:
             by_server[base] = {"ok": False, "error": str(exc)}
-            logger.warning("[face-sync] reload/faces unreachable at %s: %s", base, exc)
+            logger.warning("[face-sync] reload/faces unreachable at %s: %s", redact_url(base), exc)
     if ok == 0:
         raise MLServiceError(
             f"Failed to reload faces on all {len(urls)} ML node(s).",
@@ -210,7 +413,7 @@ def ml_extract_face_embedding(file_bytes: bytes, filename: str = "face.jpg") -> 
             return res.json()
         except MLServiceError as exc:
             last_exc = exc
-            logger.debug("Face extract failed at %s: %s", base, exc)
+            logger.debug("Face extract failed at %s: %s", redact_url(base), exc)
     raise MLServiceError(
         f"Face embedding extraction failed on all ML nodes. Last error: {last_exc}",
         getattr(last_exc, "status_code", None) or 503,
@@ -223,12 +426,14 @@ def ml_detect_image(
     *,
     conf: float = 0.25,
     recognize_faces: bool = True,
+    timeout: float | tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     res = _request(
         "POST",
         "/detect/image",
         files={"image": (filename, file_bytes, "application/octet-stream")},
         params={"conf": conf, "recognize_faces": str(recognize_faces).lower()},
+        timeout=timeout,
     )
     if res.status_code != 200:
         detail = res.text[:300]
@@ -236,49 +441,24 @@ def ml_detect_image(
     return res.json()
 
 
-def ml_detect_plates(
-    file_bytes: bytes,
-    filename: str = "vehicle.jpg",
-    *,
-    conf: float | None = None,
-    save: bool = True,
-    camera_key: str = "",
-) -> dict[str, Any]:
-    """License plate detect + OCR. Saves under media/licence plates/ when save=True."""
-    params: dict[str, str] = {"save": str(bool(save)).lower()}
-    if conf is not None:
-        params["conf"] = str(conf)
-    if camera_key.strip():
-        params["camera_key"] = camera_key.strip()
+def ml_validate_human_face(file_bytes: bytes, filename: str = "face.jpg") -> dict[str, Any]:
     res = _request(
         "POST",
-        "/plates/detect",
-        files={"image": (filename, file_bytes, "application/octet-stream")},
-        params=params,
-    )
-    if res.status_code != 200:
-        detail = res.text[:300]
-        raise MLServiceError(f"Plate detection failed: {detail}", res.status_code)
-    return res.json()
-
-
-def ml_recognize_face(file_bytes: bytes, filename: str = "face.jpg") -> dict[str, Any]:
-    res = _request(
-        "POST",
-        "/recognize/face",
+        "/validate/human-face",
         files={"image": (filename, file_bytes, "application/octet-stream")},
     )
     if res.status_code != 200:
         detail = res.text[:300]
-        raise MLServiceError(f"Face recognition failed: {detail}", res.status_code)
+        raise MLServiceError(f"Face validation failed: {detail}", res.status_code)
     return res.json()
 
 
-def ml_live_status() -> dict[str, Any]:
-    res = _request("GET", "/live/status")
-    if res.status_code != 200:
-        raise MLServiceError(f"Live stream status failed ({res.status_code})", res.status_code)
-    return res.json()
+# ——— Per-camera live endpoints ———
+#
+# rtsp_url is never sent to the ML node: api_server._resolve_live_stream() rejects unregistered
+# keys (409) and LiveStreamManager.resolve_rtsp_url() ignores a client URL for registered keys,
+# so the query param only leaked NVR credentials into URLs and logs. Unknown cameras are
+# (re-)registered via POST /live/register/bulk (JSON body) — see ml.camera_sync.
 
 
 def camera_ml_base_url(camera) -> str:
@@ -308,20 +488,25 @@ def ml_live_detections_at(
     *,
     purpose: str = "",
     purposes: list[str] | None = None,
+    include_embeddings: bool = False,
 ) -> dict[str, Any]:
+    del rtsp_url  # never sent (see note above)
     key = (stream_key or "").strip()
-    params = dict(_live_rtsp_params(rtsp_url))
+    params: dict[str, str] = {}
     purpose_list = [str(p).strip() for p in (purposes or []) if str(p).strip()]
     if purpose_list:
         params["purposes"] = ",".join(purpose_list)
     primary = (purpose or "").strip()
     if primary:
         params["purpose"] = primary
+    if include_embeddings:
+        # ML strips face/ReID vectors from this endpoint unless asked (biometric data).
+        params["include_embeddings"] = "1"
     res = _request_at(
         base_url,
         "GET",
         f"/live/cam/{key}/detections",
-        params=params,
+        params=params or None,
         timeout=_live_timeout(),
     )
     if res.status_code != 200:
@@ -333,37 +518,21 @@ def ml_live_detections_at(
     return res.json()
 
 
-def ml_live_detections(
-    stream_key: str,
-    rtsp_url: str | None = None,
-    *,
-    purpose: str = "",
-    purposes: list[str] | None = None,
-) -> dict[str, Any]:
-    """Legacy: detections against global ML_SERVICE_URL. Prefer ml_live_detections_for_camera."""
-    return ml_live_detections_at(
-        _base_url(),
-        stream_key,
-        rtsp_url,
-        purpose=purpose,
-        purposes=purposes,
-    )
-
-
 def ml_live_detections_for_camera(
     camera,
     *,
     purpose: str = "",
     purposes: list[str] | None = None,
+    include_embeddings: bool = False,
 ) -> dict[str, Any]:
     """Poll detections only on the camera's assigned ML node."""
     base = require_camera_ml_url(camera)
     return ml_live_detections_at(
         base,
         camera.stream_key,
-        rtsp_url=camera.effective_stream_url(),
         purpose=purpose or camera.purpose,
         purposes=purposes if purposes is not None else camera.purpose_list(),
+        include_embeddings=include_embeddings,
     )
 
 
@@ -381,171 +550,47 @@ def ml_assigned_mjpeg_public_url(camera, *, kind: str = "live") -> str:
     return f"/api/ops/servers/{camera.ml_server_id}/mjpeg/?stream_key={key}&kind={kind_q}"
 
 
-def ml_live_mjpeg_url(stream_key: str, rtsp_url: str | None = None) -> str:
-    key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/mjpeg"
-    params = _live_rtsp_params(rtsp_url)
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
+# Server-side JPEG/MJPEG URLs. Callers fetch them with plain requests.get (some outside this app),
+# so the optional API key travels as ?key= — always log these through redact_url().
 
 
 def ml_live_mjpeg_url_for_camera(camera) -> str:
     """Absolute MJPEG URL on the assigned ML node (server-side fetch)."""
     base = require_camera_ml_url(camera)
-    key = camera.stream_key
-    params = _live_rtsp_params(camera.effective_stream_url())
-    path = f"{base}/live/cam/{key}/mjpeg"
-    if not params:
-        return path
-    return f"{path}?{urlencode(params)}"
-
-
-def ml_live_mjpeg_public_url(
-    stream_key: str,
-    *,
-    rtsp_url: str | None = None,
-    purpose: str = "",
-    purposes: list[str] | None = None,
-) -> str:
-    """Deprecated global /ml proxy path — prefer ml_assigned_mjpeg_public_url(camera)."""
-    key = (stream_key or "").strip()
-    if not key:
-        return ""
-    base = f"/ml/live/cam/{key}/mjpeg"
-    params: dict[str, str] = {}
-    url = (rtsp_url or "").strip()
-    if url:
-        params["rtsp_url"] = url
-    purpose_list = [str(p).strip() for p in (purposes or []) if str(p).strip()]
-    if purpose_list:
-        params["purposes"] = ",".join(purpose_list)
-    primary = (purpose or "").strip()
-    if primary:
-        params["purpose"] = primary
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
-
-
-def ml_live_mjpeg_raw_public_url(
-    stream_key: str,
-    *,
-    rtsp_url: str | None = None,
-    purpose: str = "",
-    purposes: list[str] | None = None,
-) -> str:
-    key = (stream_key or "").strip()
-    if not key:
-        return ""
-    base = f"/ml/live/cam/{key}/mjpeg/raw"
-    params: dict[str, str] = {}
-    url = (rtsp_url or "").strip()
-    if url:
-        params["rtsp_url"] = url
-    purpose_list = [str(p).strip() for p in (purposes or []) if str(p).strip()]
-    if purpose_list:
-        params["purposes"] = ",".join(purpose_list)
-    primary = (purpose or "").strip()
-    if primary:
-        params["purpose"] = primary
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
-
-
-def ml_live_mjpeg_raw_url(stream_key: str, rtsp_url: str | None = None) -> str:
-    key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/mjpeg/raw"
-    params = _live_rtsp_params(rtsp_url)
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
+    return _with_query(f"{base}/live/cam/{camera.stream_key}/mjpeg")
 
 
 def ml_live_mjpeg_raw_url_for_camera(camera) -> str:
     base = require_camera_ml_url(camera)
-    key = camera.stream_key
-    params = _live_rtsp_params(camera.effective_stream_url())
-    path = f"{base}/live/cam/{key}/mjpeg/raw"
-    if not params:
-        return path
-    return f"{path}?{urlencode(params)}"
-
-
-def ml_live_jpeg_url(stream_key: str, rtsp_url: str | None = None) -> str:
-    key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/jpeg"
-    params = _live_rtsp_params(rtsp_url)
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
+    return _with_query(f"{base}/live/cam/{camera.stream_key}/mjpeg/raw")
 
 
 def ml_live_jpeg_raw_url(stream_key: str, rtsp_url: str | None = None) -> str:
-    """Single-frame raw JPEG (use this for snapshots; do not hang on MJPEG)."""
+    """Single-frame raw JPEG on the hub ML node (use this for snapshots; do not hang on MJPEG)."""
+    del rtsp_url  # never sent
     key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/jpeg/raw"
-    params = _live_rtsp_params(rtsp_url)
-    if not params:
-        return base
-    return f"{base}?{urlencode(params)}"
+    return _with_query(f"{_base_url()}/live/cam/{key}/jpeg/raw")
 
 
 def ml_live_jpeg_raw_url_for_camera(camera) -> str:
     base = require_camera_ml_url(camera)
-    key = camera.stream_key
-    params = _live_rtsp_params(camera.effective_stream_url())
-    path = f"{base}/live/cam/{key}/jpeg/raw"
-    if not params:
-        return path
-    return f"{path}?{urlencode(params)}"
+    return _with_query(f"{base}/live/cam/{camera.stream_key}/jpeg/raw")
 
 
 def ml_live_jpeg_evidence_url_for_camera(camera) -> str:
     """Same-frame evidence JPEG (YOLO infer frame) — preferred for detection snapshots."""
     base = require_camera_ml_url(camera)
-    key = camera.stream_key
-    params = _live_rtsp_params(camera.effective_stream_url())
-    path = f"{base}/live/cam/{key}/jpeg/evidence"
-    if not params:
-        return path
-    return f"{path}?{urlencode(params)}"
-
-
-def ml_live_jpeg_attendance_url(
-    stream_key: str,
-    rtsp_url: str | None = None,
-    *,
-    width: int = 1280,
-) -> str:
-    key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/jpeg/attendance"
-    params = dict(_live_rtsp_params(rtsp_url))
-    params["width"] = str(max(640, min(4096, int(width or 3840))))
-    return f"{base}?{urlencode(params)}"
-
-
-def ml_live_mjpeg_attendance_url(
-    stream_key: str,
-    rtsp_url: str | None = None,
-    *,
-    width: int = 1280,
-) -> str:
-    """HD main-stream MJPEG for attendance clips (same RTSP session as live AI)."""
-    key = (stream_key or "").strip()
-    base = f"{_base_url()}/live/cam/{key}/mjpeg/attendance"
-    params = dict(_live_rtsp_params(rtsp_url))
-    params["width"] = str(max(640, min(4096, int(width or 3840))))
-    return f"{base}?{urlencode(params)}"
+    return _with_query(f"{base}/live/cam/{camera.stream_key}/jpeg/evidence")
 
 
 def ml_live_mjpeg_attendance_url_for_camera(camera, *, width: int = 1280) -> str:
+    """HD main-stream MJPEG for attendance snapshots (same RTSP session as live AI)."""
     base = require_camera_ml_url(camera)
-    key = camera.stream_key
-    params = dict(_live_rtsp_params(camera.effective_stream_url()))
-    params["width"] = str(max(640, min(4096, int(width or 3840))))
-    return f"{base}/live/cam/{key}/mjpeg/attendance?{urlencode(params)}"
+    width_q = str(max(640, min(4096, int(width or 3840))))
+    return _with_query(f"{base}/live/cam/{camera.stream_key}/mjpeg/attendance", {"width": width_q})
+
+
+# ——— Camera registry on ML nodes ———
 
 
 def _build_register_payload(entries: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -566,32 +611,6 @@ def _build_register_payload(entries: list[dict[str, str]]) -> list[dict[str, Any
             entry["purposes"] = [purpose]
         payload.append(entry)
     return payload
-
-
-def _request_at(
-    base_url: str,
-    method: str,
-    path: str,
-    *,
-    timeout: float | tuple[float, float] | None = None,
-    **kwargs,
-) -> requests.Response:
-    root = (base_url or "").strip().rstrip("/")
-    if not root:
-        raise MLServiceError("ML base URL is empty.", 503)
-    url = f"{root}{path}"
-    req_timeout = _timeout() if timeout is None else timeout
-    try:
-        return requests.request(method, url, timeout=req_timeout, **kwargs)
-    except requests.RequestException as exc:
-        raise MLServiceError(f"ML service unreachable at {root} ({exc})", 503) from exc
-
-
-def ml_health_at(base_url: str) -> dict[str, Any]:
-    res = _request_at(base_url, "GET", "/health", timeout=5.0)
-    if res.status_code != 200:
-        raise MLServiceError(f"ML health check failed ({res.status_code})", res.status_code)
-    return res.json()
 
 
 def ml_register_cameras_bulk_at(
@@ -615,7 +634,7 @@ def ml_register_cameras_bulk_at(
     )
     if res.status_code != 200:
         raise MLServiceError(
-            f"Failed to register cameras with ML service at {base_url}.",
+            f"Failed to register cameras with ML service at {redact_url(base_url)}.",
             res.status_code,
         )
     return res.json()
@@ -634,40 +653,11 @@ def ml_unregister_camera_at(
         base_url, "DELETE", f"/live/cam/{key}/register", timeout=timeout
     )
     if res.status_code != 200:
-        raise MLServiceError(f"Failed to unregister camera {key} at {base_url}.", res.status_code)
+        raise MLServiceError(f"Failed to unregister camera {key} at {redact_url(base_url)}.", res.status_code)
     return res.json()
 
 
-def ml_register_cameras_bulk(entries: list[dict[str, str]]) -> dict[str, Any]:
-    payload = _build_register_payload(entries)
-    if not payload:
-        return {"registered": 0, "total": 0}
-    res = _request("POST", "/live/register/bulk", json=payload)
-    if res.status_code != 200:
-        raise MLServiceError("Failed to register cameras with ML service.", res.status_code)
-    return res.json()
-
-
-def ml_unregister_camera(stream_key: str) -> dict[str, Any]:
-    key = (stream_key or "").strip()
-    if not key:
-        return {"removed": False}
-    res = _request("DELETE", f"/live/cam/{key}/register")
-    if res.status_code != 200:
-        raise MLServiceError(f"Failed to unregister camera {key}.", res.status_code)
-    return res.json()
-
-
-def ml_validate_human_face(file_bytes: bytes, filename: str = "face.jpg") -> dict[str, Any]:
-    res = _request(
-        "POST",
-        "/validate/human-face",
-        files={"image": (filename, file_bytes, "application/octet-stream")},
-    )
-    if res.status_code != 200:
-        detail = res.text[:300]
-        raise MLServiceError(f"Face validation failed: {detail}", res.status_code)
-    return res.json()
+# ——— Video search / analyze jobs ———
 
 
 def _video_search_timeout() -> int:
@@ -694,32 +684,21 @@ def ml_start_video_search(
         "sample_fps": str(sample_fps),
         "clip_seconds": str(clip_seconds),
     }
-    form: dict[str, str] = {}
-    files: dict[str, Any] = {
-        "image": ("query.jpg", open(image_path, "rb"), "application/octet-stream"),
-    }
-    handles: list[Any] = [files["image"][1]]
+    fields: list[tuple[str, str]] = []
+    files: list[tuple[str, str, str | bytes, str]] = [
+        ("image", "query.jpg", image_path, "application/octet-stream"),
+    ]
     if _ml_is_local():
-        form["video_path"] = video_path
+        fields.append(("video_path", video_path))
     else:
-        video_handle = open(video_path, "rb")
-        handles.append(video_handle)
-        files["video"] = ("source.mp4", video_handle, "application/octet-stream")
-    try:
-        res = _request(
-            "POST",
-            "/search/video",
-            files=files,
-            data=form or None,
-            params=params,
-            timeout=_video_search_timeout(),
-        )
-    finally:
-        for handle in handles:
-            try:
-                handle.close()
-            except Exception:
-                pass
+        files.append(("video", "source.mp4", video_path, "application/octet-stream"))
+    res = _post_multipart(
+        "/search/video",
+        fields=fields,
+        files=files,
+        params=params,
+        timeout=_video_search_timeout(),
+    )
     if res.status_code != 200:
         detail = res.text[:400]
         raise MLServiceError(f"Video search failed: {detail}", res.status_code)
@@ -745,37 +724,26 @@ def ml_start_video_analyze(
     plate: bool = False,
     sample_fps: float = 1.0,
 ) -> dict[str, Any]:
-    form: dict[str, str] = {
-        "person": str(bool(person)).lower(),
-        "vehicle": str(bool(vehicle)).lower(),
-        "weapon": str(bool(weapon)).lower(),
-        "fire": str(bool(fire)).lower(),
-        "match_staff": str(bool(match_staff)).lower(),
-        "plate": str(bool(plate)).lower(),
-        "sample_fps": str(sample_fps),
-    }
-    files: dict[str, Any] = {}
-    handles: list[Any] = []
+    fields: list[tuple[str, str]] = [
+        ("person", str(bool(person)).lower()),
+        ("vehicle", str(bool(vehicle)).lower()),
+        ("weapon", str(bool(weapon)).lower()),
+        ("fire", str(bool(fire)).lower()),
+        ("match_staff", str(bool(match_staff)).lower()),
+        ("plate", str(bool(plate)).lower()),
+        ("sample_fps", str(sample_fps)),
+    ]
+    files: list[tuple[str, str, str | bytes, str]] = []
     if _ml_is_local():
-        form["video_path"] = video_path
+        fields.append(("video_path", video_path))
     else:
-        video_handle = open(video_path, "rb")
-        handles.append(video_handle)
-        files["video"] = ("source.mp4", video_handle, "application/octet-stream")
-    try:
-        res = _request(
-            "POST",
-            "/analyze/video",
-            files=files or None,
-            data=form,
-            timeout=_video_search_timeout(),
-        )
-    finally:
-        for handle in handles:
-            try:
-                handle.close()
-            except Exception:
-                pass
+        files.append(("video", "source.mp4", video_path, "application/octet-stream"))
+    res = _post_multipart(
+        "/analyze/video",
+        fields=fields,
+        files=files,
+        timeout=_video_search_timeout(),
+    )
     if res.status_code != 200:
         detail = res.text[:400]
         raise MLServiceError(f"Video AI test failed: {detail}", res.status_code)
@@ -791,8 +759,6 @@ def ml_poll_video_analyze(job_id: str) -> dict[str, Any]:
 
 
 def ml_download_video_analyze(job_id: str, dest: str) -> None:
-    from pathlib import Path
-
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     res = _request(

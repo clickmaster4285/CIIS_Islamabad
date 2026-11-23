@@ -1,7 +1,12 @@
 """Read ANPR plate captures saved by ml_services under media/licence plates/.
 
-Dedupes by plate number (keeps best OCR/det row), deletes duplicate image files,
-and supports pagination for the Vehicle Tracking UI.
+Dedupes by plate number for display only (keeps best OCR/det row) and supports
+pagination for the Vehicle Tracking UI. History rows and image files are never
+deleted here; the admin "archive" action only moves never-displayed junk rows
+from captures.csv into captures_archive.csv.
+
+captures.csv is shared with ml_services/plate_recognizer.py. Every writer must hold
+the cross-process lock ``captures.csv.lock`` (see cameras.locks.exclusive_file_lock).
 """
 
 from __future__ import annotations
@@ -19,7 +24,10 @@ from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
-_cleanup_lock = threading.Lock()
+_cache_lock = threading.Lock()
+# (mtime_ns, size) of captures.csv -> parsed rows / dedupe results (list + summary reuse them)
+_raw_cache: dict[str, Any] = {"sig": None, "rows": []}
+_dedupe_cache: dict[tuple, dict[str, Any]] = {}
 
 CSV_FIELDS = [
     "timestamp",
@@ -38,6 +46,10 @@ def plate_media_root() -> Path:
 
 def captures_csv_path() -> Path:
     return plate_media_root() / "captures.csv"
+
+
+def captures_archive_path() -> Path:
+    return plate_media_root() / "captures_archive.csv"
 
 
 def _media_url(rel: str) -> str:
@@ -61,13 +73,6 @@ def _rel_from_url(url: str) -> str:
     return path.lstrip("/")
 
 
-def _abs_media(rel_or_url: str) -> Path | None:
-    rel = _rel_from_url(rel_or_url)
-    if not rel:
-        return None
-    return Path(settings.MEDIA_ROOT) / rel
-
-
 def _parse_ts(value: str) -> datetime | None:
     raw = (value or "").strip()
     if not raw:
@@ -81,6 +86,15 @@ def _parse_ts(value: str) -> datetime | None:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+def _local_naive(dt: datetime | None) -> datetime | None:
+    """Aware → server-local wall time without tzinfo; naive stays as written (local)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return timezone.localtime(dt).replace(tzinfo=None)
+    return dt
 
 
 # City/region text often OCR'd from the line under the plate number.
@@ -155,10 +169,30 @@ def _plate_key(text: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
 
 
+def _plausible_remainder(key: str) -> bool:
+    """A region word is only noise if what is left still looks like a plate (letters + digits)."""
+    return bool(re.search(r"[A-Z]", key)) and bool(re.search(r"\d", key))
+
+
+# Longest first so "ISLAMABAD" wins over "ISLAMAB".
+_REGION_BY_LEN = tuple(sorted(_REGION_NOISE, key=len, reverse=True))
+
+
 def _strip_region_noise(key: str) -> str:
+    """
+    Remove city/region words at the START or END of the plate only (never mid-plate),
+    matching ml_services/plate_recognizer._strip_region_noise: "ISB123" and "ICT123"
+    stay different plates instead of both collapsing to "123".
+    """
     out = key
-    for token in _REGION_NOISE:
-        out = out.replace(token, "")
+    changed = True
+    while changed:
+        changed = False
+        for word in _REGION_BY_LEN:
+            if out.startswith(word) and _plausible_remainder(out[len(word):]):
+                out, changed = out[len(word):], True
+            elif out.endswith(word) and _plausible_remainder(out[: -len(word)]):
+                out, changed = out[: -len(word)], True
     return out
 
 
@@ -348,199 +382,230 @@ def _row_score(row: dict[str, Any]) -> tuple[float, float, int, str]:
     return (quality, ocr, brevity, str(row.get("timestamp") or ""))
 
 
-def _delete_file(rel_or_url: str) -> bool:
-    path = _abs_media(rel_or_url)
-    if path is None or not path.is_file():
-        return False
+def _csv_signature() -> tuple[int, int] | None:
     try:
-        path.unlink()
-        return True
-    except OSError as exc:
-        logger.warning("Could not delete plate media %s: %s", path, exc)
-        return False
+        st = captures_csv_path().stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _read_raw_rows(*, camera_key: str = "") -> list[dict[str, Any]]:
-    path = captures_csv_path()
-    if not path.is_file():
-        return []
+    """Parsed captures.csv rows, cached until the file's (mtime, size) changes.
 
-    rows: list[dict[str, Any]] = []
+    Returned dicts are shared with the cache — callers must copy before mutating.
+    """
+    sig = _csv_signature()
+    if sig is None:
+        return []
+    with _cache_lock:
+        if _raw_cache["sig"] == sig:
+            rows = _raw_cache["rows"]
+        else:
+            rows = None
+    if rows is None:
+        rows = _parse_csv_rows()
+        with _cache_lock:
+            _raw_cache["sig"] = sig
+            _raw_cache["rows"] = rows
+            _dedupe_cache.clear()
     key_filter = (camera_key or "").strip().lower()
-    with path.open("r", encoding="utf-8", newline="") as f:
+    if not key_filter:
+        return rows
+    return [
+        r
+        for r in rows
+        if str(r.get("camera_key") or "").lower() in (key_filter, f"cam-{key_filter}")
+    ]
+
+
+def _parse_csv_rows() -> list[dict[str, Any]]:
+    path = captures_csv_path()
+    rows: list[dict[str, Any]] = []
+    try:
+        handle = path.open("r", encoding="utf-8", newline="")
+    except OSError:
+        return []
+    with handle as f:
         reader = csv.DictReader(f)
         for row in reader:
-            cam = str(row.get("camera_key") or "").strip()
-            if key_filter and cam.lower() != key_filter and f"cam-{key_filter}" != cam.lower():
-                continue
-            plate = str(row.get("plate_number") or "").strip()
-            plate_image = str(row.get("plate_image") or "").strip()
-            frame_image = str(row.get("frame_image") or "").strip()
-            ts = _parse_ts(str(row.get("timestamp") or ""))
-            try:
-                det_conf = float(row.get("det_conf") or 0)
-            except (TypeError, ValueError):
-                det_conf = 0.0
-            try:
-                ocr_conf = float(row.get("ocr_conf") or 0)
-            except (TypeError, ValueError):
-                ocr_conf = 0.0
-            rows.append(
-                {
-                    "timestamp": ts.isoformat(timespec="seconds") if ts else str(row.get("timestamp") or ""),
-                    "camera_key": cam,
-                    "plate_number": plate,
-                    "det_conf": round(det_conf, 4),
-                    "ocr_conf": round(ocr_conf, 4),
-                    "plate_image_rel": plate_image,
-                    "frame_image_rel": frame_image,
-                    "plate_image": _media_url(plate_image),
-                    "frame_image": _media_url(frame_image),
-                    "accepted": _is_valid_plate(plate)
-                    and ocr_conf >= _MIN_OCR_CONF_ACCEPTED
-                    and det_conf >= _MIN_DET_CONF_ACCEPTED,
-                }
-            )
+            rows.append(_parse_one(row))
     return rows
 
 
-def _write_csv(rows: list[dict[str, Any]]) -> None:
-    path = captures_csv_path()
+def _parse_one(row: dict[str, Any]) -> dict[str, Any]:
+    cam = str(row.get("camera_key") or "").strip()
+    plate = str(row.get("plate_number") or "").strip()
+    plate_image = str(row.get("plate_image") or "").strip()
+    frame_image = str(row.get("frame_image") or "").strip()
+    ts = _parse_ts(str(row.get("timestamp") or ""))
+    try:
+        det_conf = float(row.get("det_conf") or 0)
+    except (TypeError, ValueError):
+        det_conf = 0.0
+    try:
+        ocr_conf = float(row.get("ocr_conf") or 0)
+    except (TypeError, ValueError):
+        ocr_conf = 0.0
+    return {
+        "timestamp": ts.isoformat(timespec="seconds") if ts else str(row.get("timestamp") or ""),
+        "camera_key": cam,
+        "plate_number": plate,
+        "det_conf": round(det_conf, 4),
+        "ocr_conf": round(ocr_conf, 4),
+        "plate_image_rel": plate_image,
+        "frame_image_rel": frame_image,
+        "plate_image": _media_url(plate_image),
+        "frame_image": _media_url(frame_image),
+        "accepted": _is_valid_plate(plate)
+        and ocr_conf >= _MIN_OCR_CONF_ACCEPTED
+        and det_conf >= _MIN_DET_CONF_ACCEPTED,
+    }
+
+
+def _write_rows_atomic(path: Path, raw_rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    """Write a CSV via temp file + os.replace (readers never see a half-written file)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    "timestamp": row.get("timestamp") or "",
-                    "camera_key": row.get("camera_key") or "",
-                    "plate_number": row.get("plate_number") or "",
-                    "det_conf": row.get("det_conf") or 0,
-                    "ocr_conf": row.get("ocr_conf") or 0,
-                    "plate_image": row.get("plate_image_rel")
-                    or _rel_from_url(str(row.get("plate_image") or "")),
-                    "frame_image": row.get("frame_image_rel")
-                    or _rel_from_url(str(row.get("frame_image") or "")),
-                }
-            )
+        for row in raw_rows:
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+    os.replace(tmp, path)
 
 
-def dedupe_plate_captures(*, camera_key: str = "", persist: bool = True) -> dict[str, Any]:
+def _is_display_junk(row: dict[str, Any]) -> bool:
+    """Rows dedupe_plate_captures() never shows: invalid OCR or below the accept floors."""
+    plate = str(row.get("plate_number") or "").strip()
+    if _is_unknown_plate(plate):
+        return False
+    return not _is_valid_plate(plate) or not row.get("accepted")
+
+
+def archive_unusable_plate_rows() -> dict[str, Any]:
+    """Admin action: move never-displayed junk rows from captures.csv to captures_archive.csv.
+
+    Nothing is deleted — rows are appended to the archive and image files stay on disk.
+    Holds captures.csv.lock while reading + rewriting so ML appends are never lost.
     """
-    Keep one best row per physical plate (fuzzy OCR variants merged).
-    UNKNOWN crops are kept as separate rows. Invalid OCR junk is dropped.
+    from .locks import exclusive_file_lock
+
+    path = captures_csv_path()
+    if not path.is_file():
+        return {"archived_rows": 0, "kept_rows": 0}
+    with exclusive_file_lock(path):
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or CSV_FIELDS)
+            raw_rows = [dict(r) for r in reader]
+        keep: list[dict[str, Any]] = []
+        junk: list[dict[str, Any]] = []
+        for raw in raw_rows:
+            parsed = _parse_one(raw)
+            (junk if _is_display_junk(parsed) else keep).append(raw)
+        if not junk:
+            return {"archived_rows": 0, "kept_rows": len(keep)}
+        archive = captures_archive_path()
+        new_archive = not archive.is_file()
+        with archive.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            if new_archive:
+                writer.writeheader()
+            for raw in junk:
+                writer.writerow({k: raw.get(k, "") for k in fieldnames})
+        _write_rows_atomic(path, keep, fieldnames)
+    with _cache_lock:
+        _raw_cache["sig"] = None
+        _dedupe_cache.clear()
+    logger.info("[plates] Archived %s unusable row(s); %s kept", len(junk), len(keep))
+    return {"archived_rows": len(junk), "kept_rows": len(keep)}
+
+
+def dedupe_plate_captures(*, camera_key: str = "", persist: bool = False) -> dict[str, Any]:
     """
-    with _cleanup_lock:
-        raw = _read_raw_rows(camera_key=camera_key)
-        candidates: list[dict[str, Any]] = []
-        discarded: list[dict[str, Any]] = []
+    Keep one best row per physical plate (fuzzy OCR variants merged) — for display only.
+    UNKNOWN crops are kept as separate rows. Invalid OCR junk is hidden, never deleted:
+    captures.csv history and the image files are left untouched (``persist`` is ignored).
+    Results are cached until captures.csv changes.
+    """
+    del persist
+    sig = _csv_signature()
+    cache_key = (sig, (camera_key or "").strip().lower())
+    with _cache_lock:
+        cached = _dedupe_cache.get(cache_key) if sig is not None else None
+    if cached is not None:
+        return cached
+    result = _dedupe_rows(_read_raw_rows(camera_key=camera_key))
+    if sig is not None:
+        with _cache_lock:
+            if len(_dedupe_cache) > 32:
+                _dedupe_cache.clear()
+            _dedupe_cache[cache_key] = result
+    return result
 
-        for row in raw:
-            plate = str(row.get("plate_number") or "").strip()
-            if _is_unknown_plate(plate):
-                candidates.append({**row, "accepted": False, "_canon": ""})
-                continue
-            if not _is_valid_plate(plate):
-                discarded.append(row)
-                continue
-            if not row.get("accepted"):
-                discarded.append(row)
-                continue
-            canon = canonicalize_plate(plate)
-            display = format_plate_display(canon or plate)
-            enriched = {
-                **row,
-                "plate_number": display,
-                "accepted": True,
-                "_canon": canon,
-            }
-            candidates.append(enriched)
 
-        # Best-first greedy clustering: merge similar OCR on same camera
-        candidates.sort(key=_row_score, reverse=True)
-        clusters: list[dict[str, Any]] = []
-        for row in candidates:
-            matched = False
-            row_unknown = _is_unknown_plate(str(row.get("plate_number") or ""))
-            for kept in clusters:
-                if row_unknown or _is_unknown_plate(str(kept.get("plate_number") or "")):
-                    continue
-                same_cam = str(row.get("camera_key") or "").lower() == str(
-                    kept.get("camera_key") or ""
-                ).lower()
-                if same_cam and plates_are_same_vehicle(
-                    str(row.get("plate_number") or ""),
-                    str(kept.get("plate_number") or ""),
-                ):
-                    discarded.append(row)
-                    matched = True
-                    break
-            if not matched:
-                clusters.append(row)
+def _dedupe_rows(raw: list[dict[str, Any]]) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    discarded: list[dict[str, Any]] = []
 
-        kept = sorted(
-            clusters,
-            key=lambda r: str(r.get("timestamp") or ""),
-            reverse=True,
-        )
-        for row in kept:
-            row.pop("_canon", None)
-
-        deleted_files = 0
-        root = plate_media_root()
-
-        # File deletes + CSV rewrite only on full persist (never when camera-filtered)
-        if persist and camera_key == "":
-            keep_files: set[str] = set()
-            for row in kept:
-                for field in ("plate_image_rel", "frame_image_rel"):
-                    rel = _rel_from_url(str(row.get(field) or ""))
-                    if rel:
-                        keep_files.add(rel.replace("\\", "/").lower())
-
-            for row in discarded:
-                for field in ("plate_image_rel", "frame_image_rel", "plate_image", "frame_image"):
-                    rel = _rel_from_url(str(row.get(field) or ""))
-                    if not rel:
-                        continue
-                    if rel.replace("\\", "/").lower() in keep_files:
-                        continue
-                    if _delete_file(rel):
-                        deleted_files += 1
-
-            for sub in ("plates", "frames"):
-                folder = root / sub
-                if not folder.is_dir():
-                    continue
-                for file in folder.iterdir():
-                    if not file.is_file() or file.name == ".gitkeep":
-                        continue
-                    rel = f"licence plates/{sub}/{file.name}".replace("\\", "/")
-                    if rel.lower() not in keep_files:
-                        try:
-                            file.unlink()
-                            deleted_files += 1
-                        except OSError:
-                            pass
-
-            _write_csv(kept)
-            numbers_path = root / "numbers.txt"
-            try:
-                lines = [
-                    f"{r.get('timestamp')}  [{r.get('camera_key')}]  {r.get('plate_number')}"
-                    for r in kept
-                ]
-                numbers_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-            except OSError as exc:
-                logger.warning("Could not rewrite numbers.txt: %s", exc)
-
-        return {
-            "kept": len(kept),
-            "removed_rows": len(discarded),
-            "deleted_files": deleted_files,
-            "results": kept,
+    for row in raw:
+        plate = str(row.get("plate_number") or "").strip()
+        if _is_unknown_plate(plate):
+            candidates.append({**row, "accepted": False, "_canon": ""})
+            continue
+        if not _is_valid_plate(plate):
+            discarded.append(row)
+            continue
+        if not row.get("accepted"):
+            discarded.append(row)
+            continue
+        canon = canonicalize_plate(plate)
+        display = format_plate_display(canon or plate)
+        enriched = {
+            **row,
+            "plate_number": display,
+            "accepted": True,
+            "_canon": canon,
         }
+        candidates.append(enriched)
+
+    # Best-first greedy clustering: merge similar OCR on same camera
+    candidates.sort(key=_row_score, reverse=True)
+    clusters: list[dict[str, Any]] = []
+    for row in candidates:
+        matched = False
+        row_unknown = _is_unknown_plate(str(row.get("plate_number") or ""))
+        for kept in clusters:
+            if row_unknown or _is_unknown_plate(str(kept.get("plate_number") or "")):
+                continue
+            same_cam = str(row.get("camera_key") or "").lower() == str(
+                kept.get("camera_key") or ""
+            ).lower()
+            if same_cam and plates_are_same_vehicle(
+                str(row.get("plate_number") or ""),
+                str(kept.get("plate_number") or ""),
+            ):
+                discarded.append(row)
+                matched = True
+                break
+        if not matched:
+            clusters.append(row)
+
+    kept = sorted(
+        clusters,
+        key=lambda r: str(r.get("timestamp") or ""),
+        reverse=True,
+    )
+    for row in kept:
+        row.pop("_canon", None)
+
+    return {
+        "kept": len(kept),
+        "removed_rows": len(discarded),
+        "deleted_files": 0,
+        "results": kept,
+    }
 
 
 def _parse_filter_bound(value: str, *, end_of_day: bool = False) -> datetime | None:
@@ -572,31 +637,26 @@ def load_plate_captures(
     plate_number: str = "",
     date_from: str = "",
     date_to: str = "",
-    cleanup: bool = True,
+    cleanup: bool = False,
 ) -> dict[str, Any]:
-    """Return unique/valid plate captures with pagination.
+    """Return unique/valid plate captures with pagination (read-only).
 
     Filters:
       - camera_key: exact / cam-<id> match
       - plate_number: substring match on display or canonical plate
       - q: substring match on plate or camera_key
       - date_from / date_to: inclusive datetime bounds
+
+    ``cleanup`` is accepted for old clients but ignored: GET never rewrites files. Admins use
+    POST /cameras/plate-captures/archive/ (archive_unusable_plate_rows) instead.
     """
-    if cleanup:
-        dedupe = dedupe_plate_captures(camera_key="", persist=True)
-        rows = dedupe["results"]
-        cleanup_meta = {
-            "removed_rows": dedupe["removed_rows"],
-            "deleted_files": dedupe["deleted_files"],
-        }
-    else:
-        # Soft dedupe in memory only
-        dedupe = dedupe_plate_captures(camera_key=camera_key, persist=False)
-        rows = dedupe["results"]
-        cleanup_meta = {
-            "removed_rows": dedupe["removed_rows"],
-            "deleted_files": 0,
-        }
+    del cleanup
+    dedupe = dedupe_plate_captures(camera_key=camera_key)
+    rows = dedupe["results"]
+    cleanup_meta = {
+        "removed_rows": dedupe["removed_rows"],
+        "deleted_files": 0,
+    }
 
     if camera_key:
         key_filter = camera_key.strip().lower()
@@ -630,22 +690,7 @@ def load_plate_captures(
             or term in _plate_key(str(r.get("plate_number") or "")).lower()
         ]
 
-    from_dt = _parse_filter_bound(date_from, end_of_day=False)
-    to_dt = _parse_filter_bound(date_to, end_of_day=True)
-    if from_dt or to_dt:
-        filtered: list[dict[str, Any]] = []
-        for row in rows:
-            ts = _parse_ts(str(row.get("timestamp") or ""))
-            if ts is None:
-                continue
-            # Compare naive timestamps consistently
-            cmp = ts.replace(tzinfo=None) if ts.tzinfo else ts
-            if from_dt and cmp < from_dt:
-                continue
-            if to_dt and cmp > to_dt:
-                continue
-            filtered.append(row)
-        rows = filtered
+    rows = _filter_rows_by_date(rows, date_from, date_to)
 
     total = len(rows)
     page_size = max(5, min(int(page_size or 25), 100))
@@ -684,12 +729,12 @@ def plate_capture_summary() -> dict[str, Any]:
     from cameras.models import Camera, CameraPurpose
 
     today = timezone.localdate()
-    # Use deduped unique plates (no file rewrite here — list endpoint handles cleanup)
-    dedupe = dedupe_plate_captures(persist=False)
+    # Deduped unique plates (cached; shares the parse with the list endpoint)
+    dedupe = dedupe_plate_captures()
     all_rows = dedupe["results"]
     today_rows = []
     for row in all_rows:
-        ts = _parse_ts(str(row.get("timestamp") or ""))
+        ts = _local_naive(_parse_ts(str(row.get("timestamp") or "")))
         if ts and ts.date() == today:
             today_rows.append(row)
 
@@ -763,16 +808,17 @@ def _camera_info_for(camera_key: str, meta: dict[str, dict[str, str]]) -> dict[s
 
 
 def _filter_rows_by_date(rows: list[dict[str, Any]], date_from: str, date_to: str) -> list[dict[str, Any]]:
-    from_dt = _parse_filter_bound(date_from, end_of_day=False)
-    to_dt = _parse_filter_bound(date_to, end_of_day=True)
+    # Both sides as server-local naive time: CSV rows are naive local, filter bounds may be
+    # aware (…Z / +05:00) — mixing them used to raise TypeError or shift by the UTC offset.
+    from_dt = _local_naive(_parse_filter_bound(date_from, end_of_day=False))
+    to_dt = _local_naive(_parse_filter_bound(date_to, end_of_day=True))
     if not from_dt and not to_dt:
         return rows
     filtered: list[dict[str, Any]] = []
     for row in rows:
-        ts = _parse_ts(str(row.get("timestamp") or ""))
-        if ts is None:
+        cmp = _local_naive(_parse_ts(str(row.get("timestamp") or "")))
+        if cmp is None:
             continue
-        cmp = ts.replace(tzinfo=None) if ts.tzinfo else ts
         if from_dt and cmp < from_dt:
             continue
         if to_dt and cmp > to_dt:
@@ -867,8 +913,8 @@ def _count_passes(sightings: list[dict[str, Any]]) -> int:
         ts = _parse_ts(str(row.get("timestamp") or ""))
         gap = 0.0
         if ts and prev_ts:
-            a = ts.replace(tzinfo=None) if ts.tzinfo else ts
-            b = prev_ts.replace(tzinfo=None) if prev_ts.tzinfo else prev_ts
+            a = _local_naive(ts)
+            b = _local_naive(prev_ts)
             gap = abs((a - b).total_seconds())
         if gap > _PASS_GAP_SECONDS:
             passes += 1

@@ -375,7 +375,7 @@ export default function AddStaffPage() {
 
       const orderedPhotos = photosOrderedForProfile(staffPhotos, profilePhotoIndex)
       const address = (form.address || "").trim()
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         ...form,
         first_name,
         last_name,

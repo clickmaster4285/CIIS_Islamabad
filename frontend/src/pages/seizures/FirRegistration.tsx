@@ -135,14 +135,10 @@ function generateFirNumber(): string {
 }
 
 export default function FirRegistrationPage() {
-  const [rows, setRows] = useState<StoredFir[]>([])
+  const [rows, setRows] = useState<StoredFir[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<FirRegistrationForm>(emptyForm())
   const [search, setSearch] = useState("")
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

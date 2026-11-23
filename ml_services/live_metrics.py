@@ -31,12 +31,39 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _gpu_index() -> int:
-    """NVML / nvidia-smi index from ML_DEVICE ('0', 'cuda:1'); 0 when it is 'cpu' or unset."""
+    """Torch-visible GPU index from ML_DEVICE ('0', 'cuda:1'); 0 when it is 'cpu' or unset."""
     raw = (os.getenv("ML_DEVICE", "0") or "0").strip().lower().replace("cuda:", "").replace("cuda", "")
     try:
         return int(raw)
     except ValueError:
         return 0
+
+
+def gpu_physical_id() -> str:
+    """Host GPU id (nvidia-smi / NVML index, or a GPU UUID) of the device this process uses.
+
+    ML_DEVICE is an index into the GPUs that CUDA_VISIBLE_DEVICES exposes, so with
+    CUDA_VISIBLE_DEVICES=1 and ML_DEVICE=0 the process really runs on host GPU 1.
+    """
+    idx = _gpu_index()
+    visible = [v.strip() for v in (os.getenv("CUDA_VISIBLE_DEVICES") or "").split(",") if v.strip()]
+    if visible and 0 <= idx < len(visible):
+        return visible[idx]
+    return str(idx)
+
+
+def ml_node_id() -> str:
+    """Short id of this ML process (ML_NODE_ID, else 'gpu<N>' from CUDA_VISIBLE_DEVICES, else '').
+
+    Used to keep per-process files (identity counters, motion clips) apart when two
+    processes (gpu0 / gpu1) run from the same directory.
+    """
+    raw = (os.getenv("ML_NODE_ID") or "").strip()
+    if not raw:
+        visible = [v.strip() for v in (os.getenv("CUDA_VISIBLE_DEVICES") or "").split(",") if v.strip()]
+        if len(visible) == 1:
+            raw = f"gpu{visible[0]}"
+    return "".join(c if (c.isalnum() or c in "-_") else "_" for c in raw)[:40]
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -209,9 +236,12 @@ class _SystemSampler:
                 import pynvml  # type: ignore
 
                 pynvml.nvmlInit()
-                idx = _gpu_index()
+                gid = gpu_physical_id()
                 self._nvml = pynvml
-                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+                if gid.isdigit():
+                    self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(int(gid))
+                else:
+                    self._nvml_handle = pynvml.nvmlDeviceGetHandleByUUID(gid)
             except Exception:
                 self._nvml = None
         if self._nvml is None:
@@ -243,6 +273,8 @@ class _SystemSampler:
             raw = subprocess.run(
                 [
                     exe,
+                    "-i",
+                    gpu_physical_id(),
                     "--query-gpu=utilization.gpu,memory.used,memory.total,utilization.decoder",
                     "--format=csv,noheader,nounits",
                 ],
@@ -250,8 +282,7 @@ class _SystemSampler:
                 text=True,
                 timeout=3,
             ).stdout.strip()
-            idx = _gpu_index()
-            line = raw.splitlines()[idx] if raw else ""
+            line = raw.splitlines()[0] if raw else ""
             parts = [p.strip() for p in line.split(",")]
             out: dict[str, Any] = {
                 "source": "nvidia-smi",
@@ -462,103 +493,128 @@ class LiveMetrics:
         now = self._clock()
         cut = now - self.window_sec
         meta = cameras or {}
+        # Copy the raw windows under the lock; percentiles / filtering run outside it so
+        # recording hooks on the inference threads are never blocked by a snapshot.
         with self._lock:
             span = max(1e-6, min(self.window_sec, now - self._since))
             keys = sorted(set(meta.keys()) | set(self._cams.keys()))
-            cam_rows: list[dict[str, Any]] = []
-            connected = receiving = 0
-            starved: list[str] = []
-            worst_p95_gap = 0.0
-            total_fps = 0.0
-            for key in keys:
-                st = self._cams.get(key)
-                m = meta.get(key, {})
-                # With manager metadata, a camera it no longer knows is not "connected".
-                is_conn = bool(m.get("connected")) if meta else st is not None
-                fin = [t for t in (st.finishes if st else ()) if t >= cut]
-                gaps = [g for t, g in (st.gaps if st else ()) if t >= cut]
-                ages = [a for t, a in (st.ages if st else ()) if t >= cut]
-                lats = [v for t, v in (st.latencies if st else ()) if t >= cut]
-                fps = len(fin) / span
-                last_ok = st.last_ok_at if st else 0.0
-                since_ok = (now - last_ok) if last_ok else None
-                is_recv = bool(is_conn and since_ok is not None and since_ok <= sla_sec)
-                if is_conn:
-                    connected += 1
-                    if is_recv:
-                        receiving += 1
-                    else:
-                        starved.append(key)
-                p95_gap = percentile(gaps, 95)
-                if is_conn:
-                    worst_p95_gap = max(worst_p95_gap, p95_gap)
-                total_fps += fps
-                cam_rows.append(
-                    {
-                        "key": key,
-                        "connected": is_conn,
-                        "purposes": list(m.get("purposes") or []),
-                        "receiving": is_recv,
-                        "infer_fps": _r(fps),
-                        "gap_p50_sec": _r(percentile(gaps, 50)),
-                        "gap_p95_sec": _r(p95_gap),
-                        "gap_max_sec": _r(max(gaps) if gaps else 0.0),
-                        "queue_delay_p50_sec": _r(percentile(ages, 50)),
-                        "queue_delay_p95_sec": _r(percentile(ages, 95)),
-                        "latency_p50_sec": _r(percentile(lats, 50)),
-                        "latency_p95_sec": _r(percentile(lats, 95)),
-                        "last_ok_at": _r(last_ok, 3) if last_ok else None,
-                        "sec_since_last_ok": _r(since_ok) if since_ok is not None else None,
-                        "inferences": st.inferences if st else 0,
-                        "errors": st.errors if st else 0,
-                        "last_error": (st.last_error if st else "") or None,
-                        "frames_skipped": st.frames_skipped if st else 0,
-                        "stale_frames": st.stale if st else 0,
-                        "no_new_frame": st.no_new_frame if st else 0,
-                        "no_frame": st.no_frame if st else 0,
-                    }
-                )
-
-            model_rows: dict[str, Any] = {}
-            for name, ms in sorted(self._models.items()):
-                ev = [e for e in ms.events if e[0] >= cut]
-                lat = [e[2] for e in ev]
-                waits = [e[3] for e in ev]
-                imgs = sum(e[1] for e in ev)
-                model_rows[name] = {
-                    "kind": ms.kind,
-                    "calls_per_sec": _r(len(ev) / span),
-                    "images_per_sec": _r(imgs / span),
-                    "avg_batch": _r(imgs / len(ev), 2) if ev else 0.0,
-                    "max_batch": max((e[1] for e in ev), default=0),
-                    "latency_p50_ms": _r(percentile(lat, 50) * 1000, 1),
-                    "latency_p95_ms": _r(percentile(lat, 95) * 1000, 1),
-                    "lock_wait_avg_ms": _r((sum(waits) / len(waits)) * 1000 if waits else 0.0, 1),
-                    "lock_wait_p95_ms": _r(percentile(waits, 95) * 1000, 1),
-                    "busy_pct": _r(100.0 * sum(lat) / span, 1),
-                    "total_calls": ms.calls,
-                    "total_images": ms.images,
+            cam_copy: dict[str, Any] = {}
+            for key, st in self._cams.items():
+                cam_copy[key] = {
+                    "finishes": list(st.finishes),
+                    "gaps": list(st.gaps),
+                    "ages": list(st.ages),
+                    "latencies": list(st.latencies),
+                    "last_ok_at": st.last_ok_at,
+                    "inferences": st.inferences,
+                    "errors": st.errors,
+                    "last_error": st.last_error,
+                    "frames_skipped": st.frames_skipped,
+                    "stale": st.stale,
+                    "no_new_frame": st.no_new_frame,
+                    "no_frame": st.no_frame,
                 }
+            model_copy = {
+                name: (ms.kind, list(ms.events), ms.calls, ms.images) for name, ms in self._models.items()
+            }
+            stage_copy = {
+                name: (list(dq), len(dq) == dq.maxlen) for name, dq in self._stages.items() if dq
+            }
 
-            stage_rows: dict[str, Any] = {}
-            for name, dq in sorted(self._stages.items()):
-                ev = [e for e in dq if e[0] >= cut]
-                if not ev:
-                    continue
-                # A full deque may hold less than the window: measure over what it holds.
-                st_span = span
-                if len(dq) == dq.maxlen:
-                    st_span = max(1e-6, min(span, now - dq[0][0]))
-                secs = [e[1] for e in ev]
-                stage_rows[name] = {
-                    "calls_per_sec": _r(len(ev) / st_span, 2),
-                    "avg_ms": _r(1000 * sum(secs) / len(secs), 2),
-                    "p50_ms": _r(1000 * percentile(secs, 50), 2),
-                    "p95_ms": _r(1000 * percentile(secs, 95), 2),
-                    "max_ms": _r(1000 * max(secs), 2),
-                    # 100% = one thread fully busy with this step
-                    "busy_pct": _r(100.0 * sum(secs) / st_span, 1),
+        cam_rows: list[dict[str, Any]] = []
+        connected = receiving = 0
+        starved: list[str] = []
+        worst_p95_gap = 0.0
+        total_fps = 0.0
+        for key in keys:
+            st = cam_copy.get(key)
+            m = meta.get(key, {})
+            # With manager metadata, a camera it no longer knows is not "connected".
+            is_conn = bool(m.get("connected")) if meta else st is not None
+            fin = [t for t in (st["finishes"] if st else ()) if t >= cut]
+            gaps = [g for t, g in (st["gaps"] if st else ()) if t >= cut]
+            ages = [a for t, a in (st["ages"] if st else ()) if t >= cut]
+            lats = [v for t, v in (st["latencies"] if st else ()) if t >= cut]
+            fps = len(fin) / span
+            last_ok = st["last_ok_at"] if st else 0.0
+            since_ok = (now - last_ok) if last_ok else None
+            is_recv = bool(is_conn and since_ok is not None and since_ok <= sla_sec)
+            if is_conn:
+                connected += 1
+                if is_recv:
+                    receiving += 1
+                else:
+                    starved.append(key)
+            p95_gap = percentile(gaps, 95)
+            if is_conn:
+                worst_p95_gap = max(worst_p95_gap, p95_gap)
+            total_fps += fps
+            cam_rows.append(
+                {
+                    "key": key,
+                    "connected": is_conn,
+                    "purposes": list(m.get("purposes") or []),
+                    "receiving": is_recv,
+                    "infer_fps": _r(fps),
+                    "gap_p50_sec": _r(percentile(gaps, 50)),
+                    "gap_p95_sec": _r(p95_gap),
+                    "gap_max_sec": _r(max(gaps) if gaps else 0.0),
+                    "queue_delay_p50_sec": _r(percentile(ages, 50)),
+                    "queue_delay_p95_sec": _r(percentile(ages, 95)),
+                    "latency_p50_sec": _r(percentile(lats, 50)),
+                    "latency_p95_sec": _r(percentile(lats, 95)),
+                    "last_ok_at": _r(last_ok, 3) if last_ok else None,
+                    "sec_since_last_ok": _r(since_ok) if since_ok is not None else None,
+                    "inferences": st["inferences"] if st else 0,
+                    "errors": st["errors"] if st else 0,
+                    "last_error": (st["last_error"] if st else "") or None,
+                    "frames_skipped": st["frames_skipped"] if st else 0,
+                    "stale_frames": st["stale"] if st else 0,
+                    "no_new_frame": st["no_new_frame"] if st else 0,
+                    "no_frame": st["no_frame"] if st else 0,
                 }
+            )
+
+        model_rows: dict[str, Any] = {}
+        for name, (kind, events, calls, images) in sorted(model_copy.items()):
+            ev = [e for e in events if e[0] >= cut]
+            lat = [e[2] for e in ev]
+            waits = [e[3] for e in ev]
+            imgs = sum(e[1] for e in ev)
+            model_rows[name] = {
+                "kind": kind,
+                "calls_per_sec": _r(len(ev) / span),
+                "images_per_sec": _r(imgs / span),
+                "avg_batch": _r(imgs / len(ev), 2) if ev else 0.0,
+                "max_batch": max((e[1] for e in ev), default=0),
+                "latency_p50_ms": _r(percentile(lat, 50) * 1000, 1),
+                "latency_p95_ms": _r(percentile(lat, 95) * 1000, 1),
+                "lock_wait_avg_ms": _r((sum(waits) / len(waits)) * 1000 if waits else 0.0, 1),
+                "lock_wait_p95_ms": _r(percentile(waits, 95) * 1000, 1),
+                "busy_pct": _r(100.0 * sum(lat) / span, 1),
+                "total_calls": calls,
+                "total_images": images,
+            }
+
+        stage_rows: dict[str, Any] = {}
+        for name, (dq, full) in sorted(stage_copy.items()):
+            ev = [e for e in dq if e[0] >= cut]
+            if not ev:
+                continue
+            # A full deque may hold less than the window: measure over what it holds.
+            st_span = span
+            if full:
+                st_span = max(1e-6, min(span, now - dq[0][0]))
+            secs = [e[1] for e in ev]
+            stage_rows[name] = {
+                "calls_per_sec": _r(len(ev) / st_span, 2),
+                "avg_ms": _r(1000 * sum(secs) / len(secs), 2),
+                "p50_ms": _r(1000 * percentile(secs, 50), 2),
+                "p95_ms": _r(1000 * percentile(secs, 95), 2),
+                "max_ms": _r(1000 * max(secs), 2),
+                # 100% = one thread fully busy with this step
+                "busy_pct": _r(100.0 * sum(secs) / st_span, 1),
+            }
 
         gpu_busy = sum(v["busy_pct"] for v in model_rows.values() if v["kind"] == "gpu")
         out: dict[str, Any] = {

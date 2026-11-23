@@ -38,6 +38,14 @@ def _cctv_threshold() -> float:
     return float(getattr(settings, "ATTENDANCE_CCTV_SIMILARITY_THRESHOLD", 0.38))
 
 
+def _max_image_side() -> int:
+    return max(640, int(getattr(settings, "RECOGNITION_MAX_IMAGE_SIDE", 4096)))
+
+
+def _max_image_bytes() -> int:
+    return max(1_000_000, int(getattr(settings, "RECOGNITION_MAX_IMAGE_BYTES", 8 * 1024 * 1024)))
+
+
 # Backwards-compatible module constants (resolved at import; settings override in match)
 SIMILARITY_THRESHOLD = 0.45
 CCTV_SIMILARITY_THRESHOLD = 0.38
@@ -240,6 +248,21 @@ class FaceEngine:
 
     @staticmethod
     def decode_image(image_bytes: bytes) -> np.ndarray:
+        """Decode an uploaded photo. Size is checked from the header first, so a huge image is never decoded."""
+        if not image_bytes:
+            raise ValueError("Invalid image data")
+        if len(image_bytes) > _max_image_bytes():
+            raise ValueError("Image file is too large")
+        import io
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as header:
+                width, height = header.size
+        except Exception as exc:
+            raise ValueError("Invalid image data") from exc
+        max_side = _max_image_side()
+        if width <= 0 or height <= 0 or width > max_side or height > max_side:
+            raise ValueError(f"Image is too large (max {max_side}px per side)")
         arr = np.frombuffer(image_bytes, dtype=np.uint8)
         image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if image is None:
@@ -250,7 +273,14 @@ class FaceEngine:
     def decode_base64(data: str) -> np.ndarray:
         if "," in data:
             data = data.split(",", 1)[1]
-        return FaceEngine.decode_image(base64.b64decode(data))
+        # base64 is 4/3 of the binary size; refuse oversized payloads before decoding anything.
+        if len(data) > (_max_image_bytes() * 4) // 3 + 16:
+            raise ValueError("Image file is too large")
+        try:
+            raw = base64.b64decode(data)
+        except Exception as exc:
+            raise ValueError("Invalid image data") from exc
+        return FaceEngine.decode_image(raw)
 
     def detect_faces(self, image: np.ndarray, det_size: int | None = None, detect_width: int | None = None):
         """Detect + embed faces.
@@ -408,35 +438,15 @@ class FaceEngine:
         mean = float(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).mean())
         if 50.0 <= mean <= 200.0:
             return image, face
+        from recognition.services.preprocess import closest_face
+
         corrected = correct_exposure(image)
         faces = self.detect_faces(corrected)
-        if not faces:
+        # Keep the SAME person: the re-detected face that overlaps the original box, not the most confident one.
+        match = closest_face(faces, bbox)
+        if match is None:
             return image, face
-        return corrected, max(faces, key=lambda item: float(getattr(item, "det_score", 0.0)))
-
-    def _relight_crop(self, image: np.ndarray, face):
-        """Exposure-correct the face crop so a crowded frame does not switch identity."""
-        from recognition.services.preprocess import correct_exposure
-
-        bbox = getattr(face, "bbox", None)
-        if bbox is None:
-            return face
-        height, width = image.shape[:2]
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-        pad_x = int(max(x2 - x1, 1) * 0.35)
-        pad_y = int(max(y2 - y1, 1) * 0.35)
-        cx1, cy1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-        cx2, cy2 = min(width, x2 + pad_x), min(height, y2 + pad_y)
-        crop = image[cy1:cy2, cx1:cx2]
-        if crop.size == 0:
-            return face
-        mean = float(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY).mean())
-        if 50.0 <= mean <= 200.0:
-            return face
-        faces = self.detect_faces(correct_exposure(crop))
-        if not faces:
-            return face
-        return max(faces, key=lambda item: float(getattr(item, "det_score", 0.0)))
+        return corrected, match
 
     def generate_embeddings_from_folder(self, folder_path: Path) -> list[np.ndarray]:
         from recognition.services.preprocess import lighting_variants
@@ -484,6 +494,13 @@ class FaceEngine:
             ]
         )
         invalidate_gallery()
+        # Same as services.training: keep the identity app's per-photo gallery in step.
+        try:
+            from identity.services.gallery import rebuild_enrollment_entries
+
+            rebuild_enrollment_entries(enrollment.staff, self, folder)
+        except Exception:
+            logger.warning("Identity gallery rebuild skipped for staff %s", enrollment.staff_id, exc_info=True)
         return {
             "trained": True,
             "embedding_dim": len(mean_embedding),
@@ -518,6 +535,18 @@ class FaceEngine:
                 return {"matched": False, "message": error, "confidence": 0.0}
 
         liveness = self.check_liveness(small, face, source=source)
+        if liveness.get("skipped") and liveness.get("passed", True):
+            from recognition.services.antispoof import liveness_required
+
+            if liveness_required():
+                # Fail closed: without the liveness model a printed photo would punch attendance.
+                return {
+                    "matched": False,
+                    "message": "Liveness check unavailable — attendance not marked. Ask IT to install the anti-spoof models.",
+                    "confidence": 0.0,
+                    "liveness_unavailable": True,
+                    "liveness": liveness,
+                }
         if not liveness.get("passed", True):
             record_spoof(source=source, message=liveness.get("message") or "Spoof")
             return {
@@ -536,33 +565,6 @@ class FaceEngine:
         else:
             match = self.match_probe(face.embedding, source=source)
         return self._match_result(match, source=source)
-
-    def score_face(self, image: np.ndarray, face, *, source: str = "cctv", camera_id: int | None = None) -> dict:
-        """One detected face: liveness, exposure correction, then gallery match."""
-        from recognition.services.reviews import record_spoof
-
-        liveness = self.check_liveness(image, face, source=source)
-        if not liveness.get("passed", True):
-            record_spoof(
-                source=source,
-                camera_id=camera_id,
-                message=liveness.get("message") or "Spoof",
-            )
-            return {
-                "matched": False,
-                "spoof": True,
-                "confidence": 0.0,
-                "message": liveness.get("message") or "Spoof detected",
-                "liveness": liveness,
-            }
-        face = self._relight_crop(image, face)
-        embedding = getattr(face, "embedding", None)
-        if embedding is None:
-            return {"matched": False, "confidence": 0.0, "message": "No face embedding"}
-        match = self.match_probe(embedding, source=source)
-        result = self._match_result(match, source=source, camera_id=camera_id)
-        result["face"] = face
-        return result
 
     @staticmethod
     def _match_result(match: dict, *, source: str, camera_id: int | None = None) -> dict:
@@ -603,9 +605,15 @@ class FaceEngine:
             mean = mean / norm
         return mean.tolist()
 
-    def save_dataset_image(self, image: np.ndarray, folder: Path, index: int) -> Path:
+    def save_dataset_image(self, image: np.ndarray, folder: Path, index: int, *, unique: bool = False) -> Path:
+        """``unique`` adds a random suffix so two concurrent captures can never overwrite each other."""
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"face_{index:03d}.jpg"
+        if unique:
+            import uuid
+
+            path = folder / f"face_{index:03d}_{uuid.uuid4().hex[:8]}.jpg"
+        else:
+            path = folder / f"face_{index:03d}.jpg"
         cv2.imwrite(str(path), image)
         return path
 

@@ -1,6 +1,24 @@
+import os
+
 from rest_framework import serializers
 
 from .models import SupportTicket, TicketComment, TicketEvent
+
+# Chat attachments: same 15 MB limit the web client enforces, and only document/image types
+# that browsers will not execute (no HTML, SVG, JS or executables).
+CHAT_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024
+CHAT_ATTACHMENT_EXTENSIONS = frozenset({
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+    ".pdf", ".txt", ".log", ".csv",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods",
+    ".zip", ".mp4", ".mp3", ".wav", ".m4a",
+})
+
+
+def _can_see_internal(user) -> bool:
+    from .permissions import is_handler_user, is_support_user
+
+    return bool(user and (is_support_user(user) or is_handler_user(user)))
 
 
 class TicketCommentSerializer(serializers.ModelSerializer):
@@ -160,7 +178,7 @@ class SupportTicketListSerializer(serializers.ModelSerializer):
 
 class SupportTicketDetailSerializer(SupportTicketListSerializer):
     comments = serializers.SerializerMethodField()
-    events = TicketEventSerializer(many=True, read_only=True)
+    events = serializers.SerializerMethodField()
     suggested_category_label = serializers.CharField(
         source="get_suggested_category_display", read_only=True
     )
@@ -196,12 +214,20 @@ class SupportTicketDetailSerializer(SupportTicketListSerializer):
     def get_comments(self, obj):
         request = self.context.get("request")
         user = getattr(request, "user", None)
-        from .permissions import is_support_user, is_handler_user
 
         qs = obj.comments.select_related("author").all()
-        if user and not (is_support_user(user) or is_handler_user(user)):
+        if not _can_see_internal(user):
             qs = qs.filter(is_internal=False)
         return TicketCommentSerializer(qs, many=True, context=self.context).data
+
+    def get_events(self, obj):
+        """Timeline; events about internal notes are hidden from requesters."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        events = list(obj.events.all())
+        if not _can_see_internal(user):
+            events = [e for e in events if not (e.meta or {}).get("is_internal")]
+        return TicketEventSerializer(events, many=True, context=self.context).data
 
 
 class CreateRequestSerializer(serializers.Serializer):
@@ -251,3 +277,15 @@ class CommentCreateSerializer(serializers.Serializer):
     body = serializers.CharField(required=False, allow_blank=True, default="")
     is_internal = serializers.BooleanField(required=False, default=False)
     attachment = serializers.FileField(required=False, allow_null=True)
+
+    def validate_attachment(self, value):
+        if not value:
+            return value
+        if value.size and value.size > CHAT_ATTACHMENT_MAX_BYTES:
+            raise serializers.ValidationError("File must be under 15 MB.")
+        ext = os.path.splitext(getattr(value, "name", "") or "")[1].lower()
+        if ext not in CHAT_ATTACHMENT_EXTENSIONS:
+            raise serializers.ValidationError(
+                "Unsupported file type. Allowed: images, PDF, text/CSV, Office documents, ZIP, MP4/MP3/WAV/M4A."
+            )
+        return value

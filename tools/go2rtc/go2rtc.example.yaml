@@ -1,0 +1,25 @@
+# go2rtc config template. Copy to go2rtc.yaml (which is git-ignored, because go2rtc
+# writes registered streams, including RTSP passwords, back into it).
+#
+# Security: the API (web UI, /api/streams, /api/config) and the RTSP server are bound to
+# localhost only. The Django backend registers streams and exchanges WebRTC SDP through
+# 127.0.0.1:1984 on behalf of logged-in users; browsers never talk to the API directly.
+# Only the WebRTC media port is exposed, and a stream on it starts only after an
+# authenticated SDP exchange through the backend.
+api:
+  listen: "127.0.0.1:1984"
+  origin: ""            # no cross-origin browser access to the API
+
+rtsp:
+  listen: "127.0.0.1:8554"
+
+webrtc:
+  listen: ":8555"
+  # For browsers on other machines, add this server's LAN IP, e.g.:
+  # candidates:
+  #   - 192.168.190.10:8555
+
+srtp:
+  listen: ""            # HomeKit SRTP server off
+
+streams: {}             # registered at runtime by the backend (ops_central/go2rtc.py)

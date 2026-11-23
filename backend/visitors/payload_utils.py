@@ -535,43 +535,121 @@ def normalize_payload(data: dict[str, Any], *, partial: bool = False) -> dict[st
     return out
 
 
+# Set only by the server (approve/deny, gate scans, QR generation, auth, location scoping).
+# Clients may not write these through create/update, nor smuggle them in via extra_data.
+SERVER_CONTROLLED_FIELDS = frozenset(
+    {
+        "id",
+        "created_at",
+        "updated_at",
+        "approval_status",
+        "approved_by",
+        "denied_by",
+        "rejection_reason",
+        "expiry_status",
+        "flow_stage",
+        "qr_code_id",
+        "scan_count",
+        "generated_on",
+        "generated_by",
+        "registered_by_user_id",
+        "registered_by_username",
+        "location",
+        "location_code",
+        "host_notified_at",
+        "entity_id",
+        "version",
+        "is_deleted",
+        # camelCase spellings the frontend may use for the same values
+        "approvalStatus",
+        "approvedBy",
+        "deniedBy",
+        "rejectionReason",
+        "expiryStatus",
+        "flowStage",
+        "qrCodeId",
+        "scanCount",
+        "generatedOn",
+        "generatedBy",
+        "registeredByUserId",
+        "registeredByUsername",
+    }
+)
+
+# registration_status is the form's own state (draft vs submitted), not the approval decision.
+CLIENT_REGISTRATION_STATUSES = frozenset({"draft", "sent", "approved"})
+
+_APPROVER_NOT_REQUIRED = frozenset({"no", "false", "0", "not required", "not-required", "none", "n"})
+
+
+def approval_not_required(value: Any) -> bool:
+    """True only when the form explicitly says no approver is needed."""
+    return str(value or "").strip().lower() in _APPROVER_NOT_REQUIRED
+
+
+def initial_approval_status(approver_required: Any) -> str:
+    """New registrations wait for approval unless the form explicitly opted out."""
+    return "approved" if approval_not_required(approver_required) else "pending"
+
+
+def requested_qr_code_id(data: dict[str, Any]) -> str:
+    """Client-proposed QR id (kept on create only when unique; see VisitorWriteSerializer)."""
+    if not isinstance(data, dict):
+        return ""
+    raw = data.get("qr_code_id") or data.get("qrCodeId") or ""
+    return str(raw).strip()[:100]
+
+
+def _strip_server_controlled(target: dict[str, Any]) -> None:
+    for key in list(target.keys()):
+        if key in SERVER_CONTROLLED_FIELDS:
+            target.pop(key, None)
+
+
 def split_visitor_payload(
     data: dict[str, Any],
     *,
     registration_source: str = "",
     partial: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return (model_fields, extra_data) from a normalized payload."""
+    """Return (model_fields, extra_data) from a normalized payload.
+
+    Server-controlled fields (approval, QR, scan count, flow stage, registered_by, location …)
+    are dropped here; the caller sets them from the request / workflow.
+    """
     normalized = normalize_payload(data, partial=partial)
     if registration_source:
         normalized["registration_source"] = registration_source
 
-    model_fields: dict[str, Any] = {}
-    extra: dict[str, Any] = dict(normalized.get("extra_data") or {})
+    raw_extra = normalized.get("extra_data")
+    extra: dict[str, Any] = dict(raw_extra) if isinstance(raw_extra, dict) else {}
+    _strip_server_controlled(normalized)
+    _strip_server_controlled(extra)
 
+    model_fields: dict[str, Any] = {}
     for key, value in normalized.items():
         if key == "extra_data":
-            if isinstance(value, dict):
-                extra.update(value)
             continue
         if key in VISITOR_DIRECT_FIELDS:
             model_fields[key] = value
         else:
             extra[key] = value
 
+    if "registration_status" in model_fields:
+        reg = str(model_fields.get("registration_status") or "").strip().lower()
+        if reg in CLIENT_REGISTRATION_STATUSES:
+            model_fields["registration_status"] = reg
+        elif partial:
+            model_fields.pop("registration_status")
+        else:
+            model_fields["registration_status"] = ""
+
     if not partial:
         if not model_fields.get("mobile_number"):
             model_fields["mobile_number"] = "0000000000"
         if not model_fields.get("registration_status"):
             model_fields["registration_status"] = "approved"
-        if not model_fields.get("approval_status"):
-            needs_approval = str(model_fields.get("approver_required", "")).lower() in (
-                "yes",
-                "true",
-                "1",
-                "required",
-            )
-            model_fields["approval_status"] = "pending" if needs_approval else "approved"
+        model_fields["approval_status"] = initial_approval_status(model_fields.get("approver_required"))
 
     _sanitize_model_scalar_fields(model_fields)
     _sanitize_char_fields(model_fields)

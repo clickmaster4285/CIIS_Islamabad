@@ -2,6 +2,8 @@
 asgiref==3.11.1
 certifi==2026.2.25
 charset-normalizer==3.4.4
+# Field encryption (config/field_crypto.py) and signed city view passes (city_sync/view_pass.py)
+cryptography==50.0.2
 Django==5.2.11
 django-cors-headers==4.9.0
 django-filter==25.2
@@ -11,10 +13,11 @@ idna==3.11
 pillow==12.1.1
 psycopg2-binary==2.9.11
 python-dotenv==1.2.1
-psutil>=5.9.0
-paramiko>=3.4.0
+psutil==7.2.2
+paramiko==5.0.0
 PyYAML==6.0.3
 requests==2.32.5
+# Voice agent (Claude provider); imported only when VOICE_AGENT_PROVIDER=anthropic
 anthropic>=1.8.0
 sqlparse==0.5.5
 tzdata==2025.3
@@ -22,28 +25,28 @@ ua-parser==1.0.1
 ua-parser-builtins==202603
 urllib3==2.6.3
 user-agents==2.2.0
-python-socketio>=5.11.0
-simple-websocket>=1.0.0
+python-socketio==5.17.0
+python-engineio==4.14.0
+simple-websocket==1.1.0
+# Optional: multi-process Socket.IO (set SOCKETIO_REDIS_URL) needs `pip install redis`.
 
-# ML inference service (backend/ml_service — YOLO + face recognition)
-ultralytics>=8.0.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-tqdm>=4.65.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-python-multipart>=0.0.9
+# Backend-side computer vision (clip capture, identity clustering, InsightFace attendance)
+opencv-python==4.13.0.92
+numpy==2.3.5
 
 # Optional GPU acceleration for video recovery (PyTorch CUDA + NVENC)
-# Install CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu118
+# Install CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu126
 torch>=2.0.0
 
 # InsightFace attendance (webcam + CCTV) — Windows uses DirectML GPU ONNX
-insightface>=0.7.3
-onnx>=1.14.0
+insightface==1.0.1
+onnx==1.21.0
 onnxruntime-directml>=1.15.0; platform_system=="Windows"
 onnxruntime-gpu>=1.15.0; platform_system!="Windows"
 
 # TekEye agent reports (PDF / Excel export)
-reportlab>=4.0
-openpyxl>=3.1
+reportlab==5.0.0
+openpyxl==3.1.5
+
+# YOLO / FastAPI inference (ultralytics, fastapi, uvicorn, python-multipart, tqdm) is the
+# separate ml_services/ server: install from ml_services/requirements.txt, not here.

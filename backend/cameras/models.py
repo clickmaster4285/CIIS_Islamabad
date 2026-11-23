@@ -348,4 +348,12 @@ class DetectionEvent(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"{self.camera.code} {self.label} @ {self.created_at:%Y-%m-%d %H:%M}"
+        # HQ copies of city events have no camera row.
+        if self.camera_id and self.camera is not None:
+            cam = self.camera.code or f"cam-{self.camera_id}"
+        elif self.source_camera_id:
+            cam = f"{self.location_code or 'city'}:cam-{self.source_camera_id}"
+        else:
+            cam = "no-camera"
+        when = f"{self.created_at:%Y-%m-%d %H:%M}" if self.created_at else "unsaved"
+        return f"{cam} {self.label} @ {when}"

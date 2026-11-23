@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -14,8 +16,6 @@ from django.db import close_old_connections
 
 from config.db import release_db
 
-from city_sync.identity import local_rows_q
-from recognition.models import FaceEnrollment
 from recognition.services.face_engine import get_face_engine
 from recognition.services.rtsp_utils import open_rtsp_capture
 from recognition.services.snapshot_saver import save_detection_snapshot, snapshot_to_dict
@@ -35,6 +35,17 @@ MIN_VOTE_AGREEMENT = 0.6
 IDENTITY_SWITCH_SIMILARITY = 0.25
 DARK_FRAME_MEAN = 80.0
 SNAPSHOT_RETRY_SECONDS = 300.0
+
+
+_URL_CREDS_RE = re.compile(r"(?i)(rtsp|https?)://[^/@\s]*@")
+_RTSP_PARAM_RE = re.compile(r"(?i)(rtsp_url=)[^&\s'\"]+")
+CAMERA_REFRESH_SECONDS = 300.0
+
+
+def redact(text) -> str:
+    """Strip camera credentials (user:pass@ and ?rtsp_url=...) from errors shown in the UI or logs."""
+    out = _URL_CREDS_RE.sub(lambda m: f"{m.group(1)}://***@", str(text or ""))
+    return _RTSP_PARAM_RE.sub(r"\1***", out)
 
 
 def _min_recog_face_px() -> int:
@@ -129,7 +140,7 @@ def _fetch_snapshot_frame(http) -> tuple[np.ndarray | None, str]:
     try:
         resp = session.get(url, timeout=(2.0, 6.0))
     except requests.RequestException as exc:
-        return None, f"Snapshot failed: {exc}"
+        return None, f"Snapshot failed: {redact(exc)}"
     if resp.status_code != 200 or not resp.content:
         return None, f"Snapshot HTTP {resp.status_code}"
     frame = _decode_jpeg_bgr(resp.content)
@@ -155,12 +166,24 @@ def _decode_jpeg_bgr(jpeg: bytes):
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
-def _fetch_shared_session_frame(camera_id: int, stream_key: str, rtsp_url: str):
-    """Pull one BGR frame from the shared ML Camera Session (no extra FFmpeg)."""
+def _load_camera(camera_id: int):
+    from cameras.models import Camera
+
+    close_old_connections()
+    try:
+        return Camera.objects.filter(pk=camera_id).select_related("nvr", "ml_server").first()
+    finally:
+        release_db()
+
+
+def _fetch_shared_session_frame(camera, stream_key: str, rtsp_url: str):
+    """Pull one BGR frame from the shared ML Camera Session (no extra FFmpeg).
+
+    ``camera`` is resolved once per worker (and refreshed every few minutes), not per frame.
+    """
     import requests
     from urllib.parse import urlencode
 
-    from cameras.models import Camera
     from ml.client import (
         MLServiceError,
         ml_live_jpeg_raw_url_for_camera,
@@ -171,9 +194,9 @@ def _fetch_shared_session_frame(camera_id: int, stream_key: str, rtsp_url: str):
     if not ml_service_enabled():
         return None, "ML service disabled"
 
-    camera = Camera.objects.filter(pk=camera_id).select_related("nvr", "ml_server").first()
     if camera is None:
-        return None, f"Camera {camera_id} not found"
+        return None, "Camera not found"
+    camera_id = camera.pk
 
     urls: list[str] = []
     try:
@@ -186,14 +209,14 @@ def _fetch_shared_session_frame(camera_id: int, stream_key: str, rtsp_url: str):
         urls.append(f"{base}/live/cam/{key}/jpeg/attendance?{urlencode(params)}")
         urls.append(ml_live_jpeg_raw_url_for_camera(camera))
     except (MLServiceError, Exception) as exc:
-        return None, str(exc)
+        return None, redact(exc)
 
     last_err = "No ML JPEG URL"
     for url in urls:
         if not url:
             continue
         try:
-            resp = requests.get(url, timeout=(2.0, 4.0))
+            resp = requests.get(url, timeout=(2.0, 4.0), headers=ml_auth_headers())
             if resp.status_code != 200 or not resp.content:
                 last_err = f"HTTP {resp.status_code}"
                 continue
@@ -203,7 +226,7 @@ def _fetch_shared_session_frame(camera_id: int, stream_key: str, rtsp_url: str):
                 continue
             return frame, ""
         except requests.RequestException as exc:
-            last_err = str(exc)
+            last_err = redact(exc)
             continue
     return None, last_err
 
@@ -242,11 +265,6 @@ class CameraRuntimeState:
 
 
 class CCTVWorkerManager:
-    _gallery_lock = threading.Lock()
-    _gallery_cache: dict[str, list[float]] = {}
-    _gallery_at = 0.0
-    _GALLERY_TTL = 30.0
-
     def __init__(self):
         self._lock = threading.Lock()
         self._cameras: dict[int, CameraRuntimeState] = {}
@@ -291,6 +309,10 @@ class CCTVWorkerManager:
         with self._lock:
             existing = self._cameras.get(camera_id)
             if existing and existing.running:
+                return self._status_dict(existing)
+            if existing and existing.thread is not None and existing.thread.is_alive():
+                # A stop was requested but the old thread is still finishing: never run two readers.
+                existing.last_error = "Previous worker is still stopping - try again in a few seconds"
                 return self._status_dict(existing)
 
             stop_event = threading.Event()
@@ -355,39 +377,13 @@ class CCTVWorkerManager:
             "name": state.name,
             "running": state.running,
             "connected": state.connected,
-            "last_error": state.last_error,
+            "last_error": redact(state.last_error),
             "last_frame_at": state.last_frame_at,
             "frames_processed": state.frames_processed,
             "gallery_size": state.gallery_size,
             "recent_events": list(state.last_events)[:8],
             "has_snapshot": state.last_jpeg is not None,
         }
-
-    def _shared_gallery(self) -> dict[str, list[float]]:
-        now = time.time()
-        with self._gallery_lock:
-            if self._gallery_cache and now - self._gallery_at < self._GALLERY_TTL:
-                return self._gallery_cache
-            gallery = self._build_gallery()
-            type(self)._gallery_cache = gallery
-            type(self)._gallery_at = now
-            return gallery
-
-    def _build_gallery(self) -> dict[str, list[float]]:
-        close_old_connections()
-        gallery = {}
-        try:
-            # Staff assigned to a city are recognized there only, not by this server's cameras.
-            enrollments = FaceEnrollment.objects.filter(
-                local_rows_q("staff__"),
-                is_trained=True,
-                embedding__isnull=False,
-            ).select_related("staff")
-            for enrollment in enrollments:
-                gallery[enrollment.gallery_key] = enrollment.embedding
-            return gallery
-        finally:
-            release_db()
 
     def _face_bbox_size(self, face) -> tuple[int, int]:
         bbox = getattr(face, "bbox", None)
@@ -731,17 +727,11 @@ class CCTVWorkerManager:
         from users.attendance_service import camera_attendance_zone
 
         tracker = BYTETracker()
-        camera_zone = "mixed"
-        try:
-            from cameras.models import Camera
-
-            close_old_connections()
-            cam = Camera.objects.filter(pk=state.camera_id).only("zone", "passage_role").first()
-            camera_zone = camera_attendance_zone(cam)
-        finally:
-            release_db()
+        camera_obj = _load_camera(state.camera_id)
+        camera_loaded_at = time.time()
+        camera_zone = camera_attendance_zone(camera_obj) if camera_obj is not None else "mixed"
         gallery_refresh_at = 0.0
-        gallery: dict[str, list[float]] = {}
+        gallery = None
         gallery_warned = False
         cap = None
         frame_index = 0
@@ -784,7 +774,7 @@ class CCTVWorkerManager:
                         if snapshot_failures < 3:
                             state.connected = False
                             state.last_error = err
-                            time.sleep(reconnect_delay)
+                            state.stop_event.wait(reconnect_delay)
                             continue
                         use_snapshot = False
                         snapshot_retry_at = time.time() + SNAPSHOT_RETRY_SECONDS
@@ -794,13 +784,14 @@ class CCTVWorkerManager:
                             err,
                         )
                 if frame is None and use_shared:
-                    close_old_connections()
-                    frame, err = _fetch_shared_session_frame(state.camera_id, key, rtsp_url)
-                    release_db()
+                    if camera_obj is None or time.time() - camera_loaded_at > CAMERA_REFRESH_SECONDS:
+                        camera_obj = _load_camera(state.camera_id) or camera_obj
+                        camera_loaded_at = time.time()
+                    frame, err = _fetch_shared_session_frame(camera_obj, key, rtsp_url)
                     if frame is None:
                         state.connected = False
                         state.last_error = err or "Waiting for shared Camera Session…"
-                        time.sleep(reconnect_delay)
+                        state.stop_event.wait(reconnect_delay)
                         continue
                 elif frame is None:
                     if cap is None or not cap.isOpened():
@@ -811,13 +802,13 @@ class CCTVWorkerManager:
                         state.last_error = "Connecting to RTSP…"
                         cap, info = open_rtsp_capture(rtsp_url)
                         if cap is None:
-                            state.last_error = info or "Cannot open RTSP stream"
+                            state.last_error = redact(info or "Cannot open RTSP stream")
                             logger.warning("Camera %s RTSP failed: %s", state.camera_id, state.last_error)
-                            time.sleep(reconnect_delay)
+                            state.stop_event.wait(reconnect_delay)
                             continue
                         state.connected = True
                         state.last_error = ""
-                        logger.info("Camera %s connected (%s)", state.camera_id, info)
+                        logger.info("Camera %s connected (%s)", state.camera_id, redact(info))
 
                     ok, frame = cap.read()
                     if not ok or frame is None:
@@ -825,7 +816,7 @@ class CCTVWorkerManager:
                         state.last_error = "Frame read failed — reconnecting"
                         cap.release()
                         cap = None
-                        time.sleep(reconnect_delay)
+                        state.stop_event.wait(reconnect_delay)
                         continue
 
                 state.connected = True
@@ -844,14 +835,19 @@ class CCTVWorkerManager:
                 now = time.time()
                 if now - last_infer_at < self._scan_interval:
                     if use_snapshot or use_shared:
-                        time.sleep(min(0.2, self._scan_interval))
+                        state.stop_event.wait(min(0.2, self._scan_interval))
                     continue
                 last_infer_at = now
                 from config.worker_throttle import maybe_pause_for_cpu
 
                 maybe_pause_for_cpu(logger, label=f"cctv-{state.camera_id}")
                 if now - gallery_refresh_at > 30:
-                    gallery = get_gallery_index()
+                    # The index reloads itself when enrollments change in any process (DB fingerprint).
+                    close_old_connections()
+                    try:
+                        gallery = get_gallery_index()
+                    finally:
+                        release_db()
                     gallery_refresh_at = now
                     state.gallery_size = len(gallery)
 
@@ -894,14 +890,14 @@ class CCTVWorkerManager:
                 )
 
             except Exception as exc:
-                logger.exception("Camera %s error: %s", state.camera_id, exc)
-                state.last_error = str(exc)
+                logger.exception("Camera %s error: %s", state.camera_id, redact(exc))
+                state.last_error = redact(exc)
                 state.connected = False
                 if cap is not None:
                     cap.release()
                     cap = None
                 release_db()
-                time.sleep(reconnect_delay)
+                state.stop_event.wait(reconnect_delay)
 
         if cap is not None:
             cap.release()

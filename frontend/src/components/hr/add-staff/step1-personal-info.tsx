@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import ReactSelect from "react-select"
+import type { CSSObjectWithLabel, GroupBase, MultiValue, SingleValue } from "react-select"
 import makeAnimated from "react-select/animated"
 
 const animatedComponents = makeAnimated()
@@ -375,6 +376,17 @@ const flattenOptions = () => {
     .sort((a, b) => a.label.localeCompare(b.label))
 }
 
+type SelectOption = { value: string; label: string }
+
+function RequiredLabel({ children, required = true }: { children: React.ReactNode; required?: boolean }) {
+  return (
+    <Label className="text-base text-foreground">
+      {children}
+      {required && <span className="text-destructive ml-1">*</span>}
+    </Label>
+  )
+}
+
 export function AddStaffStep1PersonalInfo({
   employeeCategory: _employeeCategory,
   onEmployeeCategoryChange: _onEmployeeCategoryChange,
@@ -517,35 +529,35 @@ export function AddStaffStep1PersonalInfo({
   }
 
   // Handle qualification change
-  const handleQualificationChange = (selectedOptions: any) => {
-    const values = selectedOptions ? selectedOptions.map((opt: any) => opt.value) : []
+  const handleQualificationChange = (selectedOptions: MultiValue<SelectOption> | null) => {
+    const values = selectedOptions ? selectedOptions.map((opt) => opt.value) : []
     formik.setFieldValue("qualification", selectedOptions || [], true)
     updateForm({ qualification: values })
   }
 
   // Handle current posting change
-  const handleCurrentPostingChange = (selectedOption: any) => {
+  const handleCurrentPostingChange = (selectedOption: SingleValue<SelectOption>) => {
     const value = selectedOption?.value ?? ""
     formik.setFieldValue("current_posting", selectedOption, true)
     updateForm({ current_posting: value })
   }
 
   // Handle transferred from change
-  const handleTransferredFromChange = (selectedOption: any) => {
+  const handleTransferredFromChange = (selectedOption: SingleValue<SelectOption>) => {
     const value = selectedOption?.value ?? ""
     formik.setFieldValue("transferred_from", selectedOption, true)
     updateForm({ transferred_from: value })
   }
 
   // Handle transferred to change
-  const handleTransferredToChange = (selectedOption: any) => {
+  const handleTransferredToChange = (selectedOption: SingleValue<SelectOption>) => {
     const value = selectedOption?.value ?? ""
     formik.setFieldValue("transferred_to", selectedOption, true)
     updateForm({ transferred_to: value })
   }
 
   // Custom option renderer for React Select with categories
-  const formatGroupLabel = (data: any) => (
+  const formatGroupLabel = (data: GroupBase<SelectOption>) => (
     <div className="flex items-center justify-between">
       <span className="text-sm font-semibold text-muted-foreground">{data.label}</span>
       <span className="text-xs bg-muted px-2 py-0.5 rounded-full">{data.options.length}</span>
@@ -553,20 +565,13 @@ export function AddStaffStep1PersonalInfo({
   )
 
   // Helper function to render label with asterisk for required fields
-  const RequiredLabel = ({ children, required = true }: { children: React.ReactNode; required?: boolean }) => (
-    <Label className="text-base text-foreground">
-      {children}
-      {required && <span className="text-destructive ml-1">*</span>}
-    </Label>
-  )
-
   // Reusable React Select styles
   const reactSelectStyles = {
-    container: (base: any) => ({
+    container: (base: CSSObjectWithLabel) => ({
       ...base,
       width: "100%",
     }),
-    control: (base: any, state: any) => ({
+    control: (base: CSSObjectWithLabel, state: { isFocused: boolean; menuIsOpen: boolean }) => ({
       ...base,
       outline: "none !important",
       borderColor: state.isFocused || state.menuIsOpen
@@ -587,13 +592,13 @@ export function AddStaffStep1PersonalInfo({
       borderRadius: "calc(var(--radius) - 2px)",
       transition: "border-color 120ms ease, box-shadow 120ms ease",
     }),
-    valueContainer: (base: any) => ({
+    valueContainer: (base: CSSObjectWithLabel) => ({
       ...base,
       padding: "2px 12px",
       minHeight: "38px",
       alignItems: "center",
     }),
-    input: (base: any) => ({
+    input: (base: CSSObjectWithLabel) => ({
       ...base,
       margin: 0,
       padding: 0,
@@ -603,27 +608,27 @@ export function AddStaffStep1PersonalInfo({
       boxShadow: "none !important",
       border: 0,
     }),
-    indicatorsContainer: (base: any) => ({
+    indicatorsContainer: (base: CSSObjectWithLabel) => ({
       ...base,
       minHeight: "38px",
     }),
-    clearIndicator: (base: any) => ({
+    clearIndicator: (base: CSSObjectWithLabel) => ({
       ...base,
       padding: 6,
       color: "#9ca3af",
       "&:hover": { color: "#4b5563" },
     }),
-    dropdownIndicator: (base: any) => ({
+    dropdownIndicator: (base: CSSObjectWithLabel) => ({
       ...base,
       padding: 6,
       color: "#9ca3af",
       "&:hover": { color: "#4b5563" },
     }),
-    menuPortal: (base: any) => ({
+    menuPortal: (base: CSSObjectWithLabel) => ({
       ...base,
       zIndex: 9999,
     }),
-    menu: (base: any) => ({
+    menu: (base: CSSObjectWithLabel) => ({
       ...base,
       zIndex: 50,
       backgroundColor: "#ffffff",
@@ -631,12 +636,12 @@ export function AddStaffStep1PersonalInfo({
       borderRadius: "var(--radius)",
       boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
     }),
-    menuList: (base: any) => ({
+    menuList: (base: CSSObjectWithLabel) => ({
       ...base,
       padding: "4px",
       maxHeight: 260,
     }),
-    option: (base: any, state: any) => ({
+    option: (base: CSSObjectWithLabel, state: { isSelected: boolean; isFocused: boolean }) => ({
       ...base,
       backgroundColor: state.isSelected
         ? "#3b82f6"
@@ -651,29 +656,29 @@ export function AddStaffStep1PersonalInfo({
         backgroundColor: state.isSelected ? "#3b82f6" : "#e5e7eb",
       },
     }),
-    placeholder: (base: any) => ({
+    placeholder: (base: CSSObjectWithLabel) => ({
       ...base,
       color: "#9ca3af",
       fontSize: "14px",
     }),
-    singleValue: (base: any) => ({
+    singleValue: (base: CSSObjectWithLabel) => ({
       ...base,
       color: "hsl(var(--foreground))",
       fontSize: "14px",
     }),
-    multiValue: (base: any) => ({
+    multiValue: (base: CSSObjectWithLabel) => ({
       ...base,
       backgroundColor: "#f3f4f6",
       borderRadius: "calc(var(--radius) - 2px)",
       margin: "2px 4px 2px 0",
     }),
-    multiValueLabel: (base: any) => ({
+    multiValueLabel: (base: CSSObjectWithLabel) => ({
       ...base,
       color: "hsl(var(--foreground))",
       fontSize: "13px",
       padding: "2px 6px",
     }),
-    multiValueRemove: (base: any) => ({
+    multiValueRemove: (base: CSSObjectWithLabel) => ({
       ...base,
       color: "#9ca3af",
       borderRadius: "0 calc(var(--radius) - 2px) calc(var(--radius) - 2px) 0",
@@ -682,7 +687,7 @@ export function AddStaffStep1PersonalInfo({
         color: "#ffffff",
       },
     }),
-    groupHeading: (base: any) => ({
+    groupHeading: (base: CSSObjectWithLabel) => ({
       ...base,
       fontSize: "0.85rem",
       fontWeight: 600,

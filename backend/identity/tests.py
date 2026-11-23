@@ -220,6 +220,9 @@ class JourneyIdentityTests(TestCase):
 
         from identity.services.gallery import SFACE_MODEL
 
+        global RNG
+        RNG = np.random.default_rng(7)  # same vectors whatever ran before (scores sit near thresholds)
+
         self.sface = SFACE_MODEL
         self.staff = Staff.objects.create(full_name="Bilal", cnic="44444-4444444-4")
         self.other = Staff.objects.create(full_name="Hamza", cnic="55555-5555555-5")
@@ -274,11 +277,12 @@ class JourneyIdentityTests(TestCase):
         unknown = create_journey_person(person_type=PersonType.UNKNOWN, display_name="Unknown")
         JourneyEvent.objects.create(journey_person=unknown, event_type="camera_detection", title="seen")
 
-        first = identify_journey_face(face_embedding=self._probe(0.33), face_label="", camera=self.camera, track_id=9)
+        probe = self._probe(0.33)  # same track, same face both times
+        first = identify_journey_face(face_embedding=probe, face_label="", camera=self.camera, track_id=9)
         self.assertEqual(first.result.outcome, DecisionOutcome.REVIEW)
         decision = first.record(camera=None, journey_person=unknown)
         self.assertEqual(decision.review_status, ReviewStatus.PENDING)
-        again = identify_journey_face(face_embedding=self._probe(0.33), face_label="", camera=self.camera, track_id=9)
+        again = identify_journey_face(face_embedding=probe, face_label="", camera=self.camera, track_id=9)
         self.assertIsNone(again.record(camera=None, journey_person=unknown))
 
         admin = User.objects.create_user(username="hr3", password="x")
@@ -288,7 +292,9 @@ class JourneyIdentityTests(TestCase):
         unknown.refresh_from_db()
         self.assertEqual(unknown.status, PersonStatus.MERGED)
         self.assertEqual(unknown.merged_into_id, staff_person.pk)
-        self.assertTrue(JourneyEvent.objects.filter(journey_person=staff_person, title="seen").exists())
+        # The unknown's sighting moved to the staff journey (collapse_visits may fold it into a visit record).
+        self.assertFalse(JourneyEvent.all_objects.filter(journey_person=unknown).exists())
+        self.assertTrue(JourneyEvent.all_objects.filter(journey_person=staff_person, is_deleted=False).exists())
         self.assertTrue(out["gallery"]["added"], out["gallery"])
         self.assertTrue(
             FaceGalleryEntry.objects.filter(staff=self.staff, model_name=self.sface, source="approved_live").exists()

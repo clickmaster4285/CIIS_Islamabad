@@ -1,7 +1,12 @@
+import secrets
 import uuid
 
 from django.db import models
 from django.utils import timezone
+
+
+def new_visitor_qr_code_id() -> str:
+    return f"QR-{secrets.token_urlsafe(12)}"
 
 
 class Visitor(models.Model):
@@ -283,18 +288,17 @@ class Visitor(models.Model):
                 self.time_validity_start = "00:00"
             if not self.time_validity_end:
                 self.time_validity_end = "23:59"
-        super().save(*args, **kwargs)
         if is_new and not self.qr_code_id:
-            self.qr_code_id = f"QR-{self.pk}"
-            update_fields = {"qr_code_id": self.qr_code_id}
+            # Unguessable pass id. Older passes ("QR-<pk>") keep working: scans match the stored value.
+            self.qr_code_id = new_visitor_qr_code_id()
             if not self.generated_on:
-                self.generated_on = timezone.now().date()
+                self.generated_on = timezone.localdate()
                 self.generated_by = "system"
-                update_fields["generated_on"] = self.generated_on
-                update_fields["generated_by"] = self.generated_by
-            Visitor.objects.filter(pk=self.pk).update(**update_fields)
+        super().save(*args, **kwargs)
         if is_new and self.flow_stage == "arrived" and self.registration_status != "draft":
-            Visitor.objects.filter(pk=self.pk).update(flow_stage="registered")
+            from city_sync.outbox import sync_update
+
+            sync_update(Visitor.objects.filter(pk=self.pk), flow_stage="registered")
             self.flow_stage = "registered"
 
     def __str__(self):

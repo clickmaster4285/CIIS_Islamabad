@@ -52,69 +52,94 @@ def _normalize_role(role: str | None) -> str:
     return re.sub(r"[\s-]+", "_", (role or "").strip()).upper()
 
 
-def note_sheet_submitter_location(obj: NoteSheet) -> str:
-    """Location code of the officer who prepared/created the note sheet."""
-    username = (obj.created_by or "").strip()
-    if username:
-        loc = (
-            User.objects.filter(username__iexact=username, is_deleted=False)
-            .values_list("location", flat=True)
-            .first()
-        )
-        if loc:
-            return (loc or "").strip().upper()
-    # Fallback: match office label to a location choice
-    office = (obj.office or "").strip().upper()
-    if office:
-        for code, label in User.LOCATION_CHOICES:
-            if code.upper() == office or label.upper() == office:
-                return code.upper()
-            if office in label.upper() or label.upper() in office:
-                return code.upper()
-    return ""
+_USER_LOCATION_CODES = {code.upper() for code, _label in User.LOCATION_CHOICES}
 
 
-def assessment_submitter_location(obj: DetentionAssessment) -> str:
-    username = (obj.created_by or "").strip()
+def _user_location(username: str, loc_map: dict[str, str] | None = None) -> str:
+    username = (username or "").strip()
     if not username:
         return ""
+    if loc_map is not None and username.lower() in loc_map:
+        return loc_map[username.lower()]
     loc = (
         User.objects.filter(username__iexact=username, is_deleted=False)
         .values_list("location", flat=True)
         .first()
     )
-    return (loc or "").strip().upper() if loc else ""
+    return (loc or "").strip().upper()
 
 
-def recovery_submitter_location(obj: RecoveryMemo) -> str:
-    username = (obj.created_by or obj.recovery_officer or "").strip()
+def prime_submitter_locations(usernames) -> dict[str, str]:
+    """One query: lower-case username -> location code (for list endpoints)."""
+    names = {(u or "").strip() for u in usernames if (u or "").strip()}
+    if not names:
+        return {}
+    out: dict[str, str] = {n.lower(): "" for n in names}
+    for username, loc in User.objects.filter(username__in=names, is_deleted=False).values_list(
+        "username", "location"
+    ):
+        out[username.lower()] = (loc or "").strip().upper()
+    return out
+
+
+def _row_location(obj) -> str:
+    """Server-set location of the document (sync tag), when it is a user location code."""
+    code = (getattr(obj, "location_code", "") or "").strip().upper()
+    return code if code in _USER_LOCATION_CODES else ""
+
+
+def note_sheet_submitter_location(obj: NoteSheet, loc_map: dict[str, str] | None = None) -> str:
+    """Location of the officer who created the note sheet (falls back to the row's location).
+
+    The free-text ``office`` field is not trusted for this any more.
+    """
+    return _user_location(obj.created_by, loc_map) or _row_location(obj)
+
+
+def assessment_submitter_location(obj: DetentionAssessment, loc_map: dict[str, str] | None = None) -> str:
+    return _user_location(obj.created_by, loc_map) or _row_location(obj)
+
+
+def recovery_submitter_location(obj: RecoveryMemo, loc_map: dict[str, str] | None = None) -> str:
+    return _user_location(obj.created_by, loc_map) or _row_location(obj)
+
+
+def _is_submitter(user, obj) -> bool:
+    """True when ``user`` created (or last submitted) the document: no self-approval."""
+    username = (user.get_username() or "").strip().lower()
     if not username:
-        return ""
-    loc = (
-        User.objects.filter(username__iexact=username, is_deleted=False)
-        .values_list("location", flat=True)
-        .first()
-    )
-    return (loc or "").strip().upper() if loc else ""
+        return False
+    names = {(getattr(obj, "created_by", "") or "").strip().lower()}
+    return username in names
 
 
-def user_can_approve_note_sheet(user, obj: NoteSheet | None = None) -> bool:
-    """True if user is Super Admin / Location Admin / Deputy or Assistant Collector."""
+def _user_can_approve(user, obj, roles, submitter_loc: str | None, loc_fn) -> bool:
     if not user or not getattr(user, "is_authenticated", False):
         return False
     role = _normalize_role(getattr(user, "role", None))
-    if role not in NOTE_SHEET_APPROVER_ROLES:
+    if role not in roles:
+        return False
+    if obj is None:
+        return True
+    if _is_submitter(user, obj):
         return False
     if role == "ADMIN":
         return True
-    if obj is None:
-        return True
-    submitter_loc = note_sheet_submitter_location(obj)
+    if submitter_loc is None:
+        submitter_loc = loc_fn(obj)
     user_loc = (getattr(user, "location", None) or "").strip().upper()
-    if not submitter_loc:
-        # Unknown location — still allow location-scoped officials
-        return True
+    if not submitter_loc or not user_loc:
+        # Unknown location: only the global Super Admin may decide.
+        return False
     return user_loc == submitter_loc
+
+
+def user_can_approve_note_sheet(user, obj: NoteSheet | None = None, *, submitter_loc: str | None = None) -> bool:
+    """Super Admin / Location Admin / Deputy or Assistant Collector of the submitter's location.
+
+    Nobody approves their own note sheet; an unknown submitter location needs the Super Admin.
+    """
+    return _user_can_approve(user, obj, NOTE_SHEET_APPROVER_ROLES, submitter_loc, note_sheet_submitter_location)
 
 
 def user_can_delete_note_sheet(user, obj: NoteSheet) -> bool:
@@ -128,41 +153,22 @@ def user_can_delete_note_sheet(user, obj: NoteSheet) -> bool:
         return False
     if obj.status != NoteSheet.STATUS_APPROVED:
         return True
-    return user_can_approve_note_sheet(user, obj)
+    role = _normalize_role(getattr(user, "role", None))
+    if role not in NOTE_SHEET_APPROVER_ROLES:
+        return False
+    if role == "ADMIN":
+        return True
+    user_loc = (getattr(user, "location", None) or "").strip().upper()
+    submitter_loc = note_sheet_submitter_location(obj)
+    return bool(user_loc and submitter_loc and user_loc == submitter_loc)
 
 
 def user_can_approve_assessment(user, obj: DetentionAssessment | None = None) -> bool:
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    role = _normalize_role(getattr(user, "role", None))
-    if role not in ASSESSMENT_APPROVER_ROLES:
-        return False
-    if role == "ADMIN":
-        return True
-    if obj is None:
-        return True
-    submitter_loc = assessment_submitter_location(obj)
-    user_loc = (getattr(user, "location", None) or "").strip().upper()
-    if not submitter_loc:
-        return True
-    return user_loc == submitter_loc
+    return _user_can_approve(user, obj, ASSESSMENT_APPROVER_ROLES, None, assessment_submitter_location)
 
 
 def user_can_approve_recovery(user, obj: RecoveryMemo | None = None) -> bool:
-    if not user or not getattr(user, "is_authenticated", False):
-        return False
-    role = _normalize_role(getattr(user, "role", None))
-    if role not in RECOVERY_APPROVER_ROLES:
-        return False
-    if role == "ADMIN":
-        return True
-    if obj is None:
-        return True
-    submitter_loc = recovery_submitter_location(obj)
-    user_loc = (getattr(user, "location", None) or "").strip().upper()
-    if not submitter_loc:
-        return True
-    return user_loc == submitter_loc
+    return _user_can_approve(user, obj, RECOVERY_APPROVER_ROLES, None, recovery_submitter_location)
 
 
 def recipients_for_note_sheet_approval(obj: NoteSheet, exclude_user_id: int | None = None):
@@ -183,7 +189,7 @@ def recipients_for_note_sheet_approval(obj: NoteSheet, exclude_user_id: int | No
             recipients.append(u)
             continue
         if role in LOCATION_SCOPED_APPROVER_ROLES:
-            if not submitter_loc or (u.location or "").strip().upper() == submitter_loc:
+            if submitter_loc and (u.location or "").strip().upper() == submitter_loc:
                 recipients.append(u)
     return recipients
 
@@ -205,7 +211,7 @@ def recipients_for_assessment_approval(obj: DetentionAssessment, exclude_user_id
             recipients.append(u)
             continue
         if role in LOCATION_SCOPED_APPROVER_ROLES:
-            if not submitter_loc or (u.location or "").strip().upper() == submitter_loc:
+            if submitter_loc and (u.location or "").strip().upper() == submitter_loc:
                 recipients.append(u)
     return recipients
 
@@ -227,7 +233,7 @@ def recipients_for_recovery_approval(obj: RecoveryMemo, exclude_user_id: int | N
             recipients.append(u)
             continue
         if role in LOCATION_SCOPED_APPROVER_ROLES:
-            if not submitter_loc or (u.location or "").strip().upper() == submitter_loc:
+            if submitter_loc and (u.location or "").strip().upper() == submitter_loc:
                 recipients.append(u)
     return recipients
 

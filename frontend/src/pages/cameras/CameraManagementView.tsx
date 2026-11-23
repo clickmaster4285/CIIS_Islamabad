@@ -28,6 +28,7 @@ export function CameraManagementView({
   useEffect(() => {
     const camId = Number(id)
     if (!id || Number.isNaN(camId)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- error/loading state for the fetch keyed on the route id
       setError("Invalid camera id")
       setLoading(false)
       return

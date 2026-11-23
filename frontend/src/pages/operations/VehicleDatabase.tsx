@@ -1,62 +1,45 @@
 // src/pages/operations/VehicleDatabase.tsx
 "use client"
 
-import { useState, useEffect } from "react"
+import { useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { 
   Search, 
-  Upload, 
   Camera, 
   Phone, 
-  Mail, 
   IdCard,
   User,
-  Calendar,
   MapPin,
   Download,
   Car,
   Truck,
   Bike,
-  FileText,
   Shield,
   Clock,
   Eye,
-  History,
   AlertTriangle,
   CheckCircle,
-  XCircle,
-  QrCode,
   Filter,
   ChevronLeft,
   ChevronRight,
-  Fuel,
-  Wrench,
-  Gauge,
   Palette,
   Hash,
   Building2,
-  Users,
   Camera as CameraIcon,
-  Image as ImageIcon,
   Activity,
   Plus,
   RefreshCw,
-  Printer,
   MoreHorizontal,
   Edit,
   Trash2,
-  Copy,
-  BarChart3,
-  Fingerprint,
-  QrCode as QrCodeIcon
+  Copy
 } from "lucide-react"
 import {
   Dialog,
@@ -90,10 +73,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { Progress } from "@/components/ui/progress"
-import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
 import { getVehicleDatabaseDetailPath } from "@/routes/config"
 
@@ -693,6 +673,14 @@ const VehicleImagePlaceholder = ({ type }: { type: string }) => (
 )
 
 // Main Component
+function loadStoredVehicles(): Vehicle[] {
+  const stored = localStorage.getItem("customs-vehicle-database")
+  if (stored) return JSON.parse(stored)
+  const sample = generateSampleVehicles()
+  localStorage.setItem("customs-vehicle-database", JSON.stringify(sample))
+  return sample
+}
+
 export default function VehicleDatabasePage() {
   const navigate = useNavigate()
   const { toast } = useToast()
@@ -713,8 +701,8 @@ export default function VehicleDatabasePage() {
   })
   
   const [activeTab, setActiveTab] = useState("all")
-  const [vehicles, setVehicles] = useState<Vehicle[]>([])
-  const [filteredVehicles, setFilteredVehicles] = useState<Vehicle[]>([])
+  // Load data from localStorage or generate sample
+  const [vehicles, setVehicles] = useState<Vehicle[]>(() => loadStoredVehicles())
   const [currentPage, setCurrentPage] = useState(1)
   const [itemsPerPage] = useState(10)
   const [selectedVehicle, setSelectedVehicle] = useState<Vehicle | null>(null)
@@ -726,25 +714,12 @@ export default function VehicleDatabasePage() {
   const [quickViewOpen, setQuickViewOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
 
-  // Load data from localStorage or generate sample
-  useEffect(() => {
-    loadVehicles()
-  }, [])
-
   const loadVehicles = () => {
-    const stored = localStorage.getItem("customs-vehicle-database")
-    if (stored) {
-      setVehicles(JSON.parse(stored))
-    } else {
-      const sample = generateSampleVehicles()
-      setVehicles(sample)
-      localStorage.setItem("customs-vehicle-database", JSON.stringify(sample))
-    }
+    setVehicles(loadStoredVehicles())
   }
 
   // Filter vehicles when search filters change
-  useEffect(() => {
-    const filtered = vehicles.filter(vehicle => {
+  const filteredVehicles = useMemo(() => vehicles.filter(vehicle => {
       // Filter by status tab
       if (activeTab !== "all" && vehicle.status !== activeTab) return false
       
@@ -777,11 +752,18 @@ export default function VehicleDatabasePage() {
       if (searchFilters.riskLevel && !matchesRiskLevel) return false
       
       return true
-    })
-    
-    setFilteredVehicles(filtered)
+    }), [vehicles, searchFilters, activeTab])
+
+  // Back to page 1 whenever the list or filters change (adjust state during render).
+  const [pageResetKey, setPageResetKey] = useState({ vehicles, searchFilters, activeTab })
+  if (
+    pageResetKey.vehicles !== vehicles ||
+    pageResetKey.searchFilters !== searchFilters ||
+    pageResetKey.activeTab !== activeTab
+  ) {
+    setPageResetKey({ vehicles, searchFilters, activeTab })
     setCurrentPage(1)
-  }, [vehicles, searchFilters, activeTab])
+  }
 
   const handleFilterChange = (key: string, value: string) => {
     setSearchFilters(prev => ({
@@ -869,14 +851,6 @@ export default function VehicleDatabasePage() {
         description: "Vehicle data has been refreshed.",
       })
     }, 1000)
-  }
-
-  const handleAddVehicle = (newVehicle: Partial<Vehicle>) => {
-    // In a real app, this would open a form
-    toast({
-      title: "Add Vehicle",
-      description: "Vehicle registration form would open here.",
-    })
   }
 
   const handleLprSearch = (file: File) => {

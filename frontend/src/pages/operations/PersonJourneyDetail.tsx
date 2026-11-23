@@ -431,10 +431,10 @@ export default function PersonJourneyDetailPage() {
     },
   })
 
-  const events = data?.events ?? []
+  const events = useMemo(() => data?.events ?? [], [data?.events])
   const person = data?.person
-  const cameraCaptures = cameraData?.results ?? []
-  const tracklets = detail?.tracks ?? []
+  const cameraCaptures = useMemo(() => cameraData?.results ?? [], [cameraData?.results])
+  const tracklets = useMemo(() => detail?.tracks ?? [], [detail?.tracks])
   const personId = person ? journeyPersonId(person) : ""
 
   const startRename = () => {

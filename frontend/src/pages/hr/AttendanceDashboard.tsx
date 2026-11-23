@@ -19,6 +19,7 @@ export default function AttendanceDashboardPage() {
   }, [])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- refresh() only sets state after an awaited request
     void refresh()
     const onRealtime = (e: Event) => {
       const domains = (e as CustomEvent<{ domains?: string[] }>).detail?.domains || []

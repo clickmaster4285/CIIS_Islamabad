@@ -19,6 +19,7 @@ def merge_hybrid_timeline(
 
     ordered = sorted(entries, key=lambda e: e.get("index", 0))
     paths: list[str] = []
+    sources: list[str] = []
     breakdown = {"original": 0, "recovered": 0, "generated": 0}
 
     for out_idx, entry in enumerate(ordered):
@@ -29,11 +30,13 @@ def merge_hybrid_timeline(
         shutil.copy2(str(src_path), dest)
         paths.append(dest)
         source = entry.get("source", "original")
+        sources.append(source)
         if source in breakdown:
             breakdown[source] += 1
 
     return {
         "merged_paths": paths,
+        "sources": sources,
         "frame_count": len(paths),
         "breakdown": breakdown,
         "merge_dir": merge_dir,

@@ -34,6 +34,7 @@ import {
   fetchObjectVisits,
   fetchTrackedObjects,
   formatDuration,
+  secondsSince,
   objectTypeLabel,
   unwrapList,
   type ObjectType,
@@ -190,17 +191,10 @@ export default function ObjectTrackingPage() {
   const visitsTotal = visitsQuery.data?.count ?? 0
   const visitsTotalPages = visitsQuery.data?.total_pages ?? 1
 
-  useEffect(() => {
-    if (liveTotalPages > 0 && livePage > liveTotalPages) setLivePage(liveTotalPages)
-  }, [livePage, liveTotalPages])
-
-  useEffect(() => {
-    if (objectsTotalPages > 0 && objectsPage > objectsTotalPages) setObjectsPage(objectsTotalPages)
-  }, [objectsPage, objectsTotalPages])
-
-  useEffect(() => {
-    if (visitsTotalPages > 0 && visitsPage > visitsTotalPages) setVisitsPage(visitsTotalPages)
-  }, [visitsPage, visitsTotalPages])
+  // Clamp each page to its available range (adjust state during render).
+  if (liveTotalPages > 0 && livePage > liveTotalPages) setLivePage(liveTotalPages)
+  if (objectsTotalPages > 0 && objectsPage > objectsTotalPages) setObjectsPage(objectsTotalPages)
+  if (visitsTotalPages > 0 && visitsPage > visitsTotalPages) setVisitsPage(visitsTotalPages)
 
   return (
     <ModulePageLayout
@@ -306,10 +300,7 @@ export default function ObjectTrackingPage() {
                       <div className="text-xs">Entry {formatDateTime(v.entry_at)}</div>
                       <div className="text-xs text-muted-foreground">
                         Duration {formatDuration(
-                          Math.max(
-                            0,
-                            (Date.now() - new Date(v.entry_at).getTime()) / 1000,
-                          ),
+                          secondsSince(v.entry_at),
                         )}
                       </div>
                     </div>
@@ -528,7 +519,7 @@ export default function ObjectTrackingPage() {
                     <TableCell>
                       {v.status === "active"
                         ? formatDuration(
-                            Math.max(0, (Date.now() - new Date(v.entry_at).getTime()) / 1000),
+                            secondsSince(v.entry_at),
                           )
                         : formatDuration(v.duration_seconds)}
                     </TableCell>

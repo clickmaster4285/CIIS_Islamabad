@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  DEFAULT_STAFF_LOGIN_PASSWORD,
+  generateStaffLoginPassword,
   createStaffUser,
   fetchStaffLoginPreview,
   usernameFromFullName,
@@ -46,7 +46,7 @@ export function CreateEmployeeLoginForm({
   onCancel?: () => void
 }) {
   const [selectedId, setSelectedId] = useState<number | undefined>(staffId)
-  const [password, setPassword] = useState(DEFAULT_STAFF_LOGIN_PASSWORD)
+  const [password, setPassword] = useState(() => generateStaffLoginPassword())
   const [showPassword, setShowPassword] = useState(true)
   const [role, setRole] = useState("")
   const [location, setLocation] = useState("")
@@ -87,7 +87,7 @@ export function CreateEmployeeLoginForm({
   const preview: StaffLoginPreview | undefined = previewQuery.data
   const showRole = Boolean(preview?.role_required)
   const showLocation = Boolean(preview?.location_required) || (showRole && role !== "ADMIN" && role !== "")
-  const defaultPassword = preview?.default_password || DEFAULT_STAFF_LOGIN_PASSWORD
+  const defaultPassword = preview?.default_password || password
 
   useEffect(() => {
     if (!preview?.username || usernameEdited) return
@@ -331,7 +331,7 @@ export function CreateEmployeeLoginForm({
                       setPassword(e.target.value)
                       setPasswordEdited(true)
                     }}
-                    placeholder={DEFAULT_STAFF_LOGIN_PASSWORD}
+                    placeholder="Temporary password"
                     autoComplete="new-password"
                     className="h-11 border-slate-200 bg-white pr-20 font-mono text-sm tracking-widest"
                   />
@@ -355,7 +355,7 @@ export function CreateEmployeeLoginForm({
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Default temporary password is <span className="font-mono font-medium text-slate-700">{defaultPassword}</span> (shown so you can share it with the employee).
+                  Temporary password is <span className="font-mono font-medium text-slate-700">{defaultPassword}</span> (shown so you can share it with the employee).
                 </p>
               </div>
             </div>

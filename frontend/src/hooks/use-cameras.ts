@@ -26,6 +26,7 @@ export function useCameras(options?: {
   }, [options?.allocatedOnly, options?.activeOnly, options?.onlineOnly])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch; reload() flips `loading` before the async request
     reload()
     const onUpdate = () => reload()
     window.addEventListener("camera-integration-updated", onUpdate)

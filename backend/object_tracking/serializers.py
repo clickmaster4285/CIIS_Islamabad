@@ -308,6 +308,13 @@ class GlobalObjectDetailSerializer(GlobalObjectListSerializer):
             "metadata",
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for key, limit in (self.context.get("detail_limits") or {}).items():
+            if isinstance(data.get(key), list) and len(data[key]) > limit:
+                data[key] = data[key][:limit]
+        return data
+
     def get_movements(self, obj: GlobalObject) -> list:
         rows = obj.movements.select_related("clip", "clip__camera").order_by("-started_at")[:100]
         return ObjectMovementWithClipSerializer(rows, many=True, context=self.context).data

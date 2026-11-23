@@ -33,10 +33,8 @@ export default function DepositAccountRegisterDetailPage() {
   const [row, setRow] = useState<DepositAccountRow | null | undefined>(undefined)
 
   useEffect(() => {
-    if (!id) {
-      setRow(null)
-      return
-    }
+    // Missing id is handled by the early return in render.
+    if (!id) return
     let cancelled = false
     fetchDepositAccountById(id)
       .then((data) => {

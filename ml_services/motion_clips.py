@@ -89,7 +89,13 @@ class ClipConfig:
 
     @classmethod
     def from_env(cls) -> ClipConfig:
-        default_dir = str(Path(__file__).resolve().parent / "motion_clips")
+        # One folder per ML process: gpu0 and gpu1 run from the same directory, and a shared
+        # folder made each node list, prune and delete the other node's clips.
+        from live_metrics import ml_node_id
+
+        node = ml_node_id()
+        base = Path(__file__).resolve().parent / "motion_clips"
+        default_dir = str(base / node if node else base)
         return cls(
             enabled=os.getenv("ML_MOTION_CLIPS_ENABLED", "true").strip().lower() in ("true", "1", "yes"),
             fps=min(25.0, max(1.0, _env_float("ML_MOTION_CLIP_FPS", 8.0))),
@@ -150,6 +156,16 @@ def _box_iou(a: list[float], b: list[float]) -> float:
     inter = ix * iy
     union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
     return inter / union if union > 0 else 0.0
+
+
+def _rescale_det(det: dict[str, Any], k: float) -> dict[str, Any]:
+    """Pose / box result from a downscaled image back to clip pixels."""
+    out = dict(det)
+    if det.get("bbox") is not None:
+        out["bbox"] = [float(v) * k for v in det["bbox"][:4]]
+    if det.get("keypoints"):
+        out["keypoints"] = [[float(p[0]) * k, float(p[1]) * k, *p[2:]] for p in det["keypoints"]]
+    return out
 
 
 def move_pct(from_bbox: list[float], to_bbox: list[float], width: int, height: int) -> float | None:
@@ -217,6 +233,7 @@ class _Camera:
     clip_size: tuple[int, int] = (0, 0)
     # danger class → (box where it was recorded, last time seen)
     danger_spots: dict[str, tuple[list[float], float]] = field(default_factory=dict)
+    last_ring_at: float = 0.0
 
 
 class MotionClipRecorder:
@@ -238,6 +255,16 @@ class MotionClipRecorder:
         # YOLO vehicle detection on every clip frame (vehicles have no pose)
         self._vehicle_batch = vehicle_batch
         self._clip_vehicles = os.getenv("ML_CLIP_VEHICLE_TRACK_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+        # Idle pre-roll sample rate (frames kept while nothing records); default half the clip fps.
+        try:
+            pre_fps = float(os.getenv("ML_MOTION_PREROLL_FPS", "") or self.config.fps / 2.0)
+        except (TypeError, ValueError):
+            pre_fps = self.config.fps / 2.0
+        self._preroll_interval = 1.0 / min(self.config.fps, max(0.5, pre_fps))
+        # Clip pose / vehicle reprocessing: long clips are subsampled to at most this many
+        # frames, and every frame is downscaled to this width for the detector.
+        self._reprocess_max_frames = max(16, int(_env_float("ML_CLIP_REPROCESS_MAX_FRAMES", 160)))
+        self._reprocess_width = max(320, int(_env_float("ML_CLIP_REPROCESS_WIDTH", 960)))
         self._ffmpeg_path = ffmpeg_path or (lambda: None)
         self._frame_sources = frame_sources or (lambda: {})
         self._dir = Path(self.config.out_dir)
@@ -263,6 +290,10 @@ class MotionClipRecorder:
         if not self.config.enabled or self._running:
             return
         self._dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.sweep_orphans()
+        except Exception as exc:
+            print(f"[motion-clip] Orphan sweep failed: {exc}")
         self._running = True
         for target, name in ((self._sample_loop, "motion-clip-sampler"), (self._encode_loop, "motion-clip-encode")):
             t = threading.Thread(target=target, daemon=True, name=name)
@@ -317,6 +348,11 @@ class MotionClipRecorder:
                 with self._lock:
                     cam = self._cameras.setdefault(key, _Camera())
                     if seq == cam.last_seq:
+                        continue
+                    # No recording on this camera: the pre-roll ring only needs
+                    # preroll_fps (resize + JPEG per camera was the sampler's main cost).
+                    # Gaps are padded with repeated frames when a recording starts.
+                    if cam.recording is None and now - cam.last_ring_at < self._preroll_interval * 0.95:
                         continue
                     cam.last_seq = seq
                     cam.new_frames.append(now)
@@ -395,6 +431,10 @@ class MotionClipRecorder:
                     and now - spot[1] <= self.config.danger_rearm_sec
                     and (not bbox or not spot[0] or _box_iou(spot[0], bbox) >= 0.3)
                 )
+                if det.get("stale") and not active:
+                    # Box reused from an earlier specialist run (weapon / fire models run every
+                    # Nth inference): it may keep a running danger clip going, never start one.
+                    continue
                 cam.danger_spots[cls] = (spot[0] if same_spot else bbox, now)
                 if same_spot and not active:
                     continue
@@ -441,17 +481,32 @@ class MotionClipRecorder:
             cam.source_size = (src_w, src_h)
             cam.clip_size = (img.shape[1], img.shape[0])
             cam.ring.append((now, data))
+            cam.last_ring_at = now
             while cam.ring and now - cam.ring[0][0] > cfg.preroll_sec:
                 cam.ring.popleft()
             rec = cam.recording
             if rec is not None:
                 if not rec.frames:
                     # First frame of a new recording: seed it with the pre-roll
-                    rec.frames = [f for f in cam.ring if f[0] >= rec.started_at]
+                    rec.frames = self._padded([f for f in cam.ring if f[0] >= rec.started_at])
                 else:
                     rec.frames.append((now, data))
                 rec.source_size, rec.clip_size = cam.source_size, cam.clip_size
             self._check_camera(camera_key, cam, now)
+
+    def _padded(self, frames: list[tuple[float, bytes]]) -> list[tuple[float, bytes]]:
+        """Repeat frames across gaps so the pre-roll (sampled slower) plays at the clip fps."""
+        step = 1.0 / self.config.fps
+        out: list[tuple[float, bytes]] = []
+        for ts, data in frames:
+            if out:
+                prev_ts, prev_data = out[-1]
+                t = prev_ts + step
+                while ts - t > step * 0.5:
+                    out.append((t, prev_data))
+                    t += step
+            out.append((ts, data))
+        return out
 
     def _apply_event(self, cam: _Camera, camera_key: str, ev: dict[str, Any], now: float) -> _Recording | None:
         """Caller holds self._lock."""
@@ -606,11 +661,25 @@ class MotionClipRecorder:
             return frames
         scale = rec.clip_size[0] / float(rec.source_size[0])
         thickness = max(2, int(round(rec.clip_size[1] / 240)))
-        imgs = [cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) for _ts, data in frames]
         times = [ts for ts, _data in frames]
-        all_ok = all(i is not None for i in imgs)
+        # Detector input: at most _reprocess_max_frames evenly spaced frames, downscaled to
+        # _reprocess_width, decoded chunk by chunk (a 30 s clip used to be decoded into
+        # memory in full, ~240 full-size images, and run through the GPU frame by frame).
+        n = len(frames)
+        step = max(1, -(-n // self._reprocess_max_frames))
+        sample_idx = list(range(0, n, step))
+        if sample_idx[-1] != n - 1:
+            sample_idx.append(n - 1)
+        sample_times = [times[i] for i in sample_idx]
+        # nearest sampled frame at or before each clip frame (for drawing every frame)
+        sample_of = [0] * n
+        si = 0
+        for fi in range(n):
+            while si + 1 < len(sample_idx) and sample_idx[si + 1] <= fi:
+                si += 1
+            sample_of[fi] = si
 
-        tracks: list[tuple[str, list[dict[str, Any] | None]]] = []  # ("pose" | "box", track)
+        tracks: list[tuple[str, list[dict[str, Any] | None]]] = []  # ("pose" | "box", track per sample)
         drawn_paths: list[tuple[list, float]] = []  # (path, scale)
         handled: set[int] = set()  # id() of movements already drawn
 
@@ -620,21 +689,23 @@ class MotionClipRecorder:
         )
         for kind, classes, batch_fn in groups:
             group = [mv for mv in moves if (mv.class_name or "").lower() in classes and len(mv.from_bbox) >= 4]
-            if not group or batch_fn is None or not all_ok:
+            if not group or batch_fn is None:
                 continue
             try:
-                found = run_pose(imgs, batch_fn)
-                taken: list[set[int]] = [set() for _ in imgs]
+                found = self._detect_sampled(frames, sample_idx, batch_fn)
+                if found is None:
+                    continue
+                taken: list[set[int]] = [set() for _ in sample_idx]
                 tracked_any = False
                 for mv in group:
-                    track = self._track_mover(mv, found, times, scale, taken)
+                    track = self._track_mover(mv, found, sample_times, scale, taken)
                     path = smooth_path(dense_path(track, mv.started_at)) if track else []
                     if len(path) >= 2:
                         tracks.append((kind, track))
                         drawn_paths.append((path, 1.0))
                         handled.add(id(mv))
                         tracked_any = True
-                        mv.pose_frames = sum(1 for t in track if t is not None)
+                        mv.pose_frames = sum(1 for fi in range(n) if track[sample_of[fi]] is not None)
                         # Dense path in source pixels replaces the sparse live one
                         mv.path = [[round(x / scale, 1), round(y / scale, 1), t] for x, y, t in path]
                 if tracked_any:
@@ -649,14 +720,15 @@ class MotionClipRecorder:
 
         out = []
         for fi, (ts, data) in enumerate(frames):
-            img = imgs[fi]
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)  # one frame at a time
             if img is None:
                 out.append((ts, data))
                 continue
             for path, sc in drawn_paths:
                 draw_motion_path(img, path, thickness, scale=sc, until=ts)
             for kind, track in tracks:
-                item = track[fi] if fi < len(track) else None
+                pos = sample_of[fi]
+                item = track[pos] if pos < len(track) else None
                 if item is None:
                     continue
                 if kind == "pose" and item["pose"].get("keypoints"):
@@ -667,6 +739,33 @@ class MotionClipRecorder:
             ok, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self.config.jpeg_quality])
             out.append((ts, jpeg.tobytes() if ok else data))
         return out
+
+    def _detect_sampled(
+        self, frames: list[tuple[float, bytes]], sample_idx: list[int], batch_fn: PoseBatch, chunk: int = 8
+    ) -> list[list[dict[str, Any]]] | None:
+        """Run batch_fn over the sampled frames (downscaled, decoded per chunk).
+
+        Results come back in clip-frame pixels. None when a frame cannot be decoded.
+        """
+        found: list[list[dict[str, Any]]] = []
+        for c in range(0, len(sample_idx), chunk):
+            imgs: list[np.ndarray] = []
+            factors: list[float] = []
+            for i in sample_idx[c : c + chunk]:
+                img = cv2.imdecode(np.frombuffer(frames[i][1], np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    return None
+                h, w = img.shape[:2]
+                f = 1.0
+                if w > self._reprocess_width:
+                    f = self._reprocess_width / float(w)
+                    img = cv2.resize(img, (self._reprocess_width, max(2, int(h * f))), interpolation=cv2.INTER_AREA)
+                imgs.append(img)
+                factors.append(f)
+            res = run_pose(imgs, batch_fn, batch_size=chunk)
+            for dets, f in zip(res, factors):
+                found.append(dets if f == 1.0 else [_rescale_det(d, 1.0 / f) for d in dets])
+        return found
 
     @staticmethod
     def _track_mover(mv: _Movement, poses: list, times: list[float], scale: float, taken: list[set[int]]):
@@ -773,7 +872,37 @@ class MotionClipRecorder:
         objs = ", ".join(m["global_object_id"] or m["class_name"] for m in movements)
         print(f"[motion-clip] {rec.camera_key} saved {duration:.1f}s clip ({len(frames)} frames) — {objs}")
 
+    _ORPHAN_SUFFIXES = (".part.mp4", ".json.tmp", ".end.jpg", ".mp4", ".jpg")
+
+    def sweep_orphans(self, max_age_sec: float = 600.0, now: float | None = None) -> int:
+        """Delete clip files whose <id>.json never appeared (crash mid-write), once old enough."""
+        if not self._dir.is_dir():
+            return 0
+        now = time.time() if now is None else now
+        removed = 0
+        for path in self._dir.iterdir():
+            if not path.is_file():
+                continue
+            name = path.name
+            suffix = next((s for s in self._ORPHAN_SUFFIXES if name.endswith(s)), None)
+            if suffix is None:
+                continue
+            clip_id = name[: -len(suffix)]
+            if suffix != ".json.tmp" and (self._dir / f"{clip_id}.json").is_file():
+                continue
+            try:
+                if now - path.stat().st_mtime < max_age_sec:
+                    continue
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            self.stats["orphans_removed"] = self.stats.get("orphans_removed", 0) + removed
+        return removed
+
     def _prune(self) -> None:
+        self.sweep_orphans()
         limit = self.config.max_pending_mb * 1024 * 1024
         clips = sorted(self._dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
         total = sum(p.stat().st_size for p in self._dir.glob("*") if p.is_file())

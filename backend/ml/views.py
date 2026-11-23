@@ -13,10 +13,36 @@ from .client import (
     ml_reload_faces,
     ml_service_enabled,
     ml_validate_human_face,
+    public_error_message,
 )
 from .face_sync import collect_db_face_embeddings
+from . import job_store
 
 logger = logging.getLogger(__name__)
+
+
+class IsCameraAdmin(permissions.BasePermission):
+    """Camera admin roles only (users.permissions.CAMERA_ADMIN_ROLES)."""
+
+    def has_permission(self, request, view):
+        from cameras.access import is_camera_admin
+
+        return is_camera_admin(request.user)
+
+
+def _ml_error(exc: MLServiceError, what: str) -> Response:
+    logger.warning("%s failed: %s", what, exc)
+    return Response({"detail": public_error_message(exc)}, status=exc.status_code or 503)
+
+
+def _job_row_response(request, job_id: str, read_status, not_found: str) -> Response:
+    if not job_store.is_valid_job_id(job_id):
+        return Response({"detail": "Invalid job_id."}, status=400)
+    row = read_status(job_id)
+    if not row or not job_store.may_access(row, request.user):
+        # Same 404 for other users' jobs: job ids are not an authorization token.
+        return Response({"detail": not_found}, status=404)
+    return Response(job_store.public_row(row))
 
 
 class MLHealthAPIView(APIView):
@@ -57,7 +83,7 @@ class MLDetectImageAPIView(APIView):
         try:
             result = ml_detect_image(image.read(), filename=image.name or "image.jpg")
         except MLServiceError as exc:
-            return Response({"detail": str(exc)}, status=exc.status_code or 503)
+            return _ml_error(exc, "ML detect image")
         return Response(result)
 
 
@@ -72,18 +98,18 @@ class MLValidateHumanFaceAPIView(APIView):
         try:
             result = ml_validate_human_face(image.read(), filename=image.name or "face.jpg")
         except MLServiceError as exc:
-            return Response({"detail": str(exc)}, status=exc.status_code or 503)
+            return _ml_error(exc, "ML validate face")
         return Response(result)
 
 
 class MLReloadFacesAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, IsCameraAdmin]
 
     def post(self, request):
         try:
             result = ml_reload_faces(embeddings=collect_db_face_embeddings())
         except MLServiceError as exc:
-            return Response({"detail": str(exc)}, status=exc.status_code or 503)
+            return _ml_error(exc, "ML reload faces")
         return Response(result)
 
 
@@ -137,6 +163,7 @@ class MLVideoSearchAPIView(APIView):
                 "reid_threshold": _form_float(request, "reid_threshold", 0.88),
                 "sample_fps": _form_float(request, "sample_fps", 0.0),
             },
+            owner_id=request.user.pk,
         )
         return Response(payload, status=status.HTTP_202_ACCEPTED)
 
@@ -146,10 +173,7 @@ class MLVideoSearchAPIView(APIView):
             return Response({"detail": "job_id is required."}, status=400)
         from .video_search_jobs import read_status
 
-        row = read_status(job_id)
-        if not row:
-            return Response({"detail": "Search job not found."}, status=404)
-        return Response(row)
+        return _job_row_response(request, job_id, read_status, "Search job not found.")
 
 
 def _form_bool(request, name: str, default: bool = True) -> bool:
@@ -211,6 +235,7 @@ class MLVideoAnalyzeAPIView(APIView):
                 "plate": plate,
                 "sample_fps": min(4.0, max(0.5, _form_float(request, "sample_fps", 1.0))),
             },
+            owner_id=request.user.pk,
         )
         return Response(payload, status=status.HTTP_202_ACCEPTED)
 
@@ -220,10 +245,7 @@ class MLVideoAnalyzeAPIView(APIView):
             return Response({"detail": "job_id is required."}, status=400)
         from .video_analyze_jobs import read_status
 
-        row = read_status(job_id)
-        if not row:
-            return Response({"detail": "Analyze job not found."}, status=404)
-        return Response(row)
+        return _job_row_response(request, job_id, read_status, "Analyze job not found.")
 
 
 class MLVideoAnalyzeFileAPIView(APIView):
@@ -232,9 +254,15 @@ class MLVideoAnalyzeFileAPIView(APIView):
     def get(self, request, job_id: str):
         from django.http import FileResponse
 
-        from .video_analyze_jobs import tagged_file_path
+        from .video_analyze_jobs import read_status, tagged_file_path
 
-        path = tagged_file_path((job_id or "").strip())
+        job_id = (job_id or "").strip()
+        if not job_store.is_valid_job_id(job_id):
+            return Response({"detail": "Invalid job_id."}, status=400)
+        row = read_status(job_id)
+        if not row or not job_store.may_access(row, request.user):
+            return Response({"detail": "Tagged video is not ready."}, status=404)
+        path = tagged_file_path(job_id)
         if path is None:
             return Response({"detail": "Tagged video is not ready."}, status=404)
         handle = path.open("rb")

@@ -9,10 +9,9 @@ from datetime import timedelta
 from typing import Any
 
 from django.conf import settings
-from django.db.models import Q
 from django.utils import timezone
 
-from .clip_capture import schedule_attendance_snapshot, schedule_detection_clip
+from .clip_capture import schedule_detection_clip
 from .models import Camera, CameraPurpose, ClipStatus, DetectionEvent
 
 logger = logging.getLogger(__name__)
@@ -191,17 +190,9 @@ def resolve_staff_identity(label: str, class_name: str) -> tuple[str, str]:
     if cls not in ("person", "face") or lbl.lower() in _GENERIC_EMPLOYEE_LABELS:
         return "", ""
 
-    from users.models import Staff
+    from ml.face_sync import resolve_staff_for_face_label
 
-    staff = (
-        Staff.objects.filter(
-            Q(face_identity_label__iexact=lbl)
-            | Q(user__username__iexact=lbl)
-            | Q(full_name__iexact=lbl)
-        )
-        .select_related("user")
-        .first()
-    )
+    staff = resolve_staff_for_face_label(lbl)
 
     if staff is None:
         return lbl[:150], ""
@@ -217,6 +208,14 @@ def _dedup_seconds() -> int:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return 5
+
+
+def _track_dedup_seconds() -> int:
+    """ByteTrack ids restart with the ML process, so a track id only dedupes recent rows."""
+    try:
+        return max(30, int(getattr(settings, "DETECTION_TRACK_DEDUP_SECONDS", 600)))
+    except (TypeError, ValueError):
+        return 600
 
 
 def _crowd_threshold() -> int:
@@ -437,7 +436,12 @@ def maybe_emit_specialist_alerts(camera: Camera, detections: list[dict[str, Any]
         if confidence < conf_floor:
             continue
         prev = present.get(key)
-        if prev is None or confidence >= float(prev.get("confidence") or 0):
+        # Prefer a fresh model hit over a box ML re-published from an earlier run (stale).
+        if (
+            prev is None
+            or (prev.get("stale") and not det.get("stale"))
+            or (bool(prev.get("stale")) == bool(det.get("stale")) and confidence >= float(prev.get("confidence") or 0))
+        ):
             present[key] = det
 
     saved = 0
@@ -462,7 +466,9 @@ def maybe_emit_specialist_alerts(camera: Camera, detections: list[dict[str, Any]
         should_create = False
         with _alert_lock:
             state_key = (cam_id, key)
-            if not _alert_active.get(state_key, False):
+            # A stale box (weapon/fire model not re-run this cycle) may keep an episode
+            # alive but never opens a new one.
+            if not _alert_active.get(state_key, False) and not det.get("stale"):
                 _alert_active[state_key] = True
                 should_create = True
         if not should_create:
@@ -522,6 +528,62 @@ def evaluate_camera_alerts(camera: Camera, detections: list[dict[str, Any]]) -> 
     return total
 
 
+def save_manual_detections(
+    camera: Camera,
+    detections: list[dict[str, Any]],
+    *,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+) -> list[DetectionEvent]:
+    """Persist a one-off "Detect now" frame with the live-poll floors and dedupe rules.
+
+    Same confidence floor and short same-label window as save_detection_batch, and the
+    same-spot rule for alerts, but without touching object-tracking visit state (a single
+    manual frame must not count as a missed poll for tracked objects).
+    """
+    clip_enabled = bool(getattr(settings, "DETECTION_CLIP_ENABLED", True))
+    window = _dedup_seconds()
+    since = timezone.now() - timedelta(seconds=max(1, window)) if window > 0 else None
+    saved: list[DetectionEvent] = []
+    seen: set[tuple[str, str]] = set()
+    for det in filter_detections_for_camera(camera, detections or []):
+        label = str(det.get("label") or det.get("class_name") or "").strip()
+        class_name = str(det.get("class_name") or label or "object").strip()
+        if not label:
+            continue
+        try:
+            confidence = float(det.get("confidence", 0))
+        except (TypeError, ValueError):
+            continue
+        if confidence < min_confidence:
+            continue
+        key = (label.lower(), class_name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        if since is not None and DetectionEvent.objects.filter(
+            camera=camera, label=label[:120], class_name=class_name[:80], created_at__gte=since
+        ).exists():
+            continue
+        is_alert = bool(det.get("alert"))
+        if is_alert and same_spot_alert_exists(camera, class_name[:80], det.get("bbox") or []):
+            continue
+        employee_name, personal_number = resolve_staff_identity(label, class_name)
+        event = DetectionEvent.objects.create(
+            camera=camera,
+            class_name=class_name[:80],
+            label=label[:120],
+            employee_name=employee_name,
+            personal_number=personal_number,
+            confidence=confidence,
+            bbox=det.get("bbox") or [],
+            is_alert=is_alert,
+            clip_status=ClipStatus.PENDING if clip_enabled else ClipStatus.SKIPPED,
+        )
+        schedule_detection_clip(camera.pk, event.pk)
+        saved.append(event)
+    return saved
+
+
 def save_detection_batch(
     camera: Camera,
     detections: list[dict[str, Any]],
@@ -548,7 +610,9 @@ def save_detection_batch(
     )
 
     dedup_window = _dedup_seconds() if dedup_seconds is None else max(0, dedup_seconds)
-    since = timezone.now() - timedelta(seconds=max(1, dedup_window)) if dedup_window > 0 else None
+    now = timezone.now()
+    since = now - timedelta(seconds=max(1, dedup_window)) if dedup_window > 0 else None
+    track_since = now - timedelta(seconds=_track_dedup_seconds())
     saved = alert_saved
     active_track_ids: set[int] = set()
     seen_visit_ids: set[int] = set()
@@ -579,33 +643,8 @@ def save_detection_batch(
         clip_enabled = bool(getattr(settings, "DETECTION_CLIP_ENABLED", True))
         employee_name, personal_number = resolve_staff_identity(label, class_name)
 
-        from users.attendance_service import try_mark_attendance_from_detection
-
-        try:
-            action, attendance_record = try_mark_attendance_from_detection(
-                camera, label, class_name, confidence
-            )
-            if action in ("check_in", "check_out") and attendance_record is not None:
-                logger.info(
-                    "Attendance %s via camera %s for %s",
-                    action,
-                    camera.code,
-                    employee_name or label,
-                )
-                schedule_attendance_snapshot(
-                    camera.pk,
-                    attendance_record.pk,
-                    label=label,
-                    employee_name=employee_name,
-                    class_name=class_name,
-                    bbox=det.get("bbox") or [],
-                    confidence=confidence,
-                    action=action,
-                    infer_frame_w=int(det.get("frame_width") or 0),
-                    infer_frame_h=int(det.get("frame_height") or 0),
-                )
-        except Exception:
-            logger.exception("Attendance mark failed for camera %s", camera.pk)
+        # Attendance is marked only by the InsightFace CCTV worker (recognition), not by
+        # detection labels, so the old no-op attendance hook was removed here.
 
         global_obj = None
         visit = None
@@ -636,6 +675,7 @@ def save_detection_batch(
             camera=camera,
             local_track_id=track_id_i,
             class_name=class_name[:80],
+            created_at__gte=track_since,
         ).exists():
             continue
 

@@ -46,3 +46,6 @@ Thumbs.db
 
 # FFmpeg binaries
 tools/ffmpeg/bin/
+
+# go2rtc writes registered streams (with RTSP passwords) into its config; use go2rtc.example.yaml
+tools/go2rtc/go2rtc.yaml

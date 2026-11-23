@@ -93,7 +93,7 @@ export type StaffRecord = {
 
 const STAFF_ENDPOINT = `${API_BASE_URL}/api/staff/`;
 
-function useStaffRestApi(): boolean {
+function shouldUseStaffRestApi(): boolean {
   return Boolean(getStoredToken());
 }
 
@@ -466,7 +466,7 @@ const DEFAULT_STAFF: StaffRecord[] = [
 const LOCAL_STAFF_STORE_VERSION = 2; // bump when default data format changes
 
 export async function fetchStaff(): Promise<StaffRecord[]> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const res = await fetch(STAFF_ENDPOINT, { headers: getAuthHeaders() });
     if (!res.ok) throw new Error(await parseApiError(res));
     const data: unknown = await res.json();
@@ -539,7 +539,7 @@ export async function fetchEmployeesDirectory(): Promise<StaffRecord[]> {
 }
 
 export async function fetchStaffById(id: number): Promise<StaffRecord> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const res = await fetch(`${STAFF_ENDPOINT}${id}/`, { headers: getAuthHeaders() });
     if (res.status === 404) throw new Error("Staff not found");
     if (!res.ok) throw new Error(await parseApiError(res));
@@ -581,11 +581,20 @@ export function usernameFromFullName(raw: string | null | undefined): string {
     .slice(0, 60);
 }
 
-export const DEFAULT_STAFF_LOGIN_PASSWORD = "123456";
+/** Random temporary password for a new staff login (HR hands it to the employee). */
+export function generateStaffLoginPassword(length = 12): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = new Uint32Array(length);
+  for (;;) {
+    crypto.getRandomValues(bytes);
+    const pwd = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+    if (/\d/.test(pwd) && /[A-Za-z]/.test(pwd)) return pwd;
+  }
+}
 
 export async function fetchUnlinkedEmployees(search = ""): Promise<StaffRecord[]> {
   const q = search.trim()
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const params = new URLSearchParams({ unlinked: "1" })
     if (q) params.set("search", q)
     const res = await fetch(`${STAFF_ENDPOINT}?${params.toString()}`, { headers: getAuthHeaders() })
@@ -643,7 +652,7 @@ export async function downloadStaffDocument(
   field: string,
   fileName: string
 ): Promise<void> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const res = await fetch(getStaffDocumentDownloadUrl(staffId, field), {
       headers: getAuthHeadersFormData(),
     });
@@ -871,7 +880,7 @@ function buildStaffMultipartFormData(
 }
 
 export async function createStaff(payload: CreateStaffPayload): Promise<StaffRecord> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const fd = buildStaffMultipartFormData(payload);
     const res = await fetch(STAFF_ENDPOINT, {
       method: "POST",
@@ -915,7 +924,7 @@ export async function updateStaff(
   id: number,
   payload: Partial<CreateStaffPayload>
 ): Promise<StaffRecord> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const hasFile = Object.values(payload).some((v) => v instanceof File);
     const hasPhotoKeep = Array.isArray(payload.staff_photos_keep) && payload.staff_photos_keep.length > 0;
     const hasNewPhotos = Array.isArray(payload.staff_photos) && payload.staff_photos.some((f) => f instanceof File);
@@ -966,7 +975,7 @@ export async function updateStaff(
 
 /** Delete staff (hard delete). */
 export async function deleteStaff(id: number): Promise<void> {
-  if (useStaffRestApi()) {
+  if (shouldUseStaffRestApi()) {
     const res = await fetch(`${STAFF_ENDPOINT}${id}/`, {
       method: "DELETE",
       headers: getAuthHeaders(),

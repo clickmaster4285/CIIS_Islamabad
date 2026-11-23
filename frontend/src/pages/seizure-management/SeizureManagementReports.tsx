@@ -43,7 +43,6 @@ export default function SeizureManagementReportsPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
     fetchSeizureMgmtOverview()
       .then(setOverview)
       .catch(() => setOverview(emptySeizureMgmtOverview))

@@ -34,10 +34,10 @@ def _name_ratio(a: str, b: str) -> float:
 
 def _load_list_rows(module: str, location: str = "") -> list[dict[str, Any]]:
     # This server's own lists only (HQ copies of city lists do not screen HQ visitors).
-    qs = VmsListRecord.objects.filter(local_rows_q(), module=module)
+    qs = VmsListRecord.objects.filter(local_rows_q(), module=module, is_deleted=False)
     if location:
         qs = qs.filter(location=location)
-    return [dict(r.data or {}, id=r.record_id) for r in qs]
+    return [dict(data or {}, id=record_id) for record_id, data in qs.values_list("record_id", "data")]
 
 
 def _row_document(row: dict[str, Any]) -> str:
@@ -88,18 +88,28 @@ class ScreeningResult:
         }
 
 
+ScreeningLists = tuple  # (blacklist_rows, watchlist_rows)
+
+
+def load_screening_lists(location: str = "") -> ScreeningLists:
+    """Both lists for one location, loaded once (reuse across many visitors)."""
+    return _load_list_rows(BLACKLIST_MODULE, location), _load_list_rows(WATCHLIST_MODULE, location)
+
+
 def screen_visitor_data(
     *,
     full_name: str = "",
     cnic_number: str = "",
     passport_number: str = "",
     location: str = "",
+    lists: ScreeningLists | None = None,
 ) -> ScreeningResult:
     cnic_norm = _normalize_id(cnic_number)
     passport_norm = _normalize_id(passport_number)
     name = (full_name or "").strip()
+    blacklist_rows, watchlist_rows = lists if lists is not None else load_screening_lists(location)
 
-    for row in _load_list_rows(BLACKLIST_MODULE, location):
+    for row in blacklist_rows:
         doc = _row_document(row)
         doc_norm = _normalize_id(doc)
         row_name = _row_name(row)
@@ -129,7 +139,7 @@ def screen_visitor_data(
             )
 
     best_watch: ScreeningResult | None = None
-    for row in _load_list_rows(WATCHLIST_MODULE, location):
+    for row in watchlist_rows:
         doc = _row_document(row)
         doc_norm = _normalize_id(doc)
         row_name = _row_name(row)
@@ -195,19 +205,33 @@ def screen_visitor_data(
     )
 
 
-def apply_visitor_screening(visitor: Visitor, *, create_alert: bool = True) -> ScreeningResult:
+def apply_visitor_screening(
+    visitor: Visitor,
+    *,
+    create_alert: bool = True,
+    lists: ScreeningLists | None = None,
+    only_if_changed: bool = False,
+) -> ScreeningResult:
     result = screen_visitor_data(
         full_name=visitor.full_name or "",
         cnic_number=visitor.cnic_number or visitor.cnic_passport or "",
         passport_number=visitor.passport_number or "",
         location=visitor.location or "",
+        lists=lists,
     )
 
-    extra = dict(visitor.extra_data or {})
-    extra["screening"] = result.as_extra()
-    visitor.watchlist_check_status = result.status
-    visitor.extra_data = extra
-    visitor.save(update_fields=["watchlist_check_status", "extra_data", "updated_at"])
+    previous = (visitor.extra_data or {}).get("screening") or {}
+    unchanged = (
+        visitor.watchlist_check_status == result.status
+        and previous.get("matched_record_id") == result.matched_record_id
+        and previous.get("score") == result.score
+    )
+    if not (only_if_changed and unchanged):
+        extra = dict(visitor.extra_data or {})
+        extra["screening"] = result.as_extra()
+        visitor.watchlist_check_status = result.status
+        visitor.extra_data = extra
+        visitor.save(update_fields=["watchlist_check_status", "extra_data", "updated_at", "version"])
 
     if create_alert and result.status in ("blacklisted", "flagged"):
         alert_type = "watchlist_hit" if result.source == "watchlist" else "other"
@@ -232,12 +256,23 @@ def visitor_blocks_entry(visitor: Visitor) -> tuple[bool, str]:
 
 
 def rescreen_all_visitors(*, location: str = "") -> int:
-    qs = Visitor.objects.filter(local_rows_q()).order_by("id")
+    """Re-screen this server's (non-deleted) visitors, optionally for one location.
+
+    Each location's blacklist/watchlist is loaded once, not once per visitor, and a visitor row
+    is only written when its screening outcome actually changed.
+    """
+    qs = Visitor.objects.filter(local_rows_q(), is_deleted=False).order_by("id")
     if location:
         qs = qs.filter(location=location)
+    lists_by_location: dict[str, ScreeningLists] = {}
     count = 0
     for visitor in qs.iterator():
-        apply_visitor_screening(visitor, create_alert=False)
+        loc = visitor.location or ""
+        if loc not in lists_by_location:
+            lists_by_location[loc] = load_screening_lists(loc)
+        apply_visitor_screening(
+            visitor, create_alert=False, lists=lists_by_location[loc], only_if_changed=True
+        )
         count += 1
     return count
 
@@ -321,7 +356,7 @@ def mark_visitor_blacklisted(
     if doc_number:
         record_id = f"doc-{_normalize_id(doc_number)}"
 
-    today = timezone.now().date().isoformat()
+    today = timezone.localdate().isoformat()
     _upsert_list_record(
         BLACKLIST_MODULE,
         location=visitor.location or "",

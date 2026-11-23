@@ -64,9 +64,6 @@ def expand_search_terms(query: str, *, max_fuzzy_distance: int = 1) -> list[str]
             if len(raw) >= 4 and levenshtein_distance(raw, word) <= max_fuzzy_distance:
                 matched_groups.append(group)
                 break
-            if len(raw) == 4 and levenshtein_distance(raw, word) <= max_fuzzy_distance:
-                matched_groups.append(group)
-                break
 
     for group in matched_groups:
         terms |= group
@@ -74,17 +71,30 @@ def expand_search_terms(query: str, *, max_fuzzy_distance: int = 1) -> list[str]
     return sorted(terms)
 
 
+def _minimal_terms(terms: list[str]) -> list[str]:
+    """Drop terms that contain a shorter term: icontains("fire") already matches "firearm"."""
+    ordered = sorted(set(terms), key=len)
+    kept: list[str] = []
+    for term in ordered:
+        if not any(short in term for short in kept):
+            kept.append(term)
+    return kept
+
+
 def apply_detection_search(qs: QuerySet, query: str) -> QuerySet:
-    """NLP-style search on detection class and label only (synonyms + fuzzy spelling)."""
-    terms = expand_search_terms(query)
+    """NLP-style search on detection class and label only (synonyms + fuzzy spelling).
+
+    All fields live on DetectionEvent (no joins), so no .distinct() is needed — it only
+    forced a costly DISTINCT over the whole row set. A trigram (pg_trgm GIN) index on
+    label / class_name / employee_name would make the icontains scan index-backed.
+    """
+    terms = _minimal_terms(expand_search_terms(query))
     if not terms:
         return qs
 
     combined = Q()
     for term in terms:
-        term_filter = Q()
         for field in _NLP_SEARCH_FIELDS:
-            term_filter |= Q(**{f"{field}__icontains": term})
-        combined |= term_filter
+            combined |= Q(**{f"{field}__icontains": term})
 
-    return qs.filter(combined).distinct()
+    return qs.filter(combined)

@@ -1,5 +1,6 @@
 from django.core.management.base import BaseCommand
 
+from recognition.services import cctv_control
 from recognition.services.attendance_cameras import collect_attendance_camera_payloads
 from recognition.services.cctv_worker import get_cctv_manager
 
@@ -15,6 +16,13 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        action = "stop_all" if options["stop"] else "start_all"
+        routed = cctv_control.request(action)
+        if not routed["local"]:
+            # Another process (web server / run_background_workers) owns the workers.
+            self.stdout.write(self.style.SUCCESS(f"Sent '{action}' to the process that runs the CCTV workers"))
+            return
+
         manager = get_cctv_manager()
         if options["stop"]:
             statuses = manager.stop_all()

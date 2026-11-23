@@ -84,6 +84,7 @@ export function ViewLocatedCameraDialog({
 
   useEffect(() => {
     if (!target) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset/loading state for the fetch keyed on `target`
       setCamera(null)
       setError(null)
       setLoading(false)

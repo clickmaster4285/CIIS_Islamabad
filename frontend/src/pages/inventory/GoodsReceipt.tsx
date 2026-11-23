@@ -78,7 +78,7 @@ function saveRows(rows: GoodsReceiptRow[]) {
 const UNITS = ["PCS", "KGS", "LTR", "MTR", "CTN", "BOX", "BAG", "DOZ", "SET", "Other"] as const
 
 export default function GoodsReceiptPage() {
-  const [rows, setRows] = useState<GoodsReceiptRow[]>([])
+  const [rows, setRows] = useState<GoodsReceiptRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({
     qrCodeNumber: "",
@@ -97,10 +97,6 @@ export default function GoodsReceiptPage() {
     examiningOfficerName: "",
     status: "Pending",
   })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

@@ -1,5 +1,8 @@
 import os
 import logging
+import threading
+import time
+from django.db import transaction
 from django.utils import timezone
 from django.http import FileResponse, Http404
 from django.conf import settings
@@ -35,6 +38,9 @@ from .permissions import (
     is_global_admin,
     location_admin_may_assign_role,
     may_manage_account,
+    resolve_location_for_write,
+    staff_in_scope,
+    staff_location_q,
     GLOBAL_ADMIN_ROLE,
     LOCATION_ADMIN_ROLE,
     IsGlobalAdmin,
@@ -190,6 +196,8 @@ class UserViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Only the global administrator can delete location administrators.")
         if instance.pk == request.user.pk:
             raise PermissionDenied("You cannot delete your own account.")
+        if not may_manage_account(request.user, instance):
+            raise PermissionDenied("You cannot delete an account above your own level.")
         instance.is_deleted = True
         instance.is_active = False
         instance.save(update_fields=["is_deleted", "is_active"])
@@ -249,8 +257,11 @@ class StaffViewSet(viewsets.ModelViewSet):
         )
         unlinked = (self.request.query_params.get("unlinked") or "").strip().lower()
         if unlinked in ("1", "true", "yes"):
-            # Unlinked rows have no user__location; do not hide them behind that filter.
+            # Unlinked rows have no user__location: scope them by the server / branch they belong to.
             qs = qs.filter(user__isnull=True)
+            scope = get_location_scope(self.request.user)
+            if scope:
+                qs = qs.filter(staff_location_q(scope))
         else:
             qs = apply_location_filter(qs, self.request.user, field="user__location")
         installed = MobileDevice.objects.filter(
@@ -303,18 +314,14 @@ class StaffViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         """Create staff member without user account"""
-        staff = serializer.save()
+        from .face_sync_async import background_face_sync
         from .staff_photos import apply_staff_photo_uploads
 
-        photos_changed = apply_staff_photo_uploads(staff, self.request)
-        if photos_changed:
-            staff.refresh_from_db()
-            try:
-                from ml.face_sync import sync_staff_faces_after_save
-
-                sync_staff_faces_after_save(staff, force=True)
-            except Exception:
-                logger.exception("Staff face sync failed")
+        # Photo changes trigger face enrollment from the Staff post_save signal; inside
+        # this block it runs after commit on a background thread, not in the request.
+        with background_face_sync():
+            staff = serializer.save()
+            apply_staff_photo_uploads(staff, self.request)
         create_activity_log(
             self.request.user,
             self.request,
@@ -323,18 +330,12 @@ class StaffViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         """Update staff member"""
-        staff = serializer.save()
+        from .face_sync_async import background_face_sync
         from .staff_photos import apply_staff_photo_uploads
 
-        photos_changed = apply_staff_photo_uploads(staff, self.request)
-        if photos_changed:
-            staff.refresh_from_db()
-            try:
-                from ml.face_sync import sync_staff_faces_after_save
-
-                sync_staff_faces_after_save(staff, force=True)
-            except Exception:
-                logger.exception("Staff face sync failed")
+        with background_face_sync():
+            staff = serializer.save()
+            apply_staff_photo_uploads(staff, self.request)
         create_activity_log(
             self.request.user,
             self.request,
@@ -342,12 +343,12 @@ class StaffViewSet(viewsets.ModelViewSet):
         )
 
     def perform_destroy(self, instance):
-        """Soft delete or hard delete? Let's do soft delete by unlinking user"""
+        """Delete the staff row and deactivate its login (only if the caller may manage that login)."""
+        if instance.user and not may_manage_account(self.request.user, instance.user):
+            raise PermissionDenied("This employee's login is above your level; ask the Super Admin.")
         if instance.user:
-            # Option 1: Deactivate user
             instance.user.is_active = False
-            instance.user.save()
-        # Option 2: Hard delete instance
+            instance.user.save(update_fields=["is_active"])
         instance.delete()
         create_activity_log(
             self.request.user, 
@@ -366,7 +367,7 @@ class StaffViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        serializer = LinkUserToStaffSerializer(data=request.data)
+        serializer = LinkUserToStaffSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         
         try:
@@ -432,13 +433,15 @@ class StaffViewSet(viewsets.ModelViewSet):
             )
         
         user = staff.user
+        deactivate = str(request.data.get("deactivate_user", False)).strip().lower() in ("1", "true", "yes")
+        if deactivate and not may_manage_account(request.user, user):
+            raise PermissionDenied("You cannot deactivate an account above your own level.")
         staff.user = None
         staff.save()
-        
-        # Optionally deactivate user
-        if request.data.get("deactivate_user", False):
+
+        if deactivate:
             user.is_active = False
-            user.save()
+            user.save(update_fields=["is_active"])
         
         create_activity_log(
             request.user,
@@ -479,6 +482,14 @@ class StaffViewSet(viewsets.ModelViewSet):
         password = (request.data.get("password") or "").strip()
         if not password:
             return Response({"error": "Password is required."}, status=status.HTTP_400_BAD_REQUEST)
+        # Same rules as every other password path (8+ chars, not common, not all digits).
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        try:
+            validate_password(password)
+        except DjangoValidationError as exc:
+            return Response({"error": " ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
         preview = staff_login_preview(staff)
         login_id = normalize_login_id(request.data.get("username") or "") or unique_employee_login_id(staff)
@@ -498,10 +509,9 @@ class StaffViewSet(viewsets.ModelViewSet):
         valid_locations = {code for code, _label in User.LOCATION_CHOICES}
         if role == "ADMIN":
             location = ""
-        elif not location:
-            scope = get_location_scope(request.user)
-            if scope:
-                location = scope
+        else:
+            # Location-scoped callers always create logins for their own site.
+            location = resolve_location_for_write(request.user, location)
 
         if not role:
             return Response(
@@ -603,6 +613,42 @@ class StaffViewSet(viewsets.ModelViewSet):
 # -----------------------------
 # Attendance Views
 # -----------------------------
+_gallery_lock = threading.Lock()
+_gallery_cache: dict = {"key": None, "at": 0.0, "gallery": None}
+
+
+def _gallery_fingerprint():
+    """Cheap DB fingerprint of the trained-face gallery (row count + newest change)."""
+    from django.db.models import Count, Max
+
+    from city_sync.identity import local_rows_q
+    from recognition.models import FaceEnrollment
+
+    agg = FaceEnrollment.objects.filter(
+        local_rows_q("staff__"), is_trained=True, embedding__isnull=False
+    ).aggregate(n=Count("id"), last=Max("updated_at"))
+    return agg["n"], agg["last"]
+
+
+def _cached_gallery(build):
+    """Reuse the decoded gallery between webcam frames until enrollments change (or TTL)."""
+    ttl = float(getattr(settings, "ATTENDANCE_GALLERY_CACHE_SECONDS", 60))
+    try:
+        key = _gallery_fingerprint()
+    except Exception:
+        logger.debug("Gallery fingerprint failed; rebuilding", exc_info=True)
+        return build()
+    now = time.monotonic()
+    with _gallery_lock:
+        cached = _gallery_cache
+        if cached["gallery"] is not None and cached["key"] == key and now - cached["at"] < ttl:
+            return cached["gallery"]
+    gallery = build()
+    with _gallery_lock:
+        _gallery_cache.update(key=key, at=now, gallery=gallery)
+    return gallery
+
+
 class AttendanceViewSet(viewsets.ModelViewSet):
     queryset = Attendance.objects.all().order_by("-date", "-check_in")
     permission_classes = [IsAuthenticated]
@@ -693,8 +739,8 @@ class AttendanceViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        staff = Staff.objects.filter(pk=staff_id).select_related("user").first()
-        if not staff:
+        staff = Staff.objects.filter(pk=staff_id, is_deleted=False).select_related("user").first()
+        if not staff or not staff_in_scope(request.user, staff):
             return Response({"error": "Staff not found"}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
@@ -806,7 +852,7 @@ class AttendanceViewSet(viewsets.ModelViewSet):
         except (ValueError, Exception):
             return Response({"error": "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
 
-        gallery = build_gallery()
+        gallery = _cached_gallery(build_gallery)
         result = engine.identify_from_image(frame, gallery)
 
         if not result.get("matched"):
@@ -908,6 +954,15 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
             return LeaveRequestCreateSerializer
         return LeaveRequestSerializer
 
+    def get_queryset(self):
+        qs = LeaveRequest.objects.filter(is_deleted=False).select_related(
+            "staff", "staff__user", "leave_type"
+        ).order_by("-from_date")
+        scope = get_location_scope(self.request.user)
+        if scope:
+            qs = qs.filter(staff_location_q(scope, prefix="staff__"))
+        return qs
+
     def perform_create(self, serializer):
         req = serializer.save()
         create_activity_log(
@@ -924,13 +979,18 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
                 {"error": "Only pending requests can be approved."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if req.staff.user_id and req.staff.user_id == request.user.pk:
+            return Response(
+                {"error": "You cannot approve your own leave request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         req.status = "APPROVED"
         req.approved_by = request.user
         req.approved_at = timezone.now()
         req.rejection_reason = None
         req.save()
         create_activity_log(request.user, request, f"Approved leave request {req.id}")
-        return Response(LeaveRequestSerializer(req).data)
+        return Response(LeaveRequestSerializer(req, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], url_path="reject")
     def reject(self, request, pk=None):
@@ -947,7 +1007,7 @@ class LeaveRequestViewSet(viewsets.ModelViewSet):
         req.rejection_reason = reason or None
         req.save()
         create_activity_log(request.user, request, f"Rejected leave request {req.id}")
-        return Response(LeaveRequestSerializer(req).data)
+        return Response(LeaveRequestSerializer(req, context={"request": request}).data)
 
 
 # -----------------------------
@@ -964,6 +1024,14 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             return PayrollRunCreateSerializer
         return PayrollRunSerializer
 
+    def get_queryset(self):
+        qs = PayrollRun.objects.all().order_by("-period_start")
+        scope = get_location_scope(self.request.user)
+        if scope:
+            # A location's HR sees only the runs created at that location.
+            qs = qs.filter(created_by__location=scope)
+        return qs
+
     def perform_create(self, serializer):
         run = serializer.save(created_by=self.request.user)
         create_activity_log(
@@ -972,50 +1040,61 @@ class PayrollRunViewSet(viewsets.ModelViewSet):
             f"Payroll run created: {run.period_label}",
         )
 
+    def perform_destroy(self, instance):
+        if instance.status != "DRAFT":
+            raise PermissionDenied("Only draft payroll runs can be deleted.")
+        instance.delete()
+
     @action(detail=True, methods=["post"], url_path="process")
     def process_run(self, request, pk=None):
-        """Create payroll entries from all staff with salary and set run to PROCESSED."""
-        run = self.get_object()
-        if run.status not in ("DRAFT", None):
-            return Response(
-                {"error": "Run already processed or locked."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        # All locations (HQ copies of city staff included); deleted staff are not paid.
-        # Salary is encrypted in the DB, so "not zero" is checked in Python, not SQL.
-        staff_with_salary = [
-            s for s in Staff.objects.filter(is_deleted=False).exclude(salary__isnull=True) if s.salary
-        ]
-        total_gross = Decimal("0")
-        total_net = Decimal("0")
-        for staff in staff_with_salary:
-            basic = staff.salary or Decimal("0")
-            allowances = Decimal("0")
-            gross = basic + allowances
-            tax = Decimal("0")
-            eobi = Decimal("0")
-            other = Decimal("0")
-            net = gross - tax - eobi - other
-            PayrollEntry.objects.update_or_create(
-                run=run,
-                staff=staff,
-                defaults={
-                    "basic_salary": basic,
-                    "allowances": allowances,
-                    "gross_salary": gross,
-                    "income_tax": tax,
-                    "eobi_or_sss": eobi,
-                    "other_deductions": other,
-                    "net_salary": net,
-                },
-            )
-            total_gross += gross
-            total_net += net
-        run.employee_count = len(staff_with_salary)
-        run.total_gross = total_gross
-        run.total_net = total_net
-        run.status = "PROCESSED"
-        run.processed_at = timezone.now()
-        run.save()
+        """Create payroll entries from staff with salary and set run to PROCESSED."""
+        self.get_object()  # scope / 404 check
+        with transaction.atomic():
+            # Lock the row so two clicks cannot process the same run twice.
+            run = PayrollRun.objects.select_for_update().get(pk=pk)
+            if run.status not in ("DRAFT", None):
+                return Response(
+                    {"error": "Run already processed or locked."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Unscoped (Super Admin): all locations, HQ copies of city staff included.
+            # Location-scoped HR: only their own site's staff. Deleted staff are not paid.
+            staff_qs = Staff.objects.filter(is_deleted=False).exclude(salary__isnull=True)
+            scope = get_location_scope(request.user)
+            if scope:
+                staff_qs = staff_qs.filter(staff_location_q(scope))
+            # Salary is encrypted in the DB, so "not zero" is checked in Python, not SQL.
+            staff_with_salary = [s for s in staff_qs if s.salary]
+            total_gross = Decimal("0")
+            total_net = Decimal("0")
+            for staff in staff_with_salary:
+                basic = staff.salary or Decimal("0")
+                allowances = Decimal("0")
+                gross = basic + allowances
+                tax = Decimal("0")
+                eobi = Decimal("0")
+                other = Decimal("0")
+                net = gross - tax - eobi - other
+                PayrollEntry.objects.update_or_create(
+                    run=run,
+                    staff=staff,
+                    defaults={
+                        "basic_salary": basic,
+                        "allowances": allowances,
+                        "gross_salary": gross,
+                        "income_tax": tax,
+                        "eobi_or_sss": eobi,
+                        "other_deductions": other,
+                        "net_salary": net,
+                    },
+                )
+                total_gross += gross
+                total_net += net
+            run.employee_count = len(staff_with_salary)
+            run.total_gross = total_gross
+            run.total_net = total_net
+            run.status = "PROCESSED"
+            run.processed_at = timezone.now()
+            run.save()
         create_activity_log(request.user, request, f"Processed payroll run {run.period_label}")
-        return Response(PayrollRunSerializer(run).data)
+        return Response(PayrollRunSerializer(run, context={"request": request}).data)

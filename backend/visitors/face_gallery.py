@@ -90,7 +90,7 @@ def build_visitor_gallery(*, force: bool = False) -> list[tuple[int, str, list[f
             return _gallery_cache
         rows: list[tuple[int, str, list[float]]] = []
         faces = (
-            VisitorFace.objects.filter(is_active=True)
+            VisitorFace.objects.filter(is_active=True, visitor__is_deleted=False)
             .exclude(embedding=[])
             .select_related("visitor")
             .only("visitor_id", "embedding", "visitor__full_name")
@@ -330,9 +330,31 @@ def serialize_visitor_face(face: VisitorFace, request=None) -> dict[str, Any]:
     }
 
 
+_staff_gallery_lock = threading.Lock()
+_staff_gallery_cache: dict[str, list[float]] = {}
+_staff_gallery_at = 0.0
+
+
+def build_staff_gallery(*, force: bool = False) -> dict[str, list[float]]:
+    """Staff face embeddings for the gate identify check, cached like the visitor gallery."""
+    from recognition.models import FaceEnrollment
+
+    global _staff_gallery_cache, _staff_gallery_at
+    now = time.time()
+    with _staff_gallery_lock:
+        if not force and _staff_gallery_cache and now - _staff_gallery_at < cache_ttl():
+            return _staff_gallery_cache
+        gallery: dict[str, list[float]] = {}
+        for enrollment in FaceEnrollment.objects.filter(is_trained=True, embedding__isnull=False):
+            if enrollment.embedding:
+                gallery[enrollment.gallery_key] = enrollment.embedding
+        _staff_gallery_cache = gallery
+        _staff_gallery_at = now
+        return gallery
+
+
 def recognize_from_image(image_b64: str) -> dict[str, Any]:
     """Staff gallery first, then visitor gallery. Never marks attendance."""
-    from recognition.models import FaceEnrollment
     from recognition.services.face_engine import get_face_engine
 
     engine = get_face_engine()
@@ -347,12 +369,7 @@ def recognize_from_image(image_b64: str) -> dict[str, Any]:
 
     embedding = normalize_embedding(face.embedding)
 
-    staff_gallery: dict[str, list[float]] = {}
-    enrollments = FaceEnrollment.objects.filter(is_trained=True, embedding__isnull=False)
-    for enrollment in enrollments:
-        if enrollment.embedding:
-            staff_gallery[enrollment.gallery_key] = enrollment.embedding
-    staff_key, staff_sim = engine.match_embedding(embedding, staff_gallery)
+    staff_key, staff_sim = engine.match_embedding(embedding, build_staff_gallery())
     if staff_key:
         try:
             staff_id = int(str(staff_key).split("-", 1)[1])

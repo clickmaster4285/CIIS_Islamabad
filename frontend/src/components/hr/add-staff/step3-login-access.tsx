@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/select"
 import { LOCATION_OPTIONS, inferLocationCode } from "@/lib/locations"
 import { Copy, Eye, EyeOff, KeyRound, UserRound, Check } from "lucide-react"
-import { DEFAULT_STAFF_LOGIN_PASSWORD } from "@/lib/staff-api"
+import { generateStaffLoginPassword } from "@/lib/staff-api"
 
 export type AddStaffStep3Form = {
   has_login?: boolean
@@ -110,7 +110,7 @@ export function AddStaffStep3LoginAccess({
               <p className="text-sm text-muted-foreground">
                 {mode === "edit" && hasExistingLogin
                   ? "Leave password blank to keep the current password. Enter a new one only to change it."
-                  : "Username is built from the full name (lowercase with dots). Default password is shown so you can share it."}
+                  : "Username is built from the full name (lowercase with dots). A random temporary password is generated so you can share it."}
               </p>
             </div>
             <Switch
@@ -119,7 +119,7 @@ export function AddStaffStep3LoginAccess({
                 updateForm({
                   has_login: checked,
                   ...(checked && !(mode === "edit" && hasExistingLogin) && !form.password
-                    ? { password: DEFAULT_STAFF_LOGIN_PASSWORD }
+                    ? { password: generateStaffLoginPassword() }
                     : {}),
                 })
                 setErrors({})
@@ -179,7 +179,7 @@ export function AddStaffStep3LoginAccess({
                       placeholder={
                         mode === "edit" && hasExistingLogin
                           ? "Leave blank to keep current"
-                          : DEFAULT_STAFF_LOGIN_PASSWORD
+                          : "Temporary password"
                       }
                       value={form.password || ""}
                       onChange={(e) => {
@@ -219,9 +219,9 @@ export function AddStaffStep3LoginAccess({
                         ? "Leave blank to keep the current password."
                         : (
                           <>
-                            Default temporary password is{" "}
-                            <span className="font-mono font-medium text-slate-700">{DEFAULT_STAFF_LOGIN_PASSWORD}</span>
-                            {" "}(visible so you can share it).
+                            A random temporary password was generated{form.password ? (
+                              <>: <span className="font-mono font-medium text-slate-700">{form.password}</span></>
+                            ) : null}{" "}(share it with the employee).
                           </>
                         )}
                     </p>

@@ -1,20 +1,17 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { 
   FileText, 
   Download, 
   Calendar, 
   Filter, 
   BarChart3, 
-  PieChart, 
   LineChart,
-  TrendingUp,
   Car,
   Users,
   Clock,
   MapPin,
-  ChevronDown,
   Eye,
   Printer,
   Mail,
@@ -22,8 +19,7 @@ import {
   FilePieChart,
   Grid3X3,
   LayoutGrid,
-  Maximize2,
-  X
+  Maximize2
 } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
@@ -42,7 +38,6 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
-import { Progress } from "@/components/ui/progress"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -95,6 +90,51 @@ interface ReportTemplate {
   size: string
 }
 
+/** Generate mock gate throughput data for a date. */
+function generateMockGateData(selectedDate: string): GateHourlyData[] {
+  const mockData: GateHourlyData[] = []
+  
+  GATES.forEach(gate => {
+    HOURS.forEach(hour => {
+      // Skip some hours for realism
+      if (Math.random() > 0.3) {
+        const cars = Math.floor(Math.random() * 80) + 20
+        const trucks = Math.floor(Math.random() * 30) + 5
+        const buses = Math.floor(Math.random() * 15) + 2
+        const motorcycles = Math.floor(Math.random() * 25) + 5
+        
+        const vehicles = cars + trucks + buses + motorcycles
+        const avgOccupancy = gate.includes('Gate') ? 2.3 : 1.8
+        
+        mockData.push({
+          gate,
+          hour,
+          vehicles: {
+            cars,
+            trucks,
+            buses,
+            motorcycles,
+            total: vehicles
+          },
+          persons: {
+            drivers: vehicles,
+            passengers: Math.floor(vehicles * (avgOccupancy - 1)),
+            pedestrians: Math.floor(Math.random() * 50) + 10,
+            total: Math.floor(vehicles * avgOccupancy) + Math.floor(Math.random() * 50) + 10
+          },
+          occupancy: {
+            avgOccupancy,
+            peakOccupancy: avgOccupancy + 0.7
+          },
+          timestamp: `${selectedDate} ${hour}`
+        })
+      }
+    })
+  })
+  
+  return mockData
+}
+
 export default function ReportsPage() {
   const [searchTerm, setSearchTerm] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("all")
@@ -103,53 +143,10 @@ export default function ReportsPage() {
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table')
   const [showReportPreview, setShowReportPreview] = useState(false)
   const [selectedReport, setSelectedReport] = useState<ReportTemplate | null>(null)
-  const [gateData, setGateData] = useState<GateHourlyData[]>([])
+  const [gateData, setGateData] = useState<GateHourlyData[]>(() => generateMockGateData(selectedDate))
   const [selectedHour, setSelectedHour] = useState<string>("all")
-
-  // Generate mock gate throughput data
-  useEffect(() => {
-    const mockData: GateHourlyData[] = []
-    
-    GATES.forEach(gate => {
-      HOURS.forEach(hour => {
-        // Skip some hours for realism
-        if (Math.random() > 0.3) {
-          const cars = Math.floor(Math.random() * 80) + 20
-          const trucks = Math.floor(Math.random() * 30) + 5
-          const buses = Math.floor(Math.random() * 15) + 2
-          const motorcycles = Math.floor(Math.random() * 25) + 5
-          
-          const vehicles = cars + trucks + buses + motorcycles
-          const avgOccupancy = gate.includes('Gate') ? 2.3 : 1.8
-          
-          mockData.push({
-            gate,
-            hour,
-            vehicles: {
-              cars,
-              trucks,
-              buses,
-              motorcycles,
-              total: vehicles
-            },
-            persons: {
-              drivers: vehicles,
-              passengers: Math.floor(vehicles * (avgOccupancy - 1)),
-              pedestrians: Math.floor(Math.random() * 50) + 10,
-              total: Math.floor(vehicles * avgOccupancy) + Math.floor(Math.random() * 50) + 10
-            },
-            occupancy: {
-              avgOccupancy,
-              peakOccupancy: avgOccupancy + 0.7
-            },
-            timestamp: `${selectedDate} ${hour}`
-          })
-        }
-      })
-    })
-    
-    setGateData(mockData)
-  }, [selectedDate])
+  // Mock per-gate counts for the preview card, generated once per mount.
+  const [gatePreviewCounts] = useState<number[]>(() => GATES.slice(0, 4).map(() => Math.floor(Math.random() * 500) + 200))
 
   // Filter gate data
   const filteredGateData = gateData.filter(data => {
@@ -273,7 +270,10 @@ export default function ReportsPage() {
                       <Input
                         type="date"
                         value={selectedDate}
-                        onChange={(e) => setSelectedDate(e.target.value)}
+                        onChange={(e) => {
+                          setSelectedDate(e.target.value)
+                          setGateData(generateMockGateData(e.target.value))
+                        }}
                         className="pl-10"
                       />
                     </div>
@@ -551,10 +551,10 @@ export default function ReportsPage() {
                         <BarChart3 className="h-12 w-12 text-muted-foreground/50 mb-2" />
                         <span className="text-sm text-muted-foreground">Bar chart showing vehicle distribution by gate</span>
                         <div className="flex gap-4 mt-4">
-                          {GATES.slice(0, 4).map(gate => (
+                          {GATES.slice(0, 4).map((gate, gateIdx) => (
                             <div key={gate} className="text-center">
                               <div className="text-xs text-muted-foreground">{gate.split(' ')[0]}</div>
-                              <div className="text-sm font-semibold">{Math.floor(Math.random() * 500) + 200}</div>
+                              <div className="text-sm font-semibold">{gatePreviewCounts[gateIdx]}</div>
                             </div>
                           ))}
                         </div>

@@ -1,4 +1,6 @@
+import json
 import re
+import time
 
 from django.db.models import Count, Q
 from django.http import HttpResponse
@@ -18,7 +20,7 @@ from .models import (
     InfraEvent,
     InfraSite,
 )
-from .permissions import IsInfraAdmin
+from .permissions import IsInfraAdmin, may_run_destructive_nvr_command
 from .serializers import (
     InfraAlertRuleSerializer,
     InfraAlertSerializer,
@@ -46,8 +48,30 @@ def _log_event(*, device, event_type, title, message="", actor="", payload=None)
     )
 
 
+# update_metrics: cap pushed payloads (agent metrics + up to a few hundred log rows)
+UPDATE_METRICS_MAX_BYTES = 2 * 1024 * 1024
+UPDATE_METRICS_MAX_KEYS = 500
+UPDATE_METRICS_MAX_LOGS = 2000
+
+# NVR actions that change or disrupt the appliance (need the destructive-action role)
+DESTRUCTIVE_NVR_ACTIONS = frozenset(
+    {
+        "reboot",
+        "restart",
+        "restart_nvr",
+        "format_hdd",
+        "format",
+        "factory_reset",
+        "start_recording",
+        "stop_recording",
+    }
+)
+
+
 class InfraSiteViewSet(viewsets.ModelViewSet):
-    queryset = InfraSite.objects.all()
+    queryset = InfraSite.objects.annotate(
+        active_device_count=Count("devices", filter=Q(devices__is_active=True))
+    )
     serializer_class = InfraSiteSerializer
     permission_classes = [IsInfraAdmin]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -118,7 +142,7 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
     def nvr_detail(self, request, pk=None):
         """Structured NVR health detail (system / storage / network / channels)."""
         from .models import DeviceType
-        from .nvr_health import build_nvr_detail_payload, enrich_nvr_metrics
+        from .nvr_health import build_nvr_detail_payload
         from .poller import probe_device
         from .services import apply_probe_result
 
@@ -134,15 +158,8 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
             "yes",
         )
         if refresh:
+            # probe_device enriches a reachable NVR itself — do not hit the NVR twice.
             result = probe_device(device)
-            # Ensure NVR enrich even if probe path skipped it
-            try:
-                result["metrics"] = {
-                    **(result.get("metrics") or {}),
-                    **enrich_nvr_metrics(device),
-                }
-            except Exception:
-                pass
             apply_probe_result(device, result)
             device.refresh_from_db()
         return Response(build_nvr_detail_payload(device))
@@ -207,10 +224,9 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
             "true",
             "yes",
         )
-        if refresh or (
-            not (device.last_metrics or {}).get("cpu_percent")
-            and not (device.last_metrics or {}).get("memory_percent")
-        ):
+        # Only an explicit ?refresh=1 opens an SSH session; a plain GET shows stored data
+        # (the background poller keeps it fresh).
+        if refresh:
             # probe_device already runs enrich_server_metrics for SERVER — do not SSH twice
             result = probe_device(device)
             apply_probe_result(device, result)
@@ -275,7 +291,6 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
         """
         from .models import DeviceType
         from .nvr_health import execute_nvr_command
-        from users.permissions import is_global_admin
 
         device = self.get_object()
         if device.device_type != DeviceType.NVR:
@@ -290,24 +305,14 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
                 {"detail": "action is required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        destructive = action in (
-            "reboot",
-            "restart",
-            "restart_nvr",
-            "format_hdd",
-            "format",
-            "factory_reset",
-        )
-        if destructive and not is_global_admin(request.user):
-            # Allow ADMIN role as well via staff/superuser fallbacks
-            role = getattr(request.user, "role", None) or ""
-            if str(role).upper() not in ("ADMIN", "SUPER_ADMIN", "SUPERADMIN") and not getattr(
-                request.user, "is_staff", False
-            ):
-                return Response(
-                    {"detail": "Administrator role required for this NVR command."},
-                    status=status.HTTP_403_FORBIDDEN,
-                )
+        normalized = action.replace("-", "_")
+        if normalized in DESTRUCTIVE_NVR_ACTIONS and not may_run_destructive_nvr_command(
+            request.user
+        ):
+            return Response(
+                {"detail": "Super Admin or IT Super Admin role required for this NVR command."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         result = execute_nvr_command(
             device,
@@ -315,16 +320,22 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
             disk_id=data.get("disk_id"),
             channel=data.get("channel"),
         )
-        # Persist refreshed metrics after diagnostics-style actions
-        if action in ("diagnostics", "run_diagnostics", "refresh_status", "test_storage", "test_network"):
+        # Persist refreshed metrics after diagnostics-style actions. The diagnostics
+        # action already enriched the NVR and hands the metrics back — reuse them.
+        metrics = result.pop("_metrics", None)
+        if metrics is None and normalized in ("test_storage", "test_network"):
             try:
                 from .nvr_health import enrich_nvr_metrics
 
                 metrics = enrich_nvr_metrics(device)
+            except Exception:
+                metrics = None
+        if isinstance(metrics, dict):
+            try:
                 slim = {**(device.last_metrics or {}), **metrics}
                 slim["nvr_logs"] = []
                 device.last_metrics = slim
-                device.last_polled_at = __import__("django.utils.timezone", fromlist=["now"]).now()
+                device.last_polled_at = timezone.now()
                 device.save(update_fields=["last_metrics", "last_polled_at", "updated_at"])
             except Exception:
                 pass
@@ -425,7 +436,14 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
         from .server_health import persist_server_logs
         from .services import apply_probe_result, evaluate_alert_rules
 
+        from .poller import strip_stale_metrics
+
         device = self.get_object()
+        if not isinstance(request.data, dict):
+            return Response(
+                {"detail": "Body must be a JSON object."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         metrics = request.data.get("metrics")
         if not isinstance(metrics, dict):
             return Response(
@@ -434,10 +452,35 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
             )
         # Optional top-level logs array (server agent)
         logs = request.data.get("logs")
+        if logs is not None and not isinstance(logs, list):
+            return Response(
+                {"detail": "logs must be a list."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if isinstance(logs, list):
             metrics = {**metrics, "server_logs": logs}
-        elif isinstance(metrics.get("server_logs"), list):
-            pass
+        if len(metrics) > UPDATE_METRICS_MAX_KEYS:
+            return Response(
+                {"detail": f"metrics has too many keys (max {UPDATE_METRICS_MAX_KEYS})."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if isinstance(metrics.get("server_logs"), list) and len(metrics["server_logs"]) > UPDATE_METRICS_MAX_LOGS:
+            return Response(
+                {"detail": f"Too many log rows (max {UPDATE_METRICS_MAX_LOGS} per push)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            size = len(json.dumps(metrics, default=str))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "metrics must be JSON-serialisable."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if size > UPDATE_METRICS_MAX_BYTES:
+            return Response(
+                {"detail": f"metrics payload too large (max {UPDATE_METRICS_MAX_BYTES} bytes)."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
 
         if isinstance(metrics.get("server_logs"), list):
             try:
@@ -451,10 +494,19 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
             except Exception:
                 metrics = {**metrics, "server_logs": []}
 
-        merged = {**(device.last_metrics or {}), **metrics}
+        # Old derived keys / stale pushed faults must not survive this push.
+        merged = {**strip_stale_metrics(device.last_metrics or {}), **metrics}
+        merged["metrics_pushed_at"] = time.time()
         # Re-derive status from reachability + metrics hints
         status_hint = DeviceStatus.ONLINE
-        if merged.get("inverter_fault") in (1, True, "1", "true"):
+        try:
+            batt = merged.get("battery_percent")
+            if batt is not None and float(batt) < 15:
+                status_hint = DeviceStatus.DEGRADED
+                merged["battery_low"] = True
+        except (TypeError, ValueError):
+            pass
+        if merged.get("inverter_fault") in (1, True, "1", "true", "True"):
             status_hint = DeviceStatus.FAULT
         apply_probe_result(
             device,
@@ -472,19 +524,27 @@ class InfraDeviceViewSet(viewsets.ModelViewSet):
 
 
 class InfraRefreshView(APIView):
-    """Sync cameras/NVRs from Camera Management and poll all device statuses."""
+    """
+    POST: ask the background worker to sync cameras/NVRs and poll every device now.
+    Returns 202 at once; the work runs in the worker (never inside the request, never
+    twice at the same time). Results show up in the device list as the poll finishes.
+    """
 
     permission_classes = [IsInfraAdmin]
 
     def post(self, request):
-        from .services import sync_and_poll
+        from .worker import request_refresh
 
-        stats = sync_and_poll()
-        return Response({"detail": "Sync and poll completed.", **stats})
-
-    def get(self, request):
-        # Same as POST for convenience from the UI refresh button
-        return self.post(request)
+        state = request_refresh()
+        messages = {
+            "queued": "Sync and poll requested; the monitoring worker is running it now.",
+            "started": "Sync and poll started in the background.",
+            "running": "A sync and poll is already running.",
+        }
+        return Response(
+            {"detail": messages.get(state, "Sync and poll requested."), "state": state},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class InfraAlertRuleViewSet(viewsets.ModelViewSet):

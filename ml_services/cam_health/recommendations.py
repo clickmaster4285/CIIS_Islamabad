@@ -76,6 +76,13 @@ def build_recommendations(
             "Stream appears frozen (identical frames)",
             "Restart the camera channel on the NVR and verify uplink bandwidth.",
         )
+    elif freeze >= 0.65:
+        add(
+            "possible_frozen_frame",
+            "medium",
+            "Health sample identical to the previous one (possible freeze)",
+            "Re-check shortly; if it repeats, restart the camera channel on the NVR.",
+        )
 
     fps = stream.get("fps")
     if fps is not None and float(fps) < 5:

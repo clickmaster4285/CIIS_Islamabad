@@ -204,7 +204,7 @@ class CityApplyTests(TestCase):
 
     def test_leave_request_uses_city_leave_type_by_code(self):
         staff = Staff.objects.create(full_name="Ali")
-        sick = LeaveType.objects.create(name="Sick", code="SICK")
+        sick, _ = LeaveType.objects.get_or_create(code="SICK", defaults={"name": "Sick"})
         rid = uuid.uuid4()
         downlink.apply_item(self._item(4, "leave_request", "upsert", rid, {
             "_staff_entity_id": str(staff.entity_id), "_ref_leave_type": {"code": "SICK", "name": "Sick"},
@@ -217,16 +217,41 @@ class CityApplyTests(TestCase):
     @mock.patch("city_sync.downlink._download")
     @mock.patch("city_sync.downlink._hq_post")
     @mock.patch("city_sync.downlink._hq_get")
-    def test_pull_applies_in_order_reports_failures_and_moves_on(self, hq_get, hq_post, _download, refresh):
+    def test_pull_applies_in_order_and_stops_at_a_failure(self, hq_get, hq_post, _download, refresh):
         eid = uuid.uuid4()
         bad = self._item(2, "attendance", "upsert", uuid.uuid4(), {"_staff_entity_id": str(uuid.uuid4()), "date": "2026-10-15"})
         hq_get.side_effect = [_Resp(data={"items": [self._staff_item(eid), bad]}), _Resp(data={"items": []})]
         result = downlink.pull_downlink(2)
-        self.assertEqual((result["applied"], result["failed"], result["cursor"]), (1, 1, 2))
+        # The cursor never moves past the failed item, so nothing can overtake it.
+        self.assertEqual((result["applied"], result["failed"], result["cursor"]), (1, 1, 1))
         acks = hq_post.call_args[0][1]["results"]
         self.assertEqual([a["status"] for a in acks], ["applied", "failed"])
-        self.assertEqual(CityControlState.load().downlink_seq, 2)
+        state = CityControlState.load()
+        self.assertEqual((state.downlink_seq, state.downlink_failed_seq, state.downlink_failed_tries), (1, 2, 1))
         refresh.assert_called_once()
+
+    @mock.patch("city_sync.downlink._refresh_faces")
+    @mock.patch("city_sync.downlink._download")
+    @mock.patch("city_sync.downlink._hq_post")
+    @mock.patch("city_sync.downlink._hq_get")
+    def test_item_that_keeps_failing_is_skipped_after_max_tries(self, hq_get, hq_post, _download, refresh):
+        bad = self._item(2, "attendance", "upsert", uuid.uuid4(), {"_staff_entity_id": str(uuid.uuid4()), "date": "2026-10-15"})
+        CityControlState.load()
+        CityControlState.objects.filter(pk=1).update(downlink_seq=1)
+        with override_settings(SYNC_DOWNLINK_MAX_TRIES=2):
+            hq_get.side_effect = [_Resp(data={"items": [bad]})]
+            self.assertEqual(downlink.pull_downlink(2)["cursor"], 1)
+            hq_get.side_effect = [_Resp(data={"items": [bad]})]
+            self.assertEqual(downlink.pull_downlink(2)["cursor"], 2)
+        state = CityControlState.load()
+        self.assertEqual((state.downlink_failed_seq, state.downlink_failed_tries), (0, 0))
+
+    def test_download_refuses_paths_outside_media_root(self):
+        from django.core.exceptions import SuspiciousFileOperation
+
+        for bad in ("../settings.py", "a/../../x.jpg", "/etc/passwd", "C:/Windows/x.jpg"):
+            with self.assertRaises(SuspiciousFileOperation):
+                downlink._safe_media_target(bad)
 
     @mock.patch("city_sync.downlink.pull_downlink")
     def test_heartbeat_starts_pull_only_when_behind(self, pull):

@@ -17,6 +17,8 @@ from users.permissions import (
     get_location_scope,
     has_hr_api_access,
 )
+from visitors.permissions import can_write_vms
+from warehouse.permissions import DESTRUCTION_ALERT_ROLES
 
 # Operational roles that may talk to the agent at all.
 VOICE_AGENT_ROLES = frozenset(
@@ -86,15 +88,27 @@ CAPABILITY_CHECKS = {
     "cases.view": lambda u: _role(u) in CASE_ROLES,
     "infra.view": lambda u: _role(u) in SURVEILLANCE_ROLES,
     "audit.view": lambda u: _role(u) in AUDIT_ROLES,
-    # perform_action writes (each still needs the officer's explicit yes)
-    "visitors.write": lambda u: _role(u) in INCIDENT_WRITE_ROLES,
+    # perform_action writes (each still needs the officer's explicit yes). Each mirrors the
+    # permission of the REST endpoint the action calls, so the model is never offered an action
+    # the endpoint would refuse.
+    "visitors.write": lambda u: _role(u) in INCIDENT_WRITE_ROLES and can_write_vms(u),
+    "visitor_alerts.write": lambda u: _role(u) in SURVEILLANCE_ROLES and can_write_vms(u),
     "leave.write": lambda u: has_hr_api_access(u),
     "cases.write": lambda u: _role(u) in CASE_ROLES,
     "alerts.write": lambda u: _role(u) in SURVEILLANCE_ROLES,
+    "destruction_alerts.write": lambda u: _role(u) in SURVEILLANCE_ROLES and _role(u) in DESTRUCTION_ALERT_ROLES,
     "reports.create": lambda u: _role(u) in VOICE_AGENT_ROLES,
 }
 
-WRITE_CAPABILITIES = ("incidents.create", "visitors.write", "leave.write", "cases.write", "alerts.write")
+WRITE_CAPABILITIES = (
+    "incidents.create",
+    "visitors.write",
+    "visitor_alerts.write",
+    "leave.write",
+    "cases.write",
+    "alerts.write",
+    "destruction_alerts.write",
+)
 CAPABILITY_CHECKS["actions.perform"] = lambda u: any(CAPABILITY_CHECKS[c](u) for c in WRITE_CAPABILITIES)
 
 

@@ -14,7 +14,7 @@ import {
   getAllCitiesCameras,
 } from "@/lib/all-cities-cameras"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -38,16 +38,13 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   LayoutGrid,
   ChevronDown,
-  Star,
   Search,
   Video,
   Move,
   Camera,
   Mic,
-  Volume2,
   ZoomIn,
   Monitor,
-  Square,
   Circle,
 } from "lucide-react"
 
@@ -82,7 +79,6 @@ export default function LiveCameraGridPage() {
     onlineOnly: !hasFocusCamera,
     allocatedOnly: !hasFocusCamera,
   })
-  const [cameras, setCameras] = useState<CameraRecord[]>([])
   const [locationFilter, setLocationFilter] = useState("all")
   const [layout, setLayout] = useState(hasFocusCamera ? "1x1" : "2x2")
   const [videoWallMode, setVideoWallMode] = useState(false)
@@ -110,23 +106,43 @@ export default function LiveCameraGridPage() {
     [allCameras, focusCameraId, hasFocusCamera]
   )
 
-  useEffect(() => {
+  const cameras = useMemo<CameraRecord[]>(() => {
+    if (hasFocusCamera) return focusedCamera ? [focusedCamera] : []
+    if (locationFilter === "all") return allCameras
+    return allCameras.filter((c) => c.location === locationFilter)
+  }, [allCameras, locationFilter, hasFocusCamera, focusedCamera])
+
+  // While a camera is focused, keep the 1x1 layout and its location selected
+  // whenever the inputs change; when not focused and the All Cities preference
+  // is on, a focus change resets the filter to "all". (Adjust state during render.)
+  const [focusSync, setFocusSync] = useState<{
+    allCameras: CameraRecord[]
+    locationFilter: string
+    hasFocusCamera: boolean
+    focusedCamera: CameraRecord | undefined
+  } | null>(null)
+  if (
+    !focusSync ||
+    focusSync.allCameras !== allCameras ||
+    focusSync.locationFilter !== locationFilter ||
+    focusSync.hasFocusCamera !== hasFocusCamera ||
+    focusSync.focusedCamera !== focusedCamera
+  ) {
+    const focusChanged = !focusSync || focusSync.hasFocusCamera !== hasFocusCamera
+    setFocusSync({ allCameras, locationFilter, hasFocusCamera, focusedCamera })
     if (hasFocusCamera) {
       setLayout("1x1")
       if (focusedCamera?.location) setLocationFilter(focusedCamera.location)
-      setCameras(focusedCamera ? [focusedCamera] : [])
-      return
+    } else if (focusChanged && getAllCitiesCameras()) {
+      setLocationFilter("all")
     }
-    if (locationFilter === "all") setCameras(allCameras)
-    else setCameras(allCameras.filter((c) => c.location === locationFilter))
-  }, [allCameras, locationFilter, hasFocusCamera, focusedCamera])
+  }
 
   useEffect(() => {
     const onAllCities = (e: Event) => {
       const enabled = (e as CustomEvent<{ enabled: boolean }>).detail?.enabled
       if (enabled && !hasFocusCamera) setLocationFilter("all")
     }
-    if (getAllCitiesCameras() && !hasFocusCamera) setLocationFilter("all")
     window.addEventListener(ALL_CITIES_CAMERAS_EVENT, onAllCities)
     return () => window.removeEventListener(ALL_CITIES_CAMERAS_EVENT, onAllCities)
   }, [hasFocusCamera])

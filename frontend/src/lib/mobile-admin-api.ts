@@ -194,7 +194,15 @@ function monitorQuery(filters: PhoneActivityFilters, params: PageParams = {}): s
   return `?${sp}`
 }
 
-function pageMeta<T>(data: any, results: T[], params: PageParams): Paged<T> {
+type PageMetaSource = {
+  count?: unknown
+  page?: unknown
+  page_size?: unknown
+  has_next?: unknown
+  has_prev?: unknown
+} | null | undefined
+
+function pageMeta<T>(data: PageMetaSource, results: T[], params: PageParams): Paged<T> {
   return {
     results,
     count: typeof data?.count === "number" ? data.count : results.length,

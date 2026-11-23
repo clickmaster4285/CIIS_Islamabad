@@ -201,19 +201,26 @@ class VisitorWriteSerializer(serializers.Serializer):
     """Accept flexible frontend payload for create/update."""
 
     def create(self, validated_data):
+        from city_sync.identity import local_rows_q
         from users.permissions import resolve_location_for_write
-        from .payload_utils import apply_registered_by_from_request
+        from .payload_utils import apply_registered_by_from_request, requested_qr_code_id
 
         source = self.context.get("registration_source", "")
+        requested_location = str(validated_data.get("location") or "").strip()
+        requested_qr = requested_qr_code_id(validated_data)
         model_fields, extra = split_visitor_payload(validated_data, registration_source=source)
         request = self.context.get("request")
-        if request and getattr(request.user, "is_authenticated", False):
-            model_fields["location"] = resolve_location_for_write(
-                request.user,
-                model_fields.get("location") or validated_data.get("location") or "",
-            )
+        user = getattr(request, "user", None) if request else None
+        if user is not None and getattr(user, "is_authenticated", False):
+            model_fields["location"] = resolve_location_for_write(user, requested_location)
+        else:
+            model_fields["location"] = ""
         apply_registered_by_from_request(model_fields, request)
         model_fields["extra_data"] = extra
+        # The walk-in pass is printed with the QR id the form generated, so keep it when it is
+        # not already in use here; otherwise Visitor.save() issues an unguessable server id.
+        if requested_qr and not Visitor.objects.filter(local_rows_q(), qr_code_id=requested_qr).exists():
+            model_fields["qr_code_id"] = requested_qr
         if model_fields.get("registration_status") == "draft":
             model_fields["flow_stage"] = "arrived"
         visitor = Visitor.objects.create(**model_fields)
@@ -224,8 +231,24 @@ class VisitorWriteSerializer(serializers.Serializer):
         return visitor
 
     def update(self, instance, validated_data):
+        from users.permissions import resolve_location_for_write
+        from .payload_utils import initial_approval_status
+
         partial = bool(self.partial)
+        was_draft = str(instance.registration_status or "").strip().lower() == "draft"
+        requested_location = str(validated_data.get("location") or "").strip()
         model_fields, extra = split_visitor_payload(validated_data, partial=partial)
+        # Approval is decided by approve/deny only. A draft that is still undecided gets its
+        # initial approval state from the submitted form (approver_required).
+        model_fields.pop("approval_status", None)
+        undecided = not (instance.approved_by or instance.denied_by)
+        if was_draft and undecided and instance.approval_status != "denied":
+            approver_required = model_fields.get("approver_required", instance.approver_required)
+            model_fields["approval_status"] = initial_approval_status(approver_required)
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        if requested_location and user is not None and getattr(user, "is_authenticated", False):
+            model_fields["location"] = resolve_location_for_write(user, requested_location)
         existing_extra = dict(instance.extra_data or {})
         existing_extra.update(extra)
         model_fields["extra_data"] = existing_extra
@@ -233,6 +256,9 @@ class VisitorWriteSerializer(serializers.Serializer):
             if key == "id":
                 continue
             setattr(instance, key, value)
+        if was_draft and str(instance.registration_status or "").strip().lower() != "draft":
+            if instance.flow_stage == "arrived":
+                instance.flow_stage = "registered"
         instance.save()
         reg_status = model_fields.get("registration_status", instance.registration_status)
         if str(reg_status or "").strip().lower() != "draft":

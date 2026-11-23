@@ -15,11 +15,13 @@ import os
 import re
 import shutil
 import subprocess
+import asyncio
 import threading
 import time
+import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator
 from urllib.parse import quote
 
 os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
@@ -46,6 +48,7 @@ import numpy as np
 
 from camera_byte_tracker import CameraByteTrackerPool
 from face_recognizer import KnownFaceDB
+from face_track_gate import FaceTrackGate, is_face_target
 from inference_engine import (
     ALLOWED_COCO_CLASS_IDS,
     SMOKE_FIRE_MIN_CONF,
@@ -138,6 +141,47 @@ def _env_int(name: str, default: int) -> int:
         return int(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+_URL_CREDS_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<user>[^:@/\s]*)(?::[^@/\s]*)?@")
+
+
+def redact_url(text: str | None) -> str:
+    """rtsp://user:pass@host/... → rtsp://user:***@host/... (also inside longer messages)."""
+    if not text:
+        return text or ""
+    return _URL_CREDS_RE.sub(lambda m: f"{m.group('scheme')}{m.group('user')}:***@", str(text))
+
+
+def allowed_stream_schemes() -> frozenset[str]:
+    """URL schemes the ML node will open (ML_ALLOWED_STREAM_SCHEMES, default rtsp,rtsps).
+
+    The Django backend only registers rtsp:// URLs. Add http/https here only if some
+    camera really is an HTTP MJPEG source — otherwise ffmpeg could be pointed at any
+    URL or local file through the register API.
+    """
+    raw = os.getenv("ML_ALLOWED_STREAM_SCHEMES", "rtsp,rtsps")
+    out = {s.strip().lower().rstrip(":/") for s in raw.split(",") if s.strip()}
+    return frozenset(out or {"rtsp", "rtsps"})
+
+
+def stream_url_allowed(url: str | None) -> bool:
+    text = (url or "").strip()
+    if "://" not in text:
+        return False
+    scheme = text.split("://", 1)[0].lower()
+    return scheme in allowed_stream_schemes()
+
+
+def _protocol_whitelist() -> str:
+    """ffmpeg -protocol_whitelist: RTSP transports only, plus http(s) if that scheme is allowed."""
+    protos = ["rtsp", "rtsps", "rtp", "srtp", "tcp", "udp", "tls"]
+    schemes = allowed_stream_schemes()
+    if "http" in schemes:
+        protos += ["http", "httpproxy"]
+    if "https" in schemes:
+        protos += ["https"]
+    return ",".join(protos)
 
 
 def _resolve_ffmpeg_path() -> str | None:
@@ -253,10 +297,70 @@ def _ffmpeg_socket_timeout_us() -> str:
     return os.getenv("ML_FFMPEG_STIMEOUT_US", "10000000").strip() or "10000000"
 
 
-def _ffmpeg_timeout_cli_flag() -> str:
-    """CLI flag for socket I/O timeout (microseconds). Use 'timeout' — '-stimeout' is not accepted by many ffmpeg builds."""
-    raw = os.getenv("ML_FFMPEG_TIMEOUT_FLAG", "timeout").strip().lstrip("-") or "timeout"
-    return raw
+_ffmpeg_version_cache: dict[str, tuple[int, int]] = {}
+
+
+def _ffmpeg_version(ffmpeg_path: str | None = None) -> tuple[int, int]:
+    """(major, minor) of the ffmpeg binary; (0, 0) when unknown (git builds, probe failure)."""
+    path = ffmpeg_path or _resolve_ffmpeg_path() or "ffmpeg"
+    if path in _ffmpeg_version_cache:
+        return _ffmpeg_version_cache[path]
+    ver = (0, 0)
+    try:
+        proc = subprocess.run([path, "-hide_banner", "-version"], capture_output=True, text=True, timeout=8, check=False)
+        m = re.search(r"ffmpeg version n?(\d+)\.(\d+)", proc.stdout or "")
+        if m:
+            ver = (int(m.group(1)), int(m.group(2)))
+    except Exception as exc:
+        print(f"[live] ffmpeg version probe failed: {exc}")
+    _ffmpeg_version_cache[path] = ver
+    return ver
+
+
+def _ffmpeg_timeout_cli_flag(ffmpeg_path: str | None = None) -> str:
+    """CLI flag for the RTSP socket I/O timeout (microseconds).
+
+    ffmpeg >= 5: '-timeout' is the socket I/O timeout ('-stimeout' was removed).
+    ffmpeg 4.x : '-timeout' means *listen* timeout and turns on listen mode (the stream never
+                 opens) — the socket I/O timeout is '-stimeout' there.
+    Unknown version (git build): 'timeout'. ML_FFMPEG_TIMEOUT_FLAG overrides.
+    """
+    raw = os.getenv("ML_FFMPEG_TIMEOUT_FLAG", "").strip().lstrip("-")
+    if raw:
+        return raw
+    major, _minor = _ffmpeg_version(ffmpeg_path)
+    return "stimeout" if 0 < major < 5 else "timeout"
+
+
+def _ingest_fps() -> float:
+    """Max frames/s ffmpeg hands to Python per camera (ML_INGEST_FPS; 0 = camera rate).
+
+    Default: the fastest consumer — motion clip sampling (ML_MOTION_CLIP_FPS, 8) or the
+    browser preview (ML_LIVE_STREAM_FPS, 12) — and never below 8. Inference only takes the
+    newest frame, so frames above this rate were decoded to JPEG and thrown away.
+    """
+    raw = os.getenv("ML_INGEST_FPS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    clip_fps = min(25.0, max(1.0, _env_float("ML_MOTION_CLIP_FPS", 8.0)))
+    view_fps = max(5, min(_env_int("ML_LIVE_STREAM_FPS", 12), 30))
+    return float(max(8.0, clip_fps, view_fps))
+
+
+def _ingest_fps_args(ffmpeg_path: str) -> tuple[list[str], str]:
+    """(output args, extra -vf filter) that cap the frame rate without duplicating frames."""
+    fps = _ingest_fps()
+    if fps <= 0:
+        return [], ""
+    major, minor = _ffmpeg_version(ffmpeg_path)
+    if (major, minor) >= (4, 4) or major == 0:
+        return ["-fpsmax", f"{fps:g}"], ""
+    # Old ffmpeg: drop frames closer than 1/fps apart (software frames; append after hwdownload)
+    gap = max(0.0, 0.97 / fps)
+    return ["-vsync", "vfr"], f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{gap:.4f})'"
 
 
 def _mjpeg_quality(*, keep_native: bool) -> str:
@@ -266,11 +370,13 @@ def _mjpeg_quality(*, keep_native: bool) -> str:
     return os.getenv("ML_MJPEG_QUALITY", "7").strip() or "7"
 
 
-def _rtsp_stream_input_flags() -> list[str]:
+def _rtsp_stream_input_flags(ffmpeg_path: str | None = None) -> list[str]:
     flags = [
+        "-protocol_whitelist",
+        _protocol_whitelist(),
         "-rtsp_transport",
         "tcp",
-        f"-{_ffmpeg_timeout_cli_flag()}",
+        f"-{_ffmpeg_timeout_cli_flag(ffmpeg_path)}",
         _ffmpeg_socket_timeout_us(),
     ]
     reorder = os.getenv("ML_FFMPEG_REORDER_QUEUE_SIZE", "").strip()
@@ -330,7 +436,7 @@ class CameraStream:
         if not cap.isOpened():
             cap = cv2.VideoCapture(source)
         if not cap.isOpened():
-            raise RuntimeError(f"Could not open RTSP stream: {source}")
+            raise RuntimeError(f"Could not open RTSP stream: {redact_url(source)}")
         if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return cap
@@ -360,7 +466,7 @@ class CameraStream:
             self._fail_streak = 0
             return True
         except Exception as exc:
-            print(f"[live] Failed to open {self.label}: {exc}")
+            print(f"[live] Failed to open {self.label}: {redact_url(str(exc))}")
             self.connected = False
             return False
 
@@ -442,6 +548,41 @@ class CameraStream:
         self._release_cap()
 
 
+def _stall_timeout_sec() -> float:
+    """No new frame for this long → kill ffmpeg so the reconnect path runs (0 = off)."""
+    return max(0.0, _env_float("ML_RTSP_STALL_SEC", 15.0))
+
+
+_stall_streams: "weakref.WeakSet[FfmpegCameraStream]" = weakref.WeakSet()
+_stall_lock = threading.Lock()
+_stall_thread: threading.Thread | None = None
+
+
+def _stall_watchdog_loop() -> None:
+    while True:
+        time.sleep(1.0)
+        limit = _stall_timeout_sec()
+        if limit <= 0:
+            continue
+        with _stall_lock:
+            streams = list(_stall_streams)
+        now = time.time()
+        for stream in streams:
+            try:
+                stream._check_stall(now, limit)
+            except Exception as exc:
+                print(f"[live] stall watchdog error: {exc}")
+
+
+def _watch_for_stall(stream: "FfmpegCameraStream") -> None:
+    global _stall_thread
+    with _stall_lock:
+        _stall_streams.add(stream)
+        if _stall_thread is None or not _stall_thread.is_alive():
+            _stall_thread = threading.Thread(target=_stall_watchdog_loop, daemon=True, name="cam-stall-watchdog")
+            _stall_thread.start()
+
+
 class FfmpegCameraStream:
     """
     RTSP reader via ffmpeg:
@@ -473,7 +614,28 @@ class FfmpegCameraStream:
         # Native/4K ANPR path skips FFmpeg scale entirely.
         self._use_cuda_scale = self._use_nvdec and not self.keep_native
         self._last_stderr = ""
+        # Stall watchdog: wall time the current ffmpeg started / last produced a frame.
+        self._proc_started_at = 0.0
+        self.stalls = 0
         self.thread = threading.Thread(target=self._run, daemon=True, name=f"cam-{label}")
+        _watch_for_stall(self)
+
+    def _check_stall(self, now: float, limit: float) -> None:
+        """Kill a running ffmpeg that has produced no frame for `limit` seconds."""
+        proc = self._proc
+        if not self.running or proc is None or proc.poll() is not None:
+            return
+        last = max(self._proc_started_at, self.frame_ts)
+        if last <= 0 or now - last < limit:
+            return
+        self.stalls += 1
+        print(f"[live] {self.label} no frame for {now - last:.0f}s — restarting ffmpeg (stall #{self.stalls})")
+        self.connected = False
+        try:
+            proc.kill()  # stdout read returns EOF → normal reconnect path
+        except Exception:
+            pass
+        self._proc_started_at = now  # one kill per stall window
 
     def _ffmpeg_cmd(self) -> list[str]:
         """
@@ -510,7 +672,7 @@ class FfmpegCameraStream:
             "nobuffer+discardcorrupt+genpts",
             "-flags",
             "low_delay",
-            *_rtsp_stream_input_flags(),
+            *_rtsp_stream_input_flags(self.ffmpeg_path),
             "-i",
             self.rtsp_url,
             "-an",
@@ -522,11 +684,15 @@ class FfmpegCameraStream:
             if not vf:
                 # Last-resort CPU scale — never pipe native 4K MJPEG by accident.
                 vf = "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2"
+        fps_args, fps_filter = _ingest_fps_args(self.ffmpeg_path)
+        if fps_filter:
+            vf = f"{vf},{fps_filter}" if vf else fps_filter
         if vf:
             cmd += ["-vf", vf]
 
         mux_qsize = os.getenv("ML_FFMPEG_MAX_MUXING_QUEUE_SIZE", "1024").strip() or "1024"
         cmd += [
+            *fps_args,
             "-max_muxing_queue_size",
             mux_qsize,
             "-f",
@@ -553,7 +719,7 @@ class FfmpegCameraStream:
                     if len(chunks) > 8:
                         chunks = chunks[-8:]
             if chunks:
-                self._last_stderr = " | ".join(chunks)[-240:]
+                self._last_stderr = redact_url(" | ".join(chunks))[-240:]
         except Exception:
             pass
 
@@ -644,6 +810,7 @@ class FfmpegCameraStream:
                 decode_tag += "+scale"
             try:
                 self._last_stderr = ""
+                self._proc_started_at = time.time()
                 self._proc = subprocess.Popen(
                     self._ffmpeg_cmd(),
                     stdout=subprocess.PIPE,
@@ -657,7 +824,7 @@ class FfmpegCameraStream:
                     name=f"fferr-{self.label}",
                 ).start()
             except OSError as exc:
-                print(f"[live] Failed to open {self.label} ({decode_tag}): {exc}")
+                print(f"[live] Failed to open {self.label} ({decode_tag}): {redact_url(str(exc))}")
                 self.connected = False
                 time.sleep(self._open_retry_delay)
                 continue
@@ -992,17 +1159,23 @@ def filter_osd_detections(
     frame_w: int,
     *,
     top_frac: float = 0.22,
-    left_frac: float = 0.55,
-    right_frac: float = 0.55,
+    left_frac: float = 0.25,
+    right_frac: float = 0.25,
     bottom_frac: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Drop boxes in CCTV OSD bands (top strip corners / optional bottom)."""
+    """Drop boxes in CCTV OSD bands (top strip corners / optional bottom).
+
+    left_frac / right_frac: width of the left / right corner zones (fraction of the frame
+    width) where the small-text guard below the strip applies. They are clamped to 0.45 so
+    the two corners can never cover the whole width (the old 0.55 / 0.55 defaults did, and
+    removed every small box just under the strip, not only corner text).
+    """
     if not detections or frame_h <= 0 or frame_w <= 0:
         return detections
     y_top = frame_h * max(0.0, min(top_frac, 0.5))
     y_bottom = frame_h * (1.0 - max(0.0, min(bottom_frac, 0.5)))
-    x_left = frame_w * max(0.0, min(left_frac, 1.0))
-    x_right = frame_w * (1.0 - max(0.0, min(right_frac, 1.0)))
+    x_left = frame_w * max(0.0, min(left_frac, 0.45))
+    x_right = frame_w * (1.0 - max(0.0, min(right_frac, 0.45)))
     kept: list[dict[str, Any]] = []
     small_h = frame_h * 0.06  # date / time / camera-name text is short
     for det in detections:
@@ -1021,6 +1194,20 @@ def filter_osd_detections(
             continue
         kept.append(det)
     return kept
+
+
+def _mjpeg_idle_timeout() -> float:
+    """MJPEG stream ends when no new frame arrived for this long (ML_MJPEG_IDLE_TIMEOUT_SEC)."""
+    return max(2.0, _env_float("ML_MJPEG_IDLE_TIMEOUT_SEC", 30.0))
+
+
+def _mjpeg_part(jpeg: bytes) -> bytes:
+    return (
+        b"--frame\r\nContent-Type: image/jpeg\r\n"
+        + f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
+        + jpeg
+        + b"\r\n"
+    )
 
 
 def encode_jpeg(frame: np.ndarray, quality: int) -> bytes | None:
@@ -1072,11 +1259,18 @@ class _CameraSession:
         self.infer_busy = False
         self.infer_seq_done = 0
         self.last_infer_at = 0.0
+        # Render-on-view: when a browser last asked for this camera's preview / MJPEG,
+        # and when the render path last encoded it (monotonic seconds).
+        self.last_viewed_at = 0.0
+        self.rendered_at = 0.0
+        # Set when the camera is unregistered / reopened: late inference results are dropped.
+        self.closed = False
 
     def set_frame(self, jpeg: bytes | None, detections: list[dict[str, Any]]):
         with self.lock:
             if jpeg is not None:
                 self.latest_jpeg = jpeg
+                self.rendered_at = time.monotonic()
             self.latest_detections = detections
 
     def set_results(self, detections: list[dict[str, Any]]):
@@ -1105,8 +1299,6 @@ class LiveStreamManager:
         )
         self._infer_executor: ThreadPoolExecutor | None = None
         self._infer_futures: list[Future] = []
-        self._infer_threads: list[threading.Thread] = []  # compat / status
-        self._infer_thread: threading.Thread | None = None  # compat alias (first worker)
         self._render_thread: threading.Thread | None = None
         self._running = False
         self._face_db: KnownFaceDB | None = None
@@ -1123,13 +1315,12 @@ class LiveStreamManager:
         self._max_det = 300
         self._osd_filter = True
         self._osd_top = 0.22
-        self._osd_left = 0.55
-        self._osd_right = 0.55
+        self._osd_left = 0.25
+        self._osd_right = 0.25
         self._osd_bottom = 0.0
         self._infer_interval = 0.15
         # Partition cameras across workers (e.g. 5 workers → ~5 cams each when 25 cams).
         self._infer_workers = max(1, min(_env_int("ML_LIVE_INFER_WORKERS", 5), 16))
-        self._predict_lock = gpu_predict_lock()
         self._offline_pause = False
         # Browser preview defaults: smaller/faster JPEGs (override via env).
         self._jpeg_quality = 50
@@ -1151,6 +1342,27 @@ class LiveStreamManager:
         # Stage 2.1: reuse face pass 1 (coco parse) in the identity step instead of running
         # YuNet + SFace again on the same box inside the shared registry lock. Off = old path.
         self._face_dedupe = os.getenv("ML_FACE_DEDUPE", "false").strip().lower() in ("1", "true", "yes")
+        # Stage 2.3: face recognition after ByteTrack, once per track id (see face_track_gate.py).
+        self._face_track_cache = os.getenv("ML_FACE_TRACK_CACHE", "false").strip().lower() in ("1", "true", "yes")
+        self._face_gate = FaceTrackGate()
+        # Stage 3: "batched" = one GPU dispatcher batches YOLO across the most-overdue cameras,
+        # CPU post-processing runs in the worker pool. "legacy" = contiguous shard workers.
+        self._scheduler_mode = os.getenv("ML_LIVE_SCHEDULER", "legacy").strip().lower()
+        self._batch_max = max(1, min(_env_int("ML_LIVE_BATCH_MAX", 4), 16))
+        self._prefetch = threading.local()
+        self._dispatch_thread: threading.Thread | None = None
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        # Stage 2.2: render thread encodes preview JPEGs only for cameras a viewer asked for
+        # in the last ML_LIVE_RENDER_VIEWER_GRACE seconds (default ON; a single /jpeg request
+        # renders on demand). ML_LIVE_RENDER_ONLY_WHEN_WATCHED=false = encode every camera every tick.
+        self._render_only_watched = os.getenv("ML_LIVE_RENDER_ONLY_WHEN_WATCHED", "true").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._render_grace = max(0.5, _env_float("ML_LIVE_RENDER_VIEWER_GRACE", 5.0))
+        self._osd_enrolled_staff_only = False  # real value set in _load_infer_settings
         self._specialist_count: dict[str, int] = {}
         self._last_specialist: dict[str, tuple[list, list, list]] = {}
         # 0 = native 4K passthrough for browser preview (override via ML_LIVE_MAX_WIDTH/HEIGHT).
@@ -1159,7 +1371,10 @@ class LiveStreamManager:
         self._stream_fps = max(5, min(_env_int("ML_LIVE_STREAM_FPS", 12), 30))
         self._frame_interval = 1.0 / self._stream_fps
         self._detections: dict[str, list[dict[str, Any]]] = {}
-        # Same-frame evidence JPEG (raw infer frame) keyed with detections — for Django snapshots
+        # Same-frame evidence (raw infer frame) keyed with detections — for Django snapshots.
+        # The frame is kept and JPEG-encoded only when /jpeg/evidence asks (it used to be
+        # encoded after every inference of every camera, mostly never read).
+        self._evidence_frame: dict[str, np.ndarray] = {}
         self._evidence_jpeg: dict[str, bytes] = {}
         self._evidence_wh: dict[str, tuple[int, int]] = {}
         self._det_lock = threading.Lock()
@@ -1225,35 +1440,62 @@ class LiveStreamManager:
             pass
         self._infer_workers = max(1, min(_env_int("ML_LIVE_INFER_WORKERS", self._infer_workers), 16))
 
-    def _close_session(self, key: str) -> None:
+    def _detach_session_locked(self, key: str) -> _CameraSession | None:
+        """Pop a camera's live state. Caller holds self._lock; nothing slow happens here.
+
+        The session is marked closed so an inference still running on it does not publish
+        results (or motion / clips) after the camera is gone. Call _release_detached()
+        after releasing self._lock to stop the ingest.
+        """
         session = self._sessions.pop(key, None)
-        self._detections.pop(key, None)
-        self._evidence_jpeg.pop(key, None)
-        self._evidence_wh.pop(key, None)
-        self._plate_frame_counters.pop(key, None)
+        with self._det_lock:
+            self._detections.pop(key, None)
+            self._evidence_frame.pop(key, None)
+            self._evidence_jpeg.pop(key, None)
+            self._evidence_wh.pop(key, None)
+        with self._plate_counter_lock:
+            self._plate_frame_counters.pop(key, None)
         self._last_plate_dets.pop(key, None)
         self._specialist_count.pop(key, None)
         self._last_specialist.pop(key, None)
+        if session is not None:
+            session.closed = True
+            with session.infer_lock:
+                session.infer_busy = False
+        return session
+
+    def _release_detached(self, key: str, session: _CameraSession | None) -> None:
+        """Slow part of closing a camera (outside self._lock): trackers, ids, ingest stop."""
         self._metrics.forget_camera(key)
+        # New stream / unregistered: track ids restart, so old binds must not survive.
+        self._byte_trackers.reset(key)
+        try:
+            self._object_identity.forget_camera(key)
+        except Exception as exc:
+            print(f"[live] identity reset failed [{key}]: {exc}")
         if self._plate_engine is not None:
             try:
                 self._plate_engine.clear_camera_tracks(key)
             except Exception:
                 pass
-        if session is not None:
-            with session.infer_lock:
-                session.infer_busy = False
         # Release shared ingest (one FFmpeg per camera) — do not stop stream twice.
         try:
             from camera_session import get_camera_session_manager
 
-            get_camera_session_manager().release(key)
+            get_camera_session_manager().release(key, stream=session.stream if session is not None else None)
         except Exception:
             if session is not None:
                 try:
                     session.stream.stop()
                 except Exception:
                     pass
+
+    def _reopen(self, key: str, old: _CameraSession, url: str) -> None:
+        """Stop the old ingest (outside the lock), then bind a fresh one."""
+        self._release_detached(key, old)
+        with self._lock:
+            if key not in self._sessions and self._registry.get(key):
+                self._open_session_locked(key, url)
 
     def is_registered(self, key: str) -> bool:
         return bool(self._registry.get((key or "").strip()))
@@ -1288,7 +1530,11 @@ class LiveStreamManager:
         url = (rtsp_url or "").strip()
         if not key or not url:
             return False
+        if not stream_url_allowed(url):
+            print(f"[live] Rejected {key}: stream URL scheme not allowed ({redact_url(url)[:60]})")
+            return False
         purpose_list = self._normalize_purpose_list(purposes, primary=purpose)
+        old = None
         with self._lock:
             self._registry[key] = url
             self._purposes[key] = purpose_list
@@ -1296,8 +1542,9 @@ class LiveStreamManager:
             if existing is not None:
                 native_mismatch = bool(getattr(existing.stream, "keep_native", False)) != self._want_native_frame(key)
                 if existing.rtsp_url != url or native_mismatch:
-                    self._close_session(key)
-                    self._open_session_locked(key, url)
+                    old = self._detach_session_locked(key)
+        if old is not None:
+            self._reopen(key, old, url)
         return True
 
     def set_camera_purposes(
@@ -1312,6 +1559,7 @@ class LiveStreamManager:
         if not key:
             return []
         purpose_list = self._normalize_purpose_list(purposes, primary=purpose)
+        old = None
         with self._lock:
             if purpose_list:
                 self._purposes[key] = purpose_list
@@ -1319,9 +1567,11 @@ class LiveStreamManager:
             if existing is not None:
                 native_mismatch = bool(getattr(existing.stream, "keep_native", False)) != self._want_native_frame(key)
                 if native_mismatch:
-                    self._close_session(key)
-                    self._open_session_locked(key, existing.rtsp_url)
-            return list(self._purposes.get(key) or [])
+                    old = self._detach_session_locked(key)
+            applied = list(self._purposes.get(key) or [])
+        if old is not None:
+            self._reopen(key, old, old.rtsp_url)
+        return applied
 
     @staticmethod
     def _normalize_purpose_list(
@@ -1381,6 +1631,19 @@ class LiveStreamManager:
             return None
         return session.stream.get_frame()
 
+    def get_frame_meta(self, key: str) -> tuple[int, float] | None:
+        """(decoder frame_seq, wall time of that frame) of a live session, else None."""
+        with self._lock:
+            session = self._sessions.get((key or "").strip())
+        if session is None:
+            return None
+        stream = session.stream
+        lock = getattr(stream, "lock", None)
+        if lock is not None:
+            with lock:
+                return int(getattr(stream, "frame_seq", 0) or 0), float(getattr(stream, "frame_ts", 0.0) or 0.0)
+        return int(getattr(stream, "frame_seq", 0) or 0), float(getattr(stream, "frame_ts", 0.0) or 0.0)
+
     def is_ready(self) -> bool:
         """True after YOLO infer loops have started. Raw RTSP can run before this."""
         return bool(self._running)
@@ -1436,9 +1699,11 @@ class LiveStreamManager:
         with self._lock:
             self._registry.pop(key, None)
             self._purposes.pop(key, None)
-            self._close_session(key)
+            old = self._detach_session_locked(key)
+        self._release_detached(key, old)
         self._motion.reset(key)
         self._clips.reset(key)
+        self._face_gate.reset(key)
         return True
 
     def ensure_camera(self, key: str, rtsp_url: str | None = None) -> bool:
@@ -1454,23 +1719,38 @@ class LiveStreamManager:
         url = self.resolve_rtsp_url(key, rtsp_url)
         if not url:
             return False
+        if not stream_url_allowed(url):
+            print(f"[live] ensure_camera rejected {key}: stream URL scheme not allowed")
+            return False
         with self._lock:
             existing = self._sessions.get(key)
-            if existing is not None:
-                # Never reopen just because a query-string RTSP URL differs slightly
-                # (encoding / param order). That caused Opening storms + perpetual 503.
-                if url and existing.rtsp_url != url:
-                    self._registry[key] = url
-                native_mismatch = bool(getattr(existing.stream, "keep_native", False)) != self._want_native_frame(key)
-                if not native_mismatch:
-                    return True
-                self._close_session(key)
-            self._open_session_locked(key, url)
-            return True
+            if existing is None:
+                self._open_session_locked(key, url)
+                return True
+            # Never reopen just because a query-string RTSP URL differs slightly
+            # (encoding / param order). That caused Opening storms + perpetual 503.
+            if url and existing.rtsp_url != url:
+                self._registry[key] = url
+            native_mismatch = bool(getattr(existing.stream, "keep_native", False)) != self._want_native_frame(key)
+            if not native_mismatch:
+                return True
+            old = self._detach_session_locked(key)
+        self._reopen(key, old, url)
+        return True
 
     def get_preview_jpeg(self, key: str) -> bytes | None:
-        """Cached browser JPEG only (never encode on the request path)."""
-        return self.get_latest_jpeg(key)
+        """Cached browser JPEG. With render-on-view, a stale cache is rendered once here."""
+        session = self._sessions.get(key)
+        if session is None:
+            return None
+        session.last_viewed_at = time.monotonic()
+        if self._render_only_watched:
+            with session.lock:
+                stale = (time.monotonic() - session.rendered_at) > max(1.0, 3 * self._frame_interval)
+            if stale:
+                self._render_session(session)
+        with session.lock:
+            return session.latest_jpeg
 
     def start(self):
         with self._start_lock:
@@ -1517,11 +1797,15 @@ class LiveStreamManager:
                     max_workers=self._infer_workers,
                     thread_name_prefix="live-infer",
                 )
-                for i in range(self._infer_workers):
-                    fut = self._infer_executor.submit(self._infer_shard_loop, i)
-                    self._infer_futures.append(fut)
-                self._infer_threads = []
-                self._infer_thread = None
+                if self._scheduler_mode == "batched":
+                    self._dispatch_thread = threading.Thread(
+                        target=self._batched_dispatch_loop, daemon=True, name="live-gpu-dispatch"
+                    )
+                    self._dispatch_thread.start()
+                else:
+                    for i in range(self._infer_workers):
+                        fut = self._infer_executor.submit(self._infer_shard_loop, i)
+                        self._infer_futures.append(fut)
                 self._render_thread = threading.Thread(target=self._render_loop, daemon=True, name="live-render")
                 self._render_thread.start()
                 self._clips.start()
@@ -1530,6 +1814,10 @@ class LiveStreamManager:
                     "native"
                     if self._max_width <= 0 and self._max_height <= 0
                     else f"{self._max_width}x{self._max_height}"
+                )
+                print(
+                    f"[live] scheduler={self._scheduler_mode}"
+                    + (f" batch_max={self._batch_max}" if self._scheduler_mode == "batched" else "")
                 )
                 print(
                     "[live] Started partitioned infer workers "
@@ -1563,14 +1851,20 @@ class LiveStreamManager:
             except Exception:
                 pass
         self._infer_futures = []
-        self._infer_threads = []
-        self._infer_thread = None
+        if self._dispatch_thread is not None:
+            self._dispatch_thread.join(timeout=2.0)
+            self._dispatch_thread = None
         if self._render_thread:
             self._render_thread.join(timeout=2.0)
         with self._lock:
-            for session in self._sessions.values():
-                session.stream.stop()
+            sessions = list(self._sessions.values())
             self._sessions.clear()
+        for session in sessions:
+            session.closed = True
+            try:
+                session.stream.stop()
+            except Exception:
+                pass
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -1584,7 +1878,8 @@ class LiveStreamManager:
                 if session is not None:
                     with session.lock:
                         det_count = len(session.latest_detections)
-                        has_frame = session.latest_jpeg is not None
+                        # infer_seq_done > 0: frames arrive even when no one watches the preview
+                        has_frame = session.latest_jpeg is not None or session.infer_seq_done > 0
                     connected = bool(session.stream.connected)
                 cameras.append(
                     {
@@ -1596,7 +1891,7 @@ class LiveStreamManager:
                         "detections": det_count,
                         "purpose": (self._purposes.get(key) or [""])[0] if self._purposes.get(key) else "",
                         "purposes": list(self._purposes.get(key) or []),
-                        "rtsp_url": (self._registry.get(key) or "").strip(),
+                        "rtsp_url": redact_url((self._registry.get(key) or "").strip()),
                     }
                 )
         return {
@@ -1631,6 +1926,7 @@ class LiveStreamManager:
         session = self._sessions.get(ip)
         if not session:
             return None
+        session.last_viewed_at = time.monotonic()
         with session.lock:
             return session.latest_jpeg
 
@@ -1651,7 +1947,7 @@ class LiveStreamManager:
         with self._det_lock:
             detections = list(self._detections.get(ip, []))
             evidence_wh = self._evidence_wh.get(ip)
-            has_evidence = bool(self._evidence_jpeg.get(ip))
+            has_evidence = ip in self._evidence_frame or bool(self._evidence_jpeg.get(ip))
         # Prefer dimensions of the frame the detections were computed on
         if evidence_wh and evidence_wh[0] > 0 and evidence_wh[1] > 0:
             infer_w, infer_h = int(evidence_wh[0]), int(evidence_wh[1])
@@ -1684,44 +1980,115 @@ class LiveStreamManager:
         }
 
     def get_evidence_jpeg(self, ip: str) -> bytes | None:
-        """Raw infer-frame JPEG stored with the current detection buffer (same frame as YOLO)."""
+        """Raw infer-frame JPEG stored with the current detection buffer (same frame as YOLO).
+
+        Encoded on first request per inferred frame, then cached until the next inference.
+        """
         with self._det_lock:
             data = self._evidence_jpeg.get(ip)
-            return data if data else None
+            if data:
+                return data
+            frame = self._evidence_frame.get(ip)
+        if frame is None:
+            return None
+        # Slightly higher quality than live preview — used for detection evidence.
+        q = max(75, min(92, int(self._jpeg_quality) + 10))
+        try:
+            data = encode_jpeg(frame, q)
+        except Exception:
+            return None
+        if data:
+            with self._det_lock:
+                if self._evidence_frame.get(ip) is frame:
+                    self._evidence_jpeg[ip] = data
+        return data or None
 
-    def iter_mjpeg(self, key: str) -> Iterator[bytes]:
-        boundary = b"--frame\r\n"
-        last: bytes | None = None
-        while True:
+    def _session_alive(self, key: str, session: _CameraSession | None) -> bool:
+        return session is not None and not session.closed and self._sessions.get(key) is session
+
+    def _mjpeg_next(self, key: str, session: _CameraSession, mode: str, target_width: int, last: Any):
+        """(jpeg | None, marker) for one MJPEG tick. Blocking work (encode) happens here."""
+        if mode == "live":
             frame = self.get_latest_jpeg(key)
             if frame and frame is not last:
-                last = frame
-                yield boundary
-                yield b"Content-Type: image/jpeg\r\n"
-                yield f"Content-Length: {len(frame)}\r\n\r\n".encode()
-                yield frame
-                yield b"\r\n"
+                return frame, frame
+            return None, last
+        getter = getattr(session.stream, "get_latest", None)
+        if callable(getter):
+            raw, seq = getter()
+        else:
+            raw, seq = session.stream.get_frame(), object()
+        if raw is None or seq == last:
+            return None, last
+        if mode == "attendance":
+            quality = 98 if target_width >= 2560 else max(90, min(self._jpeg_quality, 98))
+            jpeg = encode_jpeg(self._prepare_attendance_frame(raw, target_width), quality)
+        else:
+            jpeg = encode_jpeg(self._limit_size(raw), max(70, min(self._jpeg_quality, 98)))
+        return jpeg, seq
+
+    def _iter_mjpeg_sync(self, key: str, mode: str, target_width: int = 3840) -> Iterator[bytes]:
+        session = self._sessions.get(key)
+        idle = _mjpeg_idle_timeout()
+        last: Any = None
+        last_new = time.monotonic()
+        while self._session_alive(key, session):
+            jpeg, last = self._mjpeg_next(key, session, mode, target_width, last)
+            if jpeg:
+                last_new = time.monotonic()
+                yield _mjpeg_part(jpeg)
                 time.sleep(self._frame_interval)
             else:
+                if time.monotonic() - last_new > idle:
+                    return
                 time.sleep(0.02)
 
-    def iter_mjpeg_raw(self, key: str) -> Iterator[bytes]:
+    async def aiter_mjpeg(
+        self,
+        key: str,
+        *,
+        mode: str = "live",
+        target_width: int = 3840,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    ) -> AsyncIterator[bytes]:
+        """MJPEG parts without holding a worker thread per viewer.
+
+        Ends when the camera session is closed / replaced, when no new frame arrived for
+        ML_MJPEG_IDLE_TIMEOUT_SEC, or when the client disconnected. JPEG encoding of raw /
+        attendance frames runs in a worker thread.
+        """
         session = self._sessions.get(key)
-        if session is None:
-            return
-        boundary = b"--frame\r\n"
-        quality = max(70, min(self._jpeg_quality, 98))
-        while True:
-            raw = session.stream.get_frame()
-            if raw is not None:
-                jpeg = encode_jpeg(self._limit_size(raw), quality)
-                if jpeg:
-                    yield boundary
-                    yield b"Content-Type: image/jpeg\r\n"
-                    yield f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
-                    yield jpeg
-                    yield b"\r\n"
-            time.sleep(self._frame_interval)
+        idle = _mjpeg_idle_timeout()
+        last: Any = None
+        last_new = time.monotonic()
+        next_disc_check = 0.0
+        while self._session_alive(key, session):
+            now = time.monotonic()
+            if is_disconnected is not None and now >= next_disc_check:
+                next_disc_check = now + 1.0
+                try:
+                    if await is_disconnected():
+                        return
+                except Exception:
+                    return
+            if mode == "live":
+                jpeg, last = self._mjpeg_next(key, session, mode, target_width, last)
+            else:
+                jpeg, last = await asyncio.to_thread(self._mjpeg_next, key, session, mode, target_width, last)
+            if jpeg:
+                last_new = time.monotonic()
+                yield _mjpeg_part(jpeg)
+                await asyncio.sleep(self._frame_interval)
+            else:
+                if time.monotonic() - last_new > idle:
+                    return
+                await asyncio.sleep(0.02)
+
+    def iter_mjpeg(self, key: str) -> Iterator[bytes]:
+        return self._iter_mjpeg_sync(key, "live")
+
+    def iter_mjpeg_raw(self, key: str) -> Iterator[bytes]:
+        return self._iter_mjpeg_sync(key, "raw")
 
     def _prepare_frame(self, frame: np.ndarray):
         """
@@ -1772,9 +2139,11 @@ class LiveStreamManager:
             print(f"[live] Failed to open shared session: {key}")
             return
         self._sessions[key] = _CameraSession(key, ingest.stream, url)
-        self._detections[key] = []
-        self._evidence_jpeg.pop(key, None)
-        self._evidence_wh.pop(key, None)
+        with self._det_lock:
+            self._detections[key] = []
+            self._evidence_frame.pop(key, None)
+            self._evidence_jpeg.pop(key, None)
+            self._evidence_wh.pop(key, None)
         tag = "native-4K" if keep_native else "scaled"
         print(f"[live] Bound shared session: {key} ({tag})")
 
@@ -1788,6 +2157,10 @@ class LiveStreamManager:
         imgsz: int | None = None,
         tag: str = "yolo",
     ):
+        pre = getattr(self._prefetch, "results", None)
+        if pre and tag in pre:
+            # Batched scheduler already ran this model on this frame (same kwargs).
+            return [pre.pop(tag)]
         use_half = self._device != "cpu"
         conf = max(self._conf, min_conf) if min_conf is not None else self._conf
         kwargs = {
@@ -1993,6 +2366,10 @@ class LiveStreamManager:
             self._metrics.record_stage(f"step.{name}", now_pc - mark)
             mark = now_pc
 
+        # Track-gated faces: parse boxes only here; faces are labelled after ByteTrack.
+        gate_faces = bool(
+            self._face_track_cache and pipeline.get("recognize_faces") and self._face_db is not None
+        )
         if pipeline.get("coco") and self._coco_model is not None:
             coco_classes = pipeline.get("coco_classes")
             if coco_classes is None:
@@ -2010,12 +2387,12 @@ class LiveStreamManager:
                     recognize_faces=bool(pipeline.get("recognize_faces")),
                     smoke_model=False,
                     model_tag="coco",
-                    face_db=self._face_db if pipeline.get("recognize_faces") else None,
+                    face_db=self._face_db if pipeline.get("recognize_faces") and not gate_faces else None,
                 )
                 self._metrics.record_stage(
                     "post.coco_parse_incl_face", time.perf_counter() - t_parse
                 )
-                if self._face_dedupe and pipeline.get("recognize_faces") and self._face_db is not None:
+                if self._face_dedupe and not gate_faces and pipeline.get("recognize_faces") and self._face_db is not None:
                     # parse_yolo_result ran label_detection_detail on every coco person/face box.
                     for d in coco_detections:
                         cname = str(d.get("class_name") or "").lower()
@@ -2040,10 +2417,12 @@ class LiveStreamManager:
         self._specialist_count[camera_key] = n + 1
         run_specialists = n % self._specialist_every == 0
         if not run_specialists and camera_key in self._last_specialist:
+            # Reused boxes from the last specialist run: marked stale so they can keep an
+            # overlay / running danger clip alive but never start a new alert or clip.
             last_custom, last_smoke, last_weapon = self._last_specialist[camera_key]
-            custom_detections = [dict(d) for d in last_custom]
-            smoke_detections = [dict(d) for d in last_smoke]
-            weapon_detections = [dict(d) for d in last_weapon]
+            custom_detections = [{**d, "stale": True} for d in last_custom]
+            smoke_detections = [{**d, "stale": True} for d in last_smoke]
+            weapon_detections = [{**d, "stale": True} for d in last_weapon]
         else:
             run_specialists = True
 
@@ -2161,6 +2540,15 @@ class LiveStreamManager:
         _step("filters")
         detections = self._byte_trackers.assign_track_ids(camera_key, detections, frame)
         _step("bytetrack")
+        if gate_faces:
+            self._face_gate.label(camera_key, frame, detections, self._face_db)
+            # Identity step reuses these results instead of running face recognition again.
+            for d in detections:
+                if is_face_target(d):
+                    bkey = face_bbox_key(d.get("bbox") or [])
+                    if bkey is not None:
+                        face_results[bkey] = face_result_from_detection(d)
+            _step("faces_track_gated")
         detections = self._object_identity.enrich_detections(
             camera_key,
             frame,
@@ -2178,24 +2566,15 @@ class LiveStreamManager:
         detections: list[dict[str, Any]],
         frame: np.ndarray | None = None,
     ) -> None:
-        """Write Result Buffer (API snapshot + same-frame evidence JPEG)."""
-        evidence: bytes | None = None
-        wh: tuple[int, int] = (0, 0)
-        if frame is not None and getattr(frame, "size", 0):
-            try:
-                h, w = frame.shape[:2]
-                wh = (int(w), int(h))
-                # Slightly higher quality than live preview — used for detection evidence.
-                q = max(75, min(92, int(self._jpeg_quality) + 10))
-                evidence = encode_jpeg(frame, q)
-            except Exception:
-                evidence = None
-                wh = (0, 0)
+        """Write Result Buffer (API snapshot + same-frame evidence frame, encoded on request)."""
+        has_frame = frame is not None and bool(getattr(frame, "size", 0))
         with self._det_lock:
             self._detections[camera_key] = detections
-            if evidence:
-                self._evidence_jpeg[camera_key] = evidence
-                self._evidence_wh[camera_key] = wh
+            if has_frame:
+                h, w = frame.shape[:2]
+                self._evidence_frame[camera_key] = frame
+                self._evidence_jpeg.pop(camera_key, None)
+                self._evidence_wh[camera_key] = (int(w), int(h))
         session = self._sessions.get(camera_key)
         if session is not None:
             session.set_results(detections)
@@ -2231,6 +2610,8 @@ class LiveStreamManager:
             "infer_interval_sec": self._infer_interval,
             "specialist_every_n": self._specialist_every,
             "plate_ocr_every": self._plate_ocr_every,
+            "scheduler": self._scheduler_mode,
+            "batch_max": self._batch_max,
             "imgsz": self._imgsz,
             "stream_fps": self._stream_fps,
             "offline_pause": self._offline_pause,
@@ -2322,9 +2703,22 @@ class LiveStreamManager:
             self._metrics.record_camera_skip(session.ip, "no_new_frame")
             return
 
+        self._infer_and_publish(session, frame, seq, frame_ts, prev_seq, now)
+
+    def _infer_and_publish(
+        self,
+        session: _CameraSession,
+        frame: np.ndarray,
+        seq: int,
+        frame_ts: float,
+        prev_seq: int,
+        now: float,
+        started_at: float | None = None,
+    ) -> None:
+        """Inference + Result Buffer for one claimed frame. Clears session.infer_busy."""
         ok = False
         err = ""
-        started_wall = time.time()
+        started_wall = started_at if started_at is not None else time.time()
         try:
             t_infer = time.perf_counter()
             detections = self._infer_frame(
@@ -2337,6 +2731,11 @@ class LiveStreamManager:
             for det in detections:
                 det["frame_width"] = int(fw)
                 det["frame_height"] = int(fh)
+            if session.closed or self._sessions.get(session.ip) is not session:
+                # Camera unregistered / reopened while this frame was being inferred.
+                self._metrics.record_stage("event.dropped_closed_session", 0.0)
+                ok = True
+                return
             t_m = time.perf_counter()
             motion_events = self._motion.update(session.ip, detections, now)
             t_p = time.perf_counter()
@@ -2370,6 +2769,237 @@ class LiveStreamManager:
             except Exception:
                 pass
 
+    # -- Stage 3: batched scheduler (ML_LIVE_SCHEDULER=batched) -----------------------
+    def _claim_due_sessions(self, now: float, limit: int) -> list[dict[str, Any]]:
+        """Most-overdue cameras first (fair across all cameras, no fixed shards)."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        sessions.sort(key=lambda s: s.last_infer_at)
+        claimed: list[dict[str, Any]] = []
+        for session in sessions:
+            if len(claimed) >= limit:
+                break
+            with session.infer_lock:
+                if session.infer_busy or (now - session.last_infer_at) < self._infer_interval:
+                    continue
+                if now < getattr(session, "next_poll_at", 0.0):
+                    continue
+            frame_ts = 0.0
+            meta_getter = getattr(session.stream, "get_latest_meta", None)
+            getter = getattr(session.stream, "get_latest", None)
+            if callable(meta_getter):
+                frame, seq, frame_ts = meta_getter()
+            elif callable(getter):
+                frame, seq = getter()
+            else:
+                frame = session.stream.get_frame()
+                seq = session.infer_seq_done + 1 if frame is not None else session.infer_seq_done
+            if frame is None or seq <= session.infer_seq_done:
+                # Same skip accounting as the legacy loop, at most once per interval per camera.
+                session.next_poll_at = now + self._infer_interval
+                self._metrics.record_camera_skip(session.ip, "no_frame" if frame is None else "no_new_frame")
+                continue
+            with session.infer_lock:
+                if session.infer_busy:
+                    continue
+                session.infer_busy = True
+                session.last_infer_at = now
+                prev_seq = session.infer_seq_done
+            claimed.append(
+                {"session": session, "frame": frame, "seq": seq, "frame_ts": frame_ts, "prev_seq": prev_seq}
+            )
+        return claimed
+
+    def _predict_batch(
+        self,
+        model,
+        frames: list[np.ndarray],
+        *,
+        min_conf: float | None = None,
+        classes=None,
+        imgsz: int | None = None,
+        tag: str = "yolo",
+    ) -> list:
+        """One YOLO call on several frames (same kwargs as _predict)."""
+        conf = max(self._conf, min_conf) if min_conf is not None else self._conf
+        kwargs = {
+            "device": self._device,
+            "conf": conf,
+            "iou": self._iou,
+            "imgsz": imgsz or self._imgsz,
+            "max_det": self._max_det,
+            "half": self._device != "cpu",
+            "verbose": False,
+            "batch": len(frames),
+        }
+        if classes is not None:
+            kwargs["classes"] = sorted(int(c) for c in classes)
+        t0 = time.perf_counter()
+        with gpu_predict_lock():
+            t1 = time.perf_counter()
+            results = model.predict(frames, **kwargs)
+        t2 = time.perf_counter()
+        self._timing.add("gpu_lock_wait", t1 - t0)
+        self._timing.add("yolo_predict", t2 - t1)
+        self._metrics.record_model(tag, images=len(frames), latency=t2 - t1, lock_wait=t1 - t0)
+        return list(results)
+
+    @staticmethod
+    def _keep_classes(result, class_ids: frozenset[int]):
+        """Drop boxes outside one camera's class filter (the batch ran with the union)."""
+        boxes = getattr(result, "boxes", None)
+        if boxes is None or not len(boxes):
+            return result
+        cls = boxes.cls.int().tolist()
+        idx = [i for i, c in enumerate(cls) if c in class_ids]
+        if len(idx) == len(cls):
+            return result
+        return result[idx]
+
+    def _gpu_prefetch(self, claimed: list[dict[str, Any]]) -> None:
+        """Run each needed model once over all claimed frames; per-item results go to item['pre']."""
+        groups: dict[str, list[dict[str, Any]]] = {"coco": [], "custom": [], "smoke": [], "weapon": []}
+        for item in claimed:
+            key = item["session"].ip
+            item["pre"] = {}
+            item["infer_frame"], _sx, _sy = self._prepare_frame(item["frame"])
+            pipeline = self._purpose_pipeline(key)
+            if pipeline.get("coco") and self._coco_model is not None:
+                ids = pipeline.get("coco_classes")
+                class_filter = ALLOWED_COCO_CLASS_IDS if ids is None else frozenset(int(c) for c in ids)
+                if class_filter:
+                    item["coco_classes"] = frozenset(class_filter)
+                    groups["coco"].append(item)
+            # Same rule _infer_frame applies (it increments the counter itself).
+            n = self._specialist_count.get(key, 0)
+            specialists_due = n % self._specialist_every == 0 or key not in self._last_specialist
+            if specialists_due:
+                if pipeline.get("custom") and self._custom_model is not None:
+                    groups["custom"].append(item)
+                if pipeline.get("smoke") and self._smoke_model is not None:
+                    groups["smoke"].append(item)
+                if pipeline.get("weapon") and self._weapon_model is not None:
+                    groups["weapon"].append(item)
+
+        if groups["coco"]:
+            union: set[int] = set()
+            for item in groups["coco"]:
+                union |= item["coco_classes"]
+            results = self._predict_batch(
+                self._coco_model, [i["infer_frame"] for i in groups["coco"]], classes=union, tag="coco"
+            )
+            pose_items = []
+            for item, r in zip(groups["coco"], results):
+                r = self._keep_classes(r, item["coco_classes"])
+                item["pre"]["coco"] = r
+                boxes = getattr(r, "boxes", None)
+                if (
+                    self._pose_model is not None
+                    and boxes is not None
+                    and len(boxes)
+                    and 0 in boxes.cls.int().tolist()
+                ):
+                    pose_items.append(item)
+            if pose_items:
+                results = self._predict_batch(
+                    self._pose_model,
+                    [i["infer_frame"] for i in pose_items],
+                    min_conf=POSE_CONF,
+                    imgsz=POSE_IMGSZ,
+                    tag="pose",
+                )
+                for item, r in zip(pose_items, results):
+                    item["pre"]["pose"] = r
+
+        if groups["custom"]:
+            custom_ids = custom_only_class_ids(self._custom_model)
+            results = self._predict_batch(
+                self._custom_model,
+                [i["infer_frame"] for i in groups["custom"]],
+                classes=custom_ids or None,
+                tag="custom",
+            )
+            for item, r in zip(groups["custom"], results):
+                item["pre"]["custom"] = r
+        for tag, model, min_conf in (
+            ("smoke", self._smoke_model, SMOKE_FIRE_MIN_CONF),
+            ("weapon", self._weapon_model, WEAPON_MIN_CONF),
+        ):
+            if groups[tag]:
+                results = self._predict_batch(
+                    model, [i["infer_frame"] for i in groups[tag]], min_conf=min_conf, tag=tag
+                )
+                for item, r in zip(groups[tag], results):
+                    item["pre"][tag] = r
+
+    def _batched_post(self, item: dict[str, Any], claimed_at: float) -> None:
+        """CPU side for one camera: parse / faces / tracking / identity / publish."""
+        self._prefetch.results = item.get("pre") or {}
+        try:
+            self._infer_and_publish(
+                item["session"],
+                item["frame"],
+                item["seq"],
+                item["frame_ts"],
+                item["prev_seq"],
+                claimed_at,
+                started_at=claimed_at,
+            )
+        finally:
+            unused = self._prefetch.results
+            self._prefetch.results = None
+            if unused:
+                self._metrics.record_stage("batch.prefetch_unused", 0.0)
+            with self._inflight_lock:
+                self._inflight -= 1
+
+    def _batched_dispatch_loop(self) -> None:
+        # At most one extra batch waiting beyond the workers, so frames do not go stale.
+        max_inflight = self._infer_workers + self._batch_max
+        while self._running:
+            try:
+                self._batched_dispatch_once(max_inflight)
+            except Exception as exc:
+                print(f"[live] batched dispatch loop error (continuing): {exc}")
+                time.sleep(0.2)
+
+    def _batched_dispatch_once(self, max_inflight: int) -> None:
+        """One dispatcher step: claim due cameras, batch their GPU work, hand off CPU work."""
+        if self._offline_pause:
+            time.sleep(0.1)
+            return
+        with self._inflight_lock:
+            room = max_inflight - self._inflight
+        limit = min(self._batch_max, room)
+        if limit <= 0:
+            time.sleep(0.005)
+            return
+        now = time.time()
+        claimed = self._claim_due_sessions(now, limit)
+        if not claimed:
+            time.sleep(0.01)
+            return
+        try:
+            self._gpu_prefetch(claimed)
+        except Exception as exc:
+            # Fall back to per-frame predicts inside _infer_frame for this batch.
+            print(f"[live] batched GPU stage failed ({len(claimed)} cams): {exc}")
+            for item in claimed:
+                item["pre"] = {}
+        executor = self._infer_executor
+        for item in claimed:
+            with self._inflight_lock:
+                self._inflight += 1
+            try:
+                if executor is None:
+                    raise RuntimeError("executor stopped")
+                executor.submit(self._batched_post, item, now)
+            except Exception:
+                with self._inflight_lock:
+                    self._inflight -= 1
+                with item["session"].infer_lock:
+                    item["session"].infer_busy = False
+
     def _infer_shard_loop(self, worker_id: int) -> None:
         """
         Dedicated worker loop for one contiguous camera shard.
@@ -2377,11 +3007,22 @@ class LiveStreamManager:
         """
         while self._running:
             loop_start = time.time()
-            sessions = self._sessions_for_worker(worker_id)
-            for session in sessions:
-                if not self._running:
-                    break
-                self._run_camera_inference(session)
+            sessions: list[_CameraSession] = []
+            try:
+                sessions = self._sessions_for_worker(worker_id)
+                for session in sessions:
+                    if not self._running:
+                        break
+                    try:
+                        self._run_camera_inference(session)
+                    except Exception as exc:
+                        print(f"[live] infer worker {worker_id} error [{session.ip}] (continuing): {exc}")
+                        with session.infer_lock:
+                            session.infer_busy = False
+                        time.sleep(0.05)
+            except Exception as exc:
+                print(f"[live] infer worker {worker_id} loop error (continuing): {exc}")
+                time.sleep(0.2)
             elapsed = time.time() - loop_start
             wait = self._infer_interval - elapsed
             if wait > 0:
@@ -2422,49 +3063,45 @@ class LiveStreamManager:
 
     def iter_mjpeg_attendance(self, key: str, *, target_width: int = 3840) -> Iterator[bytes]:
         """Full main-stream MJPEG for attendance clips (higher quality than raw preview)."""
-        session = self._sessions.get(key)
-        if session is None:
-            return
-        boundary = b"--frame\r\n"
-        quality = 98 if target_width >= 2560 else max(90, min(self._jpeg_quality, 98))
-        while True:
-            raw = session.stream.get_frame()
-            if raw is not None:
-                prepared = self._prepare_attendance_frame(raw, target_width)
-                jpeg = encode_jpeg(prepared, quality)
-                if jpeg:
-                    yield boundary
-                    yield b"Content-Type: image/jpeg\r\n"
-                    yield f"Content-Length: {len(jpeg)}\r\n\r\n".encode()
-                    yield jpeg
-                    yield b"\r\n"
-            time.sleep(self._frame_interval)
+        return self._iter_mjpeg_sync(key, "attendance", target_width)
+
+    def _render_session(self, session: _CameraSession) -> bool:
+        """Latest frame + last Result Buffer -> preview JPEG for one camera."""
+        t_g = time.perf_counter()
+        live = session.stream.get_frame()
+        if live is None:
+            return False
+        with self._det_lock:
+            boxes = list(self._detections.get(session.ip, []))
+        if self._osd_enrolled_staff_only:
+            boxes = filter_enrolled_staff_detections(boxes)
+        t_d = time.perf_counter()
+        # draw_detections copies when there are boxes; otherwise just resize+encode.
+        framed = draw_detections(live, boxes) if boxes else live
+        t_e = time.perf_counter()
+        jpeg = encode_jpeg(self._limit_size(framed), self._jpeg_quality)
+        t_s = time.perf_counter()
+        session.set_frame(jpeg, boxes)
+        self._metrics.record_stage("render.frame_copy", t_d - t_g)
+        self._metrics.record_stage("render.draw", t_e - t_d)
+        self._metrics.record_stage("render.jpeg_encode", t_s - t_e)
+        return True
 
     def _render_loop(self):
-        """Render Thread: latest frame + last Result Buffer → JPEG. Never waits on inference."""
+        """Render Thread: latest frame + last Result Buffer -> JPEG. Never waits on inference."""
         while self._running:
             loop_start = time.time()
             with self._lock:
                 sessions = list(self._sessions.values())
+            now_m = time.monotonic()
             for session in sessions:
-                t_g = time.perf_counter()
-                live = session.stream.get_frame()
-                if live is None:
+                if self._render_only_watched and (now_m - session.last_viewed_at) > self._render_grace:
                     continue
-                with self._det_lock:
-                    boxes = list(self._detections.get(session.ip, []))
-                if self._osd_enrolled_staff_only:
-                    boxes = filter_enrolled_staff_detections(boxes)
-                t_d = time.perf_counter()
-                # draw_detections copies when there are boxes; otherwise just resize+encode.
-                framed = draw_detections(live, boxes) if boxes else live
-                t_e = time.perf_counter()
-                jpeg = encode_jpeg(self._limit_size(framed), self._jpeg_quality)
-                t_s = time.perf_counter()
-                session.set_frame(jpeg, boxes)
-                self._metrics.record_stage("render.frame_copy", t_d - t_g)
-                self._metrics.record_stage("render.draw", t_e - t_d)
-                self._metrics.record_stage("render.jpeg_encode", t_s - t_e)
+                try:
+                    self._render_session(session)
+                except Exception as exc:
+                    print(f"[live] render error [{session.ip}] (continuing): {exc}")
+                    time.sleep(0.01)
             self._metrics.record_stage("render.loop_all_cams", time.time() - loop_start)
             elapsed = time.time() - loop_start
             wait = self._frame_interval - elapsed

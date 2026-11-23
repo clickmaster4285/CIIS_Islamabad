@@ -18,7 +18,7 @@ class UserActivityLog(models.Model):
     browser = models.CharField(max_length=50, null=True, blank=True)
     action = models.CharField(max_length=255)
     source = models.CharField(max_length=20, default="web", db_index=True)
-    time = models.DateTimeField(auto_now_add=True)
+    time = models.DateTimeField(auto_now_add=True, db_index=True)
 
     @property
     def username(self):
@@ -254,14 +254,20 @@ class MobileAlert(models.Model):
 class MobileEventReceipt(models.Model):
     """Idempotency keys for GPS/heartbeat/offline uploads."""
 
-    event_id = models.CharField(max_length=64, unique=True)
+    event_id = models.CharField(max_length=64)
     event_type = models.CharField(max_length=40)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="mobile_event_receipts",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            # Per user: one phone must not be able to "use up" another user's event ids.
+            UniqueConstraint(fields=["user", "event_id"], name="uniq_mobile_event_receipt_user_event"),
+        ]
 
     def __str__(self):
         return self.event_id

@@ -73,7 +73,6 @@ export default function DetentionReportingPage() {
   const locations = useSourceLocations()
 
   useEffect(() => {
-    setLoading(true)
     Promise.all([
       fetchDetentionMemos().catch(() => [] as DetentionMemoApiRecord[]),
       fetchAssessments().catch(() => [] as DetentionAssessmentRecord[]),
@@ -130,9 +129,8 @@ export default function DetentionReportingPage() {
   )
   const pageSerial = (index: number) => (page - 1) * pageSize + index + 1
 
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages)
-  }, [page, totalPages])
+  // Clamp the page to the available range (adjust state during render).
+  if (page > totalPages) setPage(totalPages)
 
   const pdf = useBatchPdfExport<DetentionMemoApiRecord>(`detention-report-${new Date().toISOString().slice(0, 10)}.pdf`)
 

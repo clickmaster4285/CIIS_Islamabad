@@ -675,23 +675,58 @@ for line in sh("nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_m
         g["processes"].append({"pid": cols[1], "name": cols[2], "vram_mb": safe_float(cols[3])})
 
 logs = []
-def add_log(category, level, source, message, event_id=""):
+seen_fp = set()
+def add_log(category, level, source, message, log_time, key, event_id=""):
+    # Fingerprint from the entry itself (journal cursor / own timestamp + text), never
+    # from the poll time, so the same entry pulled again is recognised as a duplicate.
     msg = (message or "")[:2000]
-    fp = hashlib.sha1(f"{category}|{level}|{source}|{event_id}|{msg[:120]}|{now}".encode()).hexdigest()
+    fp = hashlib.sha1(str(key).encode("utf-8", "ignore")).hexdigest()
+    if fp in seen_fp:
+        return
+    seen_fp.add(fp)
     logs.append({
-        "log_time": now, "category": category, "level": level, "source": source,
+        "log_time": log_time, "category": category, "level": level, "source": source,
         "user": "", "remote_host": "", "event_id": event_id, "message": msg, "fingerprint": fp,
     })
 
-for line in sh("journalctl -p err..alert -n 40 --no-pager -o short-iso 2>/dev/null").splitlines():
-    if line.strip():
-        add_log("error", "Error", "journal", line.strip())
-for line in sh("journalctl -u ssh -u sshd -n 40 --no-pager -o short-iso 2>/dev/null").splitlines():
-    if line.strip():
-        add_log("access", "Info", "sshd", line.strip())
-for line in sh("journalctl -n 40 --no-pager -o short-iso 2>/dev/null").splitlines():
-    if line.strip():
-        add_log("system", "Info", "journal", line.strip())
+def journal_msg(raw):
+    if isinstance(raw, list):  # binary MESSAGE comes as a byte array
+        try:
+            return bytes(raw).decode("utf-8", "replace")
+        except Exception:
+            return ""
+    return str(raw or "")
+
+LEVELS = {0: "Emergency", 1: "Alert", 2: "Critical", 3: "Error", 4: "Warning", 5: "Notice", 6: "Info", 7: "Debug"}
+
+def read_journal(args, category, default_source):
+    for line in sh("journalctl " + args + " -n 40 --no-pager -o json 2>/dev/null").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        msg = journal_msg(e.get("MESSAGE"))
+        if not msg.strip():
+            continue
+        ts_us = e.get("__REALTIME_TIMESTAMP") or ""
+        try:
+            log_time = datetime.fromtimestamp(int(ts_us) / 1e6, tz=timezone.utc).isoformat()
+        except Exception:
+            log_time = now
+        try:
+            level = LEVELS.get(int(e.get("PRIORITY")), "Info")
+        except Exception:
+            level = "Info"
+        source = e.get("SYSLOG_IDENTIFIER") or e.get("_SYSTEMD_UNIT") or e.get("_COMM") or default_source
+        key = e.get("__CURSOR") or (str(ts_us) + "|" + str(e.get("_BOOT_ID") or "") + "|" + msg[:200])
+        add_log(category, level, str(source)[:200], msg, log_time, key)
+
+read_journal("-p err..alert", "error", "journal")
+read_journal("-u ssh -u sshd", "access", "sshd")
+read_journal("", "system", "journal")
 
 out = {
     "server_probe": "ssh",
@@ -744,8 +779,72 @@ print(json.dumps(out))
 """
 
 
+SSH_HOST_KEY_META = "ssh_host_key"
+
+
+def _host_key_fingerprint(key) -> str:
+    import base64
+
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def _pinned_host_key(device):
+    """(key_type, PKey) pinned for this device, or (None, None)."""
+    meta = device.metadata if isinstance(device.metadata, dict) else {}
+    pin = meta.get(SSH_HOST_KEY_META)
+    if not isinstance(pin, dict) or not pin.get("key") or not pin.get("type"):
+        return None, None
+    try:
+        import paramiko
+
+        key = paramiko.PKey.from_type_string(pin["type"], __import__("base64").b64decode(pin["key"]))
+        return pin["type"], key
+    except Exception:
+        logger.warning("device %s: stored SSH host key is unreadable; ignoring it", device.pk)
+        return None, None
+
+
+def _pin_host_key(device, key) -> None:
+    """Trust on first use: remember the host key seen on the first successful login."""
+    import base64
+
+    from django.utils import timezone as dj_tz
+
+    from .models import InfraDevice
+
+    pin = {
+        "type": key.get_name(),
+        "key": base64.b64encode(key.asbytes()).decode(),
+        "fingerprint": _host_key_fingerprint(key),
+        "pinned_at": dj_tz.now().isoformat(),
+    }
+    # Re-read metadata so a concurrent edit is not overwritten with a stale copy.
+    fresh = InfraDevice.objects.filter(pk=device.pk).values_list("metadata", flat=True).first()
+    meta = dict(fresh) if isinstance(fresh, dict) else {}
+    if isinstance(meta.get(SSH_HOST_KEY_META), dict):
+        return  # pinned meanwhile; keep the first one
+    meta[SSH_HOST_KEY_META] = pin
+    InfraDevice.objects.filter(pk=device.pk).update(metadata=meta)
+    device.metadata = meta
+    logger.info("device %s: pinned SSH host key %s (first use)", device.pk, pin["fingerprint"])
+
+
+def _host_key_mismatch_error(ip: str, expected, got) -> str:
+    return (
+        f"SSH host key for {ip} has CHANGED (pinned {_host_key_fingerprint(expected)}, "
+        f"server sent {_host_key_fingerprint(got)}). Connection refused: this can be a "
+        "man-in-the-middle. If the server was reinstalled, an admin must remove "
+        f"metadata.{SSH_HOST_KEY_META} on this device to trust the new key."
+    )
+
+
 def collect_via_ssh(device) -> dict[str, Any]:
-    """Collect host metrics over SSH using device username/password (Linux)."""
+    """Collect host metrics over SSH using device username/password (Linux).
+
+    Host keys are pinned per device on first successful connect (stored in
+    ``device.metadata["ssh_host_key"]``); a different key later is rejected.
+    """
     ip = (device.ip_address or "").strip()
     username = (device.username or "").strip()
     password = (device.password or "").strip()
@@ -766,9 +865,27 @@ def collect_via_ssh(device) -> dict[str, Any]:
     except ImportError:
         return {"server_probe_error": "paramiko not installed on CIIS backend"}
 
+    class _RecordFirstKey(paramiko.MissingHostKeyPolicy):
+        """No pin yet: accept (TOFU) and remember the key; it is pinned after login."""
+
+        seen = None
+
+        def missing_host_key(self, _client, _hostname, key):
+            self.seen = key
+
+    pinned_type, pinned_key = _pinned_host_key(device)
+    host_entry = ip if port == 22 else f"[{ip}]:{port}"
+    policy = _RecordFirstKey()
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if pinned_key is not None:
+        # Known key: paramiko rejects any other key BEFORE the password is sent.
+        client.get_host_keys().add(host_entry, pinned_type, pinned_key)
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    else:
+        client.set_missing_host_key_policy(policy)
     last_err: Exception | None = None
+    transport = None
+    attached = False
     try:
         # Prefer password auth only (avoid racing agent keys / double auth).
         try:
@@ -783,24 +900,53 @@ def collect_via_ssh(device) -> dict[str, Any]:
                 allow_agent=False,
                 look_for_keys=False,
             )
-        except Exception as exc:
+            server_key = client.get_transport().get_remote_server_key()
+        except paramiko.BadHostKeyException as exc:
+            return {
+                "server_probe": "ssh",
+                "server_probe_error": _host_key_mismatch_error(ip, exc.expected_key, exc.key)[:500],
+                "ssh_host_key_mismatch": True,
+            }
+        except paramiko.AuthenticationException as exc:
             last_err = exc
-            # Fallback: keyboard-interactive (some sshd configs)
+            # Fallback only for auth failures: keyboard-interactive (some sshd configs)
             if not password:
                 raise
             transport = paramiko.Transport((ip, int(port)))
             transport.banner_timeout = 20
             transport.auth_timeout = 20
-            transport.connect()
+            if pinned_type:
+                # Negotiate the pinned key type so a valid server isn't seen as "changed".
+                try:
+                    opts = transport.get_security_options()
+                    opts.key_types = [pinned_type] + [k for k in opts.key_types if k != pinned_type]
+                except (ValueError, TypeError):
+                    pass
+            transport.start_client(timeout=15)
+            server_key = transport.get_remote_server_key()
+            # Check the host key before any password goes over this transport.
+            if pinned_key is not None and server_key.asbytes() != pinned_key.asbytes():
+                return {
+                    "server_probe": "ssh",
+                    "server_probe_error": _host_key_mismatch_error(ip, pinned_key, server_key)[:500],
+                    "ssh_host_key_mismatch": True,
+                }
 
             def _kbd_handler(title, instructions, prompt_list):
                 return [password for _ in prompt_list]
 
             try:
                 transport.auth_interactive(username, _kbd_handler)
-            except Exception:
+            except paramiko.SSHException:
                 transport.auth_password(username, password)
             client._transport = transport  # noqa: SLF001
+            attached = True
+
+        if pinned_key is None:
+            try:
+                _pin_host_key(device, server_key)
+            except Exception:
+                logger.exception("device %s: could not store SSH host key", device.pk)
 
         # Upload script via stdin to python3
         cmd = "python3 -"
@@ -839,6 +985,13 @@ def collect_via_ssh(device) -> dict[str, Any]:
             "server_probe_error": f"SSH failed: {msg}"[:300],
         }
     finally:
+        # A fallback Transport that was never attached to the client is not closed by
+        # client.close() — close it here so failed logins don't leak sockets/threads.
+        if transport is not None and not attached:
+            try:
+                transport.close()
+            except Exception:
+                pass
         try:
             client.close()
         except Exception:
@@ -854,8 +1007,22 @@ def fetch_agent_metrics(device) -> dict[str, Any]:
     if port == 22:
         return {"server_probe_error": "Agent port not configured"}
     url = f"http://{ip}:{port}/infra-agent/metrics"
+    meta = device.metadata if isinstance(device.metadata, dict) else {}
+    secret = str(meta.get("agent_secret") or "").strip()
+    if not secret:
+        try:
+            from django.conf import settings
+
+            secret = str(getattr(settings, "INFRA_AGENT_SECRET", "") or "").strip()
+        except Exception:
+            secret = ""
+    if not secret:
+        import os
+
+        secret = os.environ.get("INFRA_AGENT_SECRET", "").strip()
+    headers = {"X-Infra-Agent-Secret": secret} if secret else {}
     try:
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, method="GET", headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             body = resp.read().decode("utf-8", errors="replace")
         data = json.loads(body)

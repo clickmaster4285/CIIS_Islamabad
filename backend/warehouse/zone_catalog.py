@@ -136,3 +136,17 @@ def get_zone_by_code(code: str) -> dict | None:
         if zone["code"] == code:
             return zone
     return None
+
+
+# Catalogue attributes nobody may edit through the API (SiteZoneSerializer.update ignores them).
+FIXED_ZONE_FIELDS = ("category", "security_level", "sort_order")
+
+
+def sync_fixed_zone_fields(zone, zone_def: dict) -> bool:
+    """Re-align only the fixed catalogue fields of an existing zone; never admin-edited ones."""
+    changed = [f for f in FIXED_ZONE_FIELDS if f in zone_def and getattr(zone, f) != zone_def[f]]
+    for field in changed:
+        setattr(zone, field, zone_def[field])
+    if changed:
+        zone.save(update_fields=[*changed, "updated_at"])
+    return bool(changed)

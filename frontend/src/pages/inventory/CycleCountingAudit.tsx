@@ -74,7 +74,7 @@ function saveRows(rows: CycleCountRow[]) {
 }
 
 export default function CycleCountingAuditPage() {
-  const [rows, setRows] = useState<CycleCountRow[]>([])
+  const [rows, setRows] = useState<CycleCountRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({
     qrCodeNumber: "",
@@ -90,10 +90,6 @@ export default function CycleCountingAuditPage() {
     status: "Pending",
     remarks: "",
   })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

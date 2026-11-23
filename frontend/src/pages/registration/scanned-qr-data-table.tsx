@@ -21,7 +21,7 @@ export function ScannedQRDataTable({ qrPayload, className }: ScannedQRDataTableP
         key: formatKey(key),
         value: formatValue(value)
       }));
-    } catch (error) {
+    } catch {
       // If not valid JSON, return as raw text
       return [{ key: 'Raw Data', value: payload }];
     }
@@ -36,7 +36,7 @@ export function ScannedQRDataTable({ qrPayload, className }: ScannedQRDataTableP
   };
 
   // Helper function to format values
-  const formatValue = (value: any) => {
+  const formatValue = (value: unknown) => {
     if (value === null || value === undefined) return '—';
     if (typeof value === 'boolean') return value ? 'Yes' : 'No';
     if (typeof value === 'object') return JSON.stringify(value);

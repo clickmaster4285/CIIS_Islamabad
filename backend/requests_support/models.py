@@ -64,6 +64,10 @@ class TicketStatus(models.TextChoices):
 # Tickets created by Super Admin / Location Admin are valid for this window.
 TICKET_VALIDITY_HOURS = 24
 
+# Only tickets nobody has picked up yet lapse when the window ends. Once Support has triaged or
+# assigned a ticket, work on it must not be silently expired mid-flight.
+EXPIRABLE_STATUSES = ("NEW",)
+
 
 # Suggested department by category (Request Engine)
 CATEGORY_DEPARTMENT = {
@@ -259,7 +263,7 @@ class SupportTicket(models.Model):
     def is_validity_expired(self) -> bool:
         if self.is_terminal:
             return self.status == TicketStatus.EXPIRED
-        if not self.expires_at:
+        if not self.expires_at or self.status not in EXPIRABLE_STATUSES:
             return False
         return timezone.now() >= self.expires_at
 
@@ -290,9 +294,14 @@ class SupportTicket(models.Model):
         return self.can_chat()
 
     def expire_if_needed(self) -> bool:
-        """Mark ticket EXPIRED when the 24h window elapses. Returns True if expired now."""
+        """Mark an untriaged (NEW) ticket EXPIRED when its 24h window elapses.
+
+        Tickets Support has already triaged/assigned/started never auto-expire.
+        Returns True if the ticket is (now) expired."""
         if self.status in (TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED):
             return self.status == TicketStatus.EXPIRED
+        if self.status not in EXPIRABLE_STATUSES:
+            return False
         if not self.expires_at or timezone.now() < self.expires_at:
             return False
         from_status = self.status

@@ -58,9 +58,7 @@ def _parent_nvr(device) -> InfraDevice | None:
         ).first()
         if obj:
             return obj
-        obj = InfraDevice.objects.filter(id=nvr_id, device_type=DeviceType.NVR).first()
-        if obj:
-            return obj
+        # metadata.nvr_id is a cameras.Nvr id — never reinterpret it as an InfraDevice id.
     # Same IP as an infra NVR
     if device.ip_address:
         return (
@@ -333,13 +331,10 @@ def enrich_camera_metrics(device) -> dict[str, Any]:
 
     cam_user = (device.username or "").strip()
     cam_password = device.password or ""
-    # Auto-sync copies the NVR login onto every camera row (services.py), so a
-    # login equal to the parent NVR's is the NVR's — it must not go to the camera.
-    own_creds = bool(cam_user and cam_password) and not (
-        nvr
-        and cam_user == (nvr.username or "").strip()
-        and cam_password == (nvr.password or "")
-    )
+    # Explicit flag, set when an admin saves this camera's own login (serializer).
+    # Older auto-synced rows carry a copy of the NVR login without the flag, so they
+    # are never contacted directly with it.
+    own_creds = bool(meta.get("camera_has_own_creds")) and bool(cam_user and cam_password)
     ch: dict[str, Any] = {}
     if nvr:
         metrics["parent_nvr_id"] = nvr.id
@@ -433,22 +428,20 @@ def enrich_camera_metrics(device) -> dict[str, Any]:
         metrics["snmp_status"] = "OFFLINE"
         metrics["snmp_via"] = "none"
 
-    # Image quality: no dedicated analytics on most firmwares — derive from signal health
+    # Image quality is not analysed by this probe (no frame analytics on the NVR/camera
+    # firmware). Only video loss is a real signal; everything else is "NOT MEASURED".
+    # Frame-based quality lives in the Camera Health (AI suggestions) module.
+    not_measured = "NOT MEASURED"
     if metrics.get("video_loss"):
-        metrics["image_blur"] = "DEGRADED"
-        metrics["image_brightness"] = "UNKNOWN"
-        metrics["image_visibility"] = "POOR"
-        metrics["image_obstruction"] = "POSSIBLE"
-    elif metrics.get("channel_online") or metrics.get("rtsp_receiving"):
-        metrics["image_blur"] = "NORMAL"
-        metrics["image_brightness"] = "NORMAL"
-        metrics["image_visibility"] = "NORMAL"
-        metrics["image_obstruction"] = "NONE"
+        metrics["image_blur"] = not_measured
+        metrics["image_brightness"] = not_measured
+        metrics["image_visibility"] = "NO VIDEO"
+        metrics["image_obstruction"] = not_measured
     else:
-        metrics["image_blur"] = "—"
-        metrics["image_brightness"] = "—"
-        metrics["image_visibility"] = "—"
-        metrics["image_obstruction"] = "—"
+        metrics["image_blur"] = not_measured
+        metrics["image_brightness"] = not_measured
+        metrics["image_visibility"] = not_measured
+        metrics["image_obstruction"] = not_measured
 
     # Overall
     if metrics.get("video_loss"):
@@ -580,15 +573,8 @@ def build_camera_detail_payload(device) -> dict[str, Any]:
             "uptime": uptime,
         },
         "network_health": {
-            "interface_status": (
-                "up"
-                if (
-                    m.get("management_online")
-                    or m.get("channel_online")
-                    or (m.get("network_link_speed") not in (None, "", "0", 0))
-                )
-                else (m.get("network_interface_status") or "—")
-            ),
+            # Only the link state the camera reported; reachability is not a NIC state.
+            "interface_status": m.get("network_interface_status") or "not measured",
             "link_speed": link,
             "duplex": m.get("network_duplex") or "—",
             "addressing": m.get("network_addressing") or "—",

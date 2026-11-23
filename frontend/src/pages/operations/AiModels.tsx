@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/select"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { ChevronDown, Box, User, Car, Wrench, Activity } from "lucide-react"
+import { ChevronDown, Box, User, Car, Activity } from "lucide-react"
 
 const VEHICLE_SUBTYPES = ["Car", "Truck", "Bus", "Motorcycle", "Bicycle"]
 const FPS_OPTIONS = ["5", "10", "15", "20", "30"]
@@ -46,7 +46,7 @@ export default function AiModelsPage() {
               <CollapsibleContent>
                 <CardContent className="pt-0 space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    {["Person", "Vehicle", "Animal", "Weapon", "Fire", "Package/Bag"].map((label, i) => (
+                    {["Person", "Vehicle", "Animal", "Weapon", "Fire", "Package/Bag"].map((label) => (
                       <div key={label} className="flex items-center justify-between">
                         <Label className="text-sm">Enable {label.replace("/", " / ")} detection</Label>
                         <Switch />

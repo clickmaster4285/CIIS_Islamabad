@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from django.core.files.base import ContentFile
 from django.db import close_old_connections, connection
 
 from .stream_utils import ffmpeg_path, gpu_aware_vf, hwaccel_input_flags
+from .stream_utils import rtsp_input_extra as _rtsp_input_extra
 
 if TYPE_CHECKING:
     from .models import Camera, DetectionEvent
@@ -47,11 +49,44 @@ def _release_db() -> None:
 
 
 def _safe_snapshot_url(url: str) -> str:
-    """Log path only — RTSP credentials often sit in the query string."""
+    """Log path only — credentials / API keys often sit in the userinfo or query string."""
     text = (url or "").strip()
     if not text:
         return ""
-    return text.split("?", 1)[0]
+    try:
+        from ml.client import redact_url
+
+        return redact_url(text)
+    except ImportError:
+        return text.split("?", 1)[0]
+
+
+def _safe_exc(exc: BaseException) -> str:
+    """Exception text without URLs' credentials/query (requests and ffmpeg errors embed them)."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        # str(TimeoutExpired) repeats the whole ffmpeg command line, RTSP password included.
+        return f"ffmpeg timed out after {exc.timeout}s"
+    if isinstance(exc, FileNotFoundError):
+        return "ffmpeg executable not found"
+    try:
+        from ml.client import redact
+
+        return redact(exc)
+    except ImportError:
+        return type(exc).__name__
+
+
+def _ml_headers() -> dict[str, str]:
+    try:
+        from ml.client import ml_auth_headers
+
+        return ml_auth_headers()
+    except ImportError:
+        return {}
+
+
+def _temp_name(prefix: str, suffix: str = ".jpg") -> str:
+    return f"{prefix}_{uuid.uuid4().hex}{suffix}"
 
 
 def _ml_on_cooldown(camera_id: int) -> bool:
@@ -116,7 +151,9 @@ def _update_clip_status(event_id: int, status: str) -> None:
     close_old_connections()
     from .models import DetectionEvent
 
-    DetectionEvent.objects.filter(pk=event_id).update(clip_status=status)
+    from city_sync.outbox import sync_update
+
+    sync_update(DetectionEvent.objects.filter(pk=event_id), clip_status=status)
     _release_db()
 
 
@@ -171,30 +208,53 @@ def _max_clip_queue() -> int:
 _ffmpeg_spawn_lock = threading.Lock()
 _last_ffmpeg_spawn = 0.0
 
-# Same-frame evidence JPEG from ML (camera_id -> (monotonic_ts, jpeg_bytes))
+# Same-frame evidence JPEG from ML.
+#   _pending_evidence: camera_id -> (monotonic_ts, jpeg) for the poll being saved right now
+#   _event_evidence:   event_id  -> (monotonic_ts, jpeg) bound when that poll's events are queued
 _evidence_guard = threading.Lock()
 _pending_evidence: dict[int, tuple[float, bytes]] = {}
+_event_evidence: dict[int, tuple[float, bytes]] = {}
 _EVIDENCE_TTL_SEC = 20.0
 
 
 def stash_evidence_jpeg(camera_id: int, jpeg_bytes: bytes) -> None:
-    """Cache ML same-frame evidence for pending detection snapshot jobs."""
+    """Cache ML same-frame evidence for the detection batch about to be saved."""
     if not jpeg_bytes or camera_id is None:
         return
     with _evidence_guard:
         _pending_evidence[int(camera_id)] = (time.monotonic(), jpeg_bytes)
 
 
-def _take_stashed_evidence(camera_id: int) -> bytes | None:
+def clear_stashed_evidence(camera_id: int) -> None:
+    """Call after the poll's batch is saved so later events never reuse an old frame."""
+    if camera_id is None:
+        return
+    with _evidence_guard:
+        _pending_evidence.pop(int(camera_id), None)
+
+
+def _bind_evidence(camera_id: int, event_id: int) -> None:
     with _evidence_guard:
         item = _pending_evidence.get(int(camera_id))
-        if not item:
-            return None
-        ts, data = item
-        if time.monotonic() - ts > _EVIDENCE_TTL_SEC:
-            _pending_evidence.pop(int(camera_id), None)
-            return None
-        return data
+        if item and time.monotonic() - item[0] <= _EVIDENCE_TTL_SEC:
+            _event_evidence[int(event_id)] = item
+
+
+def _drop_event_evidence(event_id: int) -> None:
+    with _evidence_guard:
+        _event_evidence.pop(int(event_id), None)
+
+
+def _take_stashed_evidence(event_id: int) -> bytes | None:
+    """Pop the evidence bound to this event (used once; expired frames are discarded)."""
+    with _evidence_guard:
+        item = _event_evidence.pop(int(event_id), None)
+    if not item:
+        return None
+    ts, data = item
+    if time.monotonic() - ts > _EVIDENCE_TTL_SEC:
+        return None
+    return data
 
 
 def _ml_evidence_jpeg_url(camera) -> str | None:
@@ -221,9 +281,9 @@ def _decode_jpeg_bytes(data: bytes):
     return frame
 
 
-def _read_ml_evidence_frame(camera) -> object | None:
+def _read_ml_evidence_frame(camera, event_id: int = 0) -> object | None:
     """Fetch the YOLO infer-frame JPEG (same frame as current detections)."""
-    stashed = _take_stashed_evidence(getattr(camera, "pk", 0) or 0)
+    stashed = _take_stashed_evidence(event_id) if event_id else None
     if stashed:
         frame = _decode_jpeg_bytes(stashed)
         if frame is not None:
@@ -232,7 +292,7 @@ def _read_ml_evidence_frame(camera) -> object | None:
     if not url:
         return None
     try:
-        resp = requests.get(url, timeout=(2.0, 4.0))
+        resp = requests.get(url, timeout=(2.0, 4.0), headers=_ml_headers())
     except requests.RequestException:
         return None
     if resp.status_code != 200 or not resp.content:
@@ -258,26 +318,6 @@ def _throttle_ffmpeg_spawn() -> None:
         if wait > 0:
             time.sleep(wait)
         _last_ffmpeg_spawn = time.monotonic()
-
-
-def _rtsp_input_extra() -> list[str]:
-    timeout_us = os.getenv("FFMPEG_STIMEOUT_US", "10000000").strip() or "10000000"
-    timeout_flag = os.getenv("FFMPEG_TIMEOUT_FLAG", "timeout").strip().lstrip("-") or "timeout"
-    threads = os.getenv("FFMPEG_THREADS", "1").strip() or "1"
-    return [
-        "-threads",
-        threads,
-        "-rtsp_transport",
-        "tcp",
-        f"-{timeout_flag}",
-        timeout_us,
-        "-fflags",
-        "+discardcorrupt+genpts",
-        "-flags",
-        "low_delay",
-        "-err_detect",
-        "ignore_err",
-    ]
 
 
 def _display_class(event: DetectionEvent) -> str:
@@ -618,12 +658,12 @@ def _read_jpeg_snapshot(jpeg_url: str, *, timeout_sec: float = 4.0) -> object | 
         attempts += 1
         remaining = max(0.8, deadline - time.monotonic())
         try:
-            resp = requests.get(jpeg_url, timeout=(1.5, min(3.5, remaining)))
+            resp = requests.get(jpeg_url, timeout=(1.5, min(3.5, remaining)), headers=_ml_headers())
         except requests.Timeout:
             last_status = "timeout"
             break
         except requests.RequestException as exc:
-            logger.warning("ML snapshot capture failed: %s", exc)
+            logger.warning("ML snapshot capture failed: %s", _safe_exc(exc))
             return None
         last_status = resp.status_code
         if resp.status_code == 404:
@@ -666,7 +706,7 @@ def _read_rtsp_snapshot(stream_url: str) -> object | None:
 
     temp_dir = os.path.join(settings.MEDIA_ROOT, "detection_clips", "_tmp")
     os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, f"snap_{int(time.time() * 1000)}.jpg")
+    temp_path = os.path.join(temp_dir, _temp_name("snap"))
     cmd = [
         ffmpeg_path(),
         "-nostdin",
@@ -693,7 +733,7 @@ def _read_rtsp_snapshot(stream_url: str) -> object | None:
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("RTSP snapshot ffmpeg failed: %s", exc)
+        logger.warning("RTSP snapshot ffmpeg failed: %s", _safe_exc(exc))
         return None
 
     frame = None
@@ -721,7 +761,7 @@ def _warm_ml_stream(camera) -> None:
     jpeg_url = _mjpeg_url_to_jpeg_url(raw_url or "")
     if jpeg_url:
         try:
-            requests.get(jpeg_url, timeout=(1.0, 1.2))
+            requests.get(jpeg_url, timeout=(1.0, 1.2), headers=_ml_headers())
         except requests.RequestException:
             pass
         return
@@ -777,7 +817,7 @@ def capture_detection_clip_sync(camera_id: int, event_id: int) -> None:
     _release_db()
 
     # Prefer ML same-frame evidence (YOLO frame) — avoids stale bbox on a later RTSP grab.
-    frame = _read_ml_evidence_frame(camera)
+    frame = _read_ml_evidence_frame(camera, event_id)
 
     if frame is None and stream_url and _allow_direct_rtsp():
         frame = _read_rtsp_snapshot(stream_url)
@@ -855,6 +895,21 @@ def _process_clip_jobs() -> None:
             _release_db()
 
 
+def _mark_dropped(event_id: int) -> None:
+    """Terminal status for a job evicted from the full queue (it would stay 'pending' forever).
+
+    Plain UPDATE without closing the connection: this may run inside a request transaction.
+    """
+    try:
+        from .models import ClipStatus, DetectionEvent
+
+        DetectionEvent.objects.filter(
+            pk=event_id, clip_status__in=[ClipStatus.PENDING, ClipStatus.RECORDING]
+        ).update(clip_status=ClipStatus.FAILED)
+    except Exception:
+        logger.debug("Could not mark dropped snapshot job %s", event_id, exc_info=True)
+
+
 def _enqueue_clip(camera_id: int, event_id: int) -> None:
     global _clip_workers
     dropped = None
@@ -870,11 +925,14 @@ def _enqueue_clip(camera_id: int, event_id: int) -> None:
         spawn = _clip_workers < _max_clip_workers()
         if spawn:
             _clip_workers += 1
+    _bind_evidence(camera_id, event_id)
     if dropped:
+        _drop_event_evidence(dropped[1])
         logger.warning(
-            "Detection snapshot queue full; dropped event %s",
+            "Detection snapshot queue full; dropped event %s (marked failed)",
             dropped[1],
         )
+        _mark_dropped(dropped[1])
     if spawn:
         threading.Thread(
             target=_process_clip_jobs,
@@ -917,37 +975,12 @@ def schedule_detection_clip(camera_id: int, event_id: int) -> None:
     _enqueue_clip(camera_id, event_id)
 
 
-def _ml_annotated_mjpeg_url(camera) -> str | None:
-    try:
-        from ml.client import MLServiceError, ml_live_mjpeg_url_for_camera, ml_service_enabled
-    except ImportError:
-        return None
-    if not ml_service_enabled() or not getattr(camera, "ml_server_id", None):
-        return None
-    try:
-        return ml_live_mjpeg_url_for_camera(camera)
-    except MLServiceError:
-        return None
-
-
-def _attendance_video_seconds() -> float:
-    return max(1.0, float(getattr(settings, "ATTENDANCE_VIDEO_SECONDS", 5)))
-
-
-def _attendance_video_fps() -> int:
-    return max(4, min(25, int(getattr(settings, "ATTENDANCE_VIDEO_FPS", 10))))
-
-
 def _attendance_video_width() -> int:
     return max(0, min(4096, int(getattr(settings, "ATTENDANCE_VIDEO_WIDTH", 3840))))
 
 
 def _attendance_jpeg_quality() -> int:
     return max(80, min(100, int(getattr(settings, "ATTENDANCE_VIDEO_JPEG_QUALITY", 95))))
-
-
-def _attendance_video_crf() -> int:
-    return max(15, min(28, int(getattr(settings, "ATTENDANCE_VIDEO_CRF", 18))))
 
 
 def _detection_jpeg_quality() -> int:
@@ -997,7 +1030,7 @@ def _read_rtsp_native_snapshot(stream_url: str) -> object | None:
     _throttle_ffmpeg_spawn()
     temp_dir = os.path.join(settings.MEDIA_ROOT, "detection_clips", "_tmp")
     os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, f"journey_native_{int(time.time() * 1000)}.jpg")
+    temp_path = os.path.join(temp_dir, _temp_name("journey_native"))
     cmd = [
         ffmpeg_path(),
         "-nostdin",
@@ -1024,7 +1057,7 @@ def _read_rtsp_native_snapshot(stream_url: str) -> object | None:
         timeout = max(5, int(os.getenv("FFMPEG_SNAPSHOT_TIMEOUT_SEC", "12")))
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Journey native RTSP snapshot failed: %s", exc)
+        logger.warning("Journey native RTSP snapshot failed: %s", _safe_exc(exc))
         return None
 
     frame = None
@@ -1054,7 +1087,7 @@ def _read_rtsp_hd_snapshot(stream_url: str, *, target_width: int) -> object | No
 
     temp_dir = os.path.join(settings.MEDIA_ROOT, "detection_clips", "_tmp")
     os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, f"journey_hd_{int(time.time() * 1000)}.jpg")
+    temp_path = os.path.join(temp_dir, _temp_name("journey_hd"))
     cmd = [
         ffmpeg_path(),
         "-nostdin",
@@ -1077,7 +1110,7 @@ def _read_rtsp_hd_snapshot(stream_url: str, *, target_width: int) -> object | No
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Journey HD RTSP snapshot failed: %s", exc)
+        logger.warning("Journey HD RTSP snapshot failed: %s", _safe_exc(exc))
         return None
 
     frame = None
@@ -1213,209 +1246,6 @@ def _upscale_frames_to_hd(frames: list, target_width: int) -> list:
     new_w = target_width
     new_h = max(1, int(h * scale))
     return [cv2.resize(f, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4) for f in frames]
-
-
-def _read_rtsp_clip(
-    stream_url: str,
-    *,
-    duration_sec: float,
-    max_fps: int,
-    target_width: int,
-    on_frame=None,
-) -> list:
-    """Capture HD frames directly from RTSP via ffmpeg (best quality for attendance clips)."""
-    try:
-        import cv2
-        import glob
-        import shutil
-    except ImportError:
-        return []
-
-    temp_dir = os.path.join(
-        settings.MEDIA_ROOT,
-        "attendance",
-        "videos",
-        "_tmp",
-        f"rtsp_{int(time.time() * 1000)}",
-    )
-    os.makedirs(temp_dir, exist_ok=True)
-    pattern = os.path.join(temp_dir, "frame_%04d.jpg")
-
-    cmd = [
-        ffmpeg_path(),
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        *hwaccel_input_flags(),
-        *_rtsp_input_extra(),
-        "-i",
-        stream_url,
-        "-t",
-        f"{duration_sec:.2f}",
-    ]
-    vf = gpu_aware_vf(f"scale='min(iw,{target_width})':-2:flags=lanczos" if target_width > 0 else None)
-    if vf:
-        cmd += ["-vf", vf]
-    cmd += [
-        "-r",
-        str(max(4, max_fps)),
-        "-q:v",
-        "2",
-        pattern,
-    ]
-    frames: list = []
-    try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=int(duration_sec) + 60)
-        if proc.returncode != 0:
-            logger.warning("RTSP clip ffmpeg failed: %s", (proc.stderr or b"")[:300])
-            return []
-        for path in sorted(glob.glob(os.path.join(temp_dir, "frame_*.jpg"))):
-            frame = cv2.imread(path)
-            if frame is None:
-                continue
-            if on_frame is not None:
-                frame = on_frame(frame)
-            frames.append(frame)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("RTSP clip capture failed: %s", exc)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    return frames
-
-
-def _read_mjpeg_clip(
-    mjpeg_url: str,
-    *,
-    duration_sec: float,
-    max_fps: int = 10,
-    on_frame=None,
-) -> list:
-    """Collect frames from MJPEG for the full wall-clock duration."""
-    try:
-        import cv2
-        import numpy as np
-    except ImportError:
-        return []
-
-    frames: list = []
-    end_time = time.monotonic() + duration_sec
-    min_interval = 1.0 / max(1, max_fps)
-    last_saved = 0.0
-
-    try:
-        with requests.get(
-            mjpeg_url,
-            stream=True,
-            timeout=(5, max(30, int(duration_sec) + 15)),
-        ) as resp:
-            if resp.status_code != 200:
-                return []
-            buffer = b""
-            for chunk in resp.iter_content(chunk_size=8192):
-                if time.monotonic() >= end_time:
-                    break
-                if not chunk:
-                    time.sleep(0.01)
-                    continue
-                buffer += chunk
-                while True:
-                    start = buffer.find(b"\xff\xd8")
-                    end = buffer.find(b"\xff\xd9")
-                    if start == -1 or end == -1 or end < start:
-                        break
-                    jpg = buffer[start : end + 2]
-                    buffer = buffer[end + 2 :]
-                    arr = np.frombuffer(jpg, dtype=np.uint8)
-                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if frame is None:
-                        continue
-                    now = time.monotonic()
-                    if now - last_saved < min_interval:
-                        continue
-                    last_saved = now
-                    if on_frame is not None:
-                        frame = on_frame(frame)
-                    frames.append(frame)
-    except requests.RequestException as exc:
-        logger.warning("MJPEG clip capture failed: %s", exc)
-    return frames
-
-
-def _encode_frames_to_mp4(frames: list, dest_path: str, *, duration_sec: float, nominal_fps: int) -> bool:
-    if not frames:
-        return False
-    try:
-        import cv2
-    except ImportError:
-        return False
-
-    import tempfile
-
-    h, w = frames[0].shape[:2]
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    output_fps = max(1.0, len(frames) / max(0.5, float(duration_sec)))
-    jpeg_q = _attendance_jpeg_quality()
-    crf = _attendance_video_crf()
-
-    with tempfile.TemporaryDirectory(prefix="att_clip_") as tmp:
-        for idx, frame in enumerate(frames):
-            path = os.path.join(tmp, f"frame_{idx:04d}.jpg")
-            if not cv2.imwrite(path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_q]):
-                return False
-
-        cmd = [
-            ffmpeg_path(),
-            "-y",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-framerate",
-            f"{output_fps:.3f}",
-            "-i",
-            os.path.join(tmp, "frame_%04d.jpg"),
-            "-c:v",
-            "libx264",
-            "-crf",
-            str(crf),
-            "-preset",
-            "medium",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            dest_path,
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=90)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            logger.warning("ffmpeg MP4 encode failed: %s", exc)
-            return False
-
-        if proc.returncode == 0 and os.path.isfile(dest_path) and os.path.getsize(dest_path) > 0:
-            return True
-
-        # Fallback codec when libx264 is unavailable.
-        cmd[cmd.index("libx264")] = "mpeg4"
-        try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=90)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-        return proc.returncode == 0 and os.path.isfile(dest_path) and os.path.getsize(dest_path) > 0
-
-
-def _attendance_overlay(label: str, employee_name: str, class_name: str, bbox: list):
-    from types import SimpleNamespace
-
-    display_name = (employee_name or label or "staff").strip()[:80]
-    return SimpleNamespace(
-        label=(label or "")[:120],
-        class_name=(class_name or "person")[:80],
-        employee_name=display_name,
-        bbox=bbox or [],
-        is_alert=False,
-    )
 
 
 def _attendance_snapshot_enabled() -> bool:

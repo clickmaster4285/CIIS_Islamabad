@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { createElement, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { Link } from "react-router-dom"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
@@ -144,7 +144,7 @@ export function WallAlertPopupHost() {
 
   if (!current || typeof document === "undefined") return null
 
-  const AlertIcon = iconForDetectionClass(String(current.class_name || ""))
+  const alertIcon = iconForDetectionClass(String(current.class_name || ""))
   const cam = cameraLabel(current)
   const loc = locationLabel(current)
   const zn = (current.zone || "").trim()
@@ -163,7 +163,7 @@ export function WallAlertPopupHost() {
 
       <div className="relative z-[1] mx-4 max-w-2xl text-center text-white drop-shadow-[0_2px_16px_rgba(0,0,0,0.6)]">
         <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white/15 ring-2 ring-white/45">
-          <AlertIcon className="h-8 w-8" />
+          {createElement(alertIcon, { className: "h-8 w-8" })}
         </div>
         <p className="flex items-center justify-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-white/90">
           <Siren className="h-4 w-4 animate-pulse" />
@@ -260,7 +260,7 @@ export function WallAlertsPanel({ className }: { className?: string }) {
     return () => window.removeEventListener(REALTIME_INVALIDATE_EVENT, onRealtime)
   }, [queryClient])
 
-  const events = data?.results || []
+  const events = useMemo(() => data?.results || [], [data?.results])
   const alertCount = useMemo(
     () => events.filter((e) => e.is_alert || isCritical(String(e.class_name || ""))).length,
     [events],

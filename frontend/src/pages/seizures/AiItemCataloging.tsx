@@ -9,17 +9,19 @@ import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 
+type CatalogItem = { id: string; description: string; category: string; status: string }
+
+function loadCatalogItems(): CatalogItem[] {
+  const stored = localStorage.getItem("aiCatalogItems")
+  return stored ? JSON.parse(stored) : []
+}
+
 export default function AiItemCatalogingPage() {
-  const [items, setItems] = useState<any[]>([])
+  // Load items from localStorage
+  const [items, setItems] = useState<CatalogItem[]>(loadCatalogItems)
   const [showModal, setShowModal] = useState(false)
   const [formData, setFormData] = useState({ id: "", description: "", category: "", status: "Pending" })
   const [search, setSearch] = useState("")
-
-  // Load items from localStorage
-  useEffect(() => {
-    const stored = localStorage.getItem("aiCatalogItems")
-    if (stored) setItems(JSON.parse(stored))
-  }, [])
 
   // Save to localStorage whenever items change
   useEffect(() => {

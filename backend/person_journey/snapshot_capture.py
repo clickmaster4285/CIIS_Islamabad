@@ -47,7 +47,55 @@ def _ensure_db_connection() -> None:
 
 
 def _journey_jpeg_quality() -> int:
-    return max(95, min(100, int(getattr(settings, "JOURNEY_SNAPSHOT_JPEG_QUALITY", 98))))
+    # Floor lowered from 95: q85 is visually identical for CCTV frames at roughly a third of the size.
+    return max(85, min(100, int(getattr(settings, "JOURNEY_SNAPSHOT_JPEG_QUALITY", 90))))
+
+
+def _live_grab_max_age_sec() -> float:
+    """A live camera grab only shows the person if the sighting is this recent; older events never live-grab."""
+    return max(1.0, float(getattr(settings, "JOURNEY_SNAPSHOT_LIVE_GRAB_MAX_AGE_SEC", 10)))
+
+
+def _event_age_seconds(journey_event, meta: dict) -> float:
+    from django.utils.dateparse import parse_datetime
+
+    now = timezone.now()
+    ages = []
+    last = meta.get("last_seen_at")
+    try:
+        seen = parse_datetime(last) if isinstance(last, str) else None
+        if seen is not None and timezone.is_naive(seen):
+            seen = timezone.make_aware(seen)
+    except (TypeError, ValueError):
+        seen = None
+    for ref in (seen, journey_event.created_at):
+        if ref is not None:
+            ages.append((now - ref).total_seconds())
+    return max(0.0, min(ages)) if ages else float("inf")
+
+
+def _merge_event_meta(event_id: int, patch: dict, *, remove_keys: tuple[str, ...] = (), **fields) -> None:
+    """Update one JourneyEvent, merging metadata keys in SQL instead of overwriting the whole dict."""
+    from .jsonmeta import merge_json_field
+    from .models import JourneyEvent
+
+    if fields:
+        JourneyEvent.all_objects.filter(pk=event_id).update(**fields)
+    merge_json_field(JourneyEvent.all_objects, event_id, "metadata", patch, remove_keys=remove_keys)
+
+
+def _delete_old_snapshot(old_url: str, new_url: str) -> None:
+    """A recapture replaces the image: remove the previous journey file so the disk does not fill up."""
+    old_name = _media_url_to_storage_name(old_url)
+    if not old_name or old_name == _media_url_to_storage_name(new_url):
+        return
+    if not old_name.startswith("journey_snapshots/"):
+        return  # never delete detection clips or other modules' files
+    try:
+        if default_storage.exists(old_name):
+            default_storage.delete(old_name)
+    except Exception:
+        logger.debug("Could not delete old journey snapshot %s", old_name, exc_info=True)
 
 
 def _keep_full_frame() -> bool:
@@ -103,16 +151,33 @@ def _crop_looks_empty(crop) -> bool:
     return edge_ratio < 0.012 and std < 28.0
 
 
-def _needs_snapshot_recapture(journey_event) -> bool:
-    meta = _event_metadata(journey_event)
-    if meta.get("empty_crop") or meta.get("force_recapture"):
+def _meta_needs_recapture(path: str, meta: dict) -> bool:
+    """
+    Should this event's snapshot be (re)captured?
+
+    No image yet, an old tight person_crop, or an explicit request. A full frame without a person box gets
+    ONE retry (recapture_attempted), and events whose image cannot be produced any more (too old for a live
+    grab, or purged by retention) are never retried — before, those were re-captured on every page load.
+    """
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("snapshot_unavailable") or meta.get("snapshot_purged"):
+        return bool(meta.get("force_recapture"))
+    if meta.get("force_recapture"):
         return True
-    # Force upgrade from old person_crop to full labeled frame
-    if meta.get("snapshot_kind") == _SNAPSHOT_KIND_CROP:
+    if not (path or "").strip():
         return True
-    if meta.get("snapshot_kind") == "full_frame" and not meta.get("person_labeled"):
+    if meta.get("empty_crop"):
+        return not meta.get("recapture_attempted")
+    kind = meta.get("snapshot_kind")
+    if kind == _SNAPSHOT_KIND_CROP:
         return True
+    if kind == "full_frame" and not meta.get("person_labeled"):
+        return not meta.get("recapture_attempted")
     return False
+
+
+def _needs_snapshot_recapture(journey_event) -> bool:
+    return _meta_needs_recapture(journey_event.snapshot_path or "", _event_metadata(journey_event))
 
 
 def _media_url_to_storage_name(url: str) -> str:
@@ -398,15 +463,18 @@ def _save_jpeg(rel_path: str, jpeg_bytes: bytes) -> str:
 def _store_person_thumbnail(person, crop_url: str, crop_area: int) -> None:
     if person is None or not crop_url:
         return
+    from .jsonmeta import merge_json_field
     from .models import JourneyPerson
 
-    meta = dict(person.metadata or {}) if isinstance(person.metadata, dict) else {}
+    current = JourneyPerson.all_objects.filter(pk=person.pk).values_list("metadata", flat=True).first()
+    meta = current if isinstance(current, dict) else {}
     prev_area = int(meta.get("thumbnail_area") or 0)
     if meta.get("thumbnail_url") and crop_area < prev_area:
         return
-    meta["thumbnail_url"] = crop_url
-    meta["thumbnail_area"] = crop_area
-    JourneyPerson.objects.filter(pk=person.pk).update(metadata=meta)
+    # Merge only the thumbnail keys: name_locked / merged_from written by other code paths must survive.
+    merge_json_field(
+        JourneyPerson.all_objects, person.pk, "metadata", {"thumbnail_url": crop_url, "thumbnail_area": crop_area}
+    )
 
 
 def _bbox_area(bb: list[int] | None) -> float:
@@ -590,6 +658,12 @@ def _discard_empty_unknown_journey(journey_event) -> bool:
     code = person.code
     from city_sync.outbox import soft_delete_instance
 
+    from .models import TrackStatus
+
+    # Close its tracklets first, so the next observation on that camera track cannot land on a tombstone.
+    CameraTrack.objects.filter(journey_person=person, status=TrackStatus.ACTIVE).update(
+        status=TrackStatus.FINISHED, ended_at=timezone.now()
+    )
     for ev in list(JourneyEvent.objects.filter(journey_person=person)):
         soft_delete_instance(ev)
     soft_delete_instance(person)
@@ -662,6 +736,11 @@ def capture_journey_crop_sync(journey_event_id: int) -> str:
         frame = _read_detection_clip_frame(detection)
         used_live_grab = False
         if frame is None:
+            age = _event_age_seconds(journey_event, event_meta)
+            if age > _live_grab_max_age_sec():
+                # The camera shows the scene NOW; for an old sighting that is someone else or nobody.
+                _merge_event_meta(journey_event_id, {"snapshot_unavailable": True})
+                return existing
             _release_db()
             frame = read_journey_detect_frame(camera)
             if frame is None:
@@ -671,6 +750,7 @@ def capture_journey_crop_sync(journey_event_id: int) -> str:
             _release_db()
 
         if frame is None:
+            _merge_event_meta(journey_event_id, {"recapture_attempted": True})
             return existing
 
         h, w = frame.shape[:2]
@@ -712,18 +792,23 @@ def capture_journey_crop_sync(journey_event_id: int) -> str:
         rel_path = f"journey_snapshots/{today:%Y/%m/%d}/je_{journey_event_id}_full.jpg"
         url = _save_jpeg(rel_path, jpeg_bytes)
 
-        event_meta["snapshot_kind"] = "full_frame"
-        event_meta["person_labeled"] = bool(label_box)
-        event_meta["snapshot_live_refresh"] = used_live_grab
-        event_meta["person_verified"] = bool(verified and label_box)
-        event_meta["full_snapshot_path"] = url
-        event_meta.pop("empty_crop", None)
-        event_meta.pop("crop_rejected_reason", None)
-
-        JourneyEvent.objects.filter(pk=journey_event_id).update(
+        # Merge (not overwrite): the ingest path extends sightings/last_seen_at on the same row concurrently.
+        _merge_event_meta(
+            journey_event_id,
+            {
+                "snapshot_kind": "full_frame",
+                "person_labeled": bool(label_box),
+                "snapshot_live_refresh": used_live_grab,
+                "person_verified": bool(verified and label_box),
+                "full_snapshot_path": url,
+                "recapture_attempted": bool(existing) or bool(event_meta.get("recapture_attempted")),
+                "force_recapture": False,
+            },
+            remove_keys=("empty_crop", "crop_rejected_reason", "snapshot_unavailable"),
             snapshot_path=url,
-            metadata=event_meta,
         )
+        if existing:
+            _delete_old_snapshot(existing, url)
 
         # Discard unknowns that have no detection box to label.
         if not label_box:
@@ -736,11 +821,12 @@ def capture_journey_crop_sync(journey_event_id: int) -> str:
                 return ""
 
         if journey_event.journey_person_id and label_box:
-            from .unknown_resolution import update_person_embeddings_from_crop
+            from .unknown_resolution import backend_reid_compatible, update_person_embeddings_from_crop
             import cv2
 
             person = journey_event.journey_person
-            reid_crop = _extract_person_crop(frame, label_box)
+            # The backend descriptor is only stored when it matches the ML ReID space (see unknown_resolution).
+            reid_crop = _extract_person_crop(frame, label_box) if backend_reid_compatible() else None
             if reid_crop is not None and not _crop_looks_empty(reid_crop):
                 ok_crop, crop_encoded = cv2.imencode(
                     ".jpg", reid_crop, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_q]
@@ -838,8 +924,8 @@ def enqueue_latest_crops_for_persons(persons, *, per_person: int = 1) -> int:
     if not event_ids:
         return 0
 
-    for ev in JourneyEvent.objects.filter(pk__in=event_ids).only("id", "metadata"):
-        if _is_person_crop(ev):
+    for ev in JourneyEvent.objects.filter(pk__in=event_ids).only("id", "metadata", "snapshot_path"):
+        if _is_person_crop(ev) or not _needs_snapshot_recapture(ev):
             continue
         _enqueue_journey_crop(ev.pk)
         queued += 1
@@ -884,8 +970,7 @@ def _events_needing_crop(qs, *, limit: int) -> list[int]:
     rows = list(qs.order_by("-created_at").values_list("id", "snapshot_path", "metadata")[: max(limit * 3, limit)])
     ids: list[int] = []
     for pk, path, meta in rows:
-        kind = meta.get("snapshot_kind") if isinstance(meta, dict) else None
-        if not (path or "").strip() or kind != _SNAPSHOT_KIND_CROP:
+        if _meta_needs_recapture(path or "", meta):
             ids.append(pk)
         if len(ids) >= limit:
             break
@@ -897,11 +982,15 @@ def capture_missing_for_person(
     *,
     since=None,
     limit: int = 20,
-    timeout: float = 60.0,
+    timeout: float | None = None,
 ) -> int:
-    """Capture or recrop snapshots so the person photo is a close-up, not the full scene."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """
+    Queue snapshot (re)captures for this person's events and return at once (number queued).
 
+    Captures run on the background snapshot worker; an API request never waits for camera grabs.
+    ``timeout`` is accepted for old callers and ignored.
+    """
+    del timeout
     from .models import JourneyEvent
 
     qs = JourneyEvent.objects.filter(
@@ -911,22 +1000,9 @@ def capture_missing_for_person(
     if since is not None:
         qs = qs.filter(created_at__gte=since)
     jobs = _events_needing_crop(qs, limit=limit)
-    if not jobs:
-        return 0
-
-    done = 0
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(capture_journey_crop_sync, ev_id) for ev_id in jobs]
-        try:
-            for fut in as_completed(futures, timeout=timeout):
-                try:
-                    if fut.result():
-                        done += 1
-                except Exception:
-                    logger.exception("Parallel journey snapshot failed")
-        except TimeoutError:
-            logger.warning("Journey snapshot batch timed out after %ss", timeout)
-    return done
+    for ev_id in jobs:
+        _enqueue_journey_crop(ev_id)
+    return len(jobs)
 
 
 def capture_all_missing_events(*, limit: int = 100) -> int:

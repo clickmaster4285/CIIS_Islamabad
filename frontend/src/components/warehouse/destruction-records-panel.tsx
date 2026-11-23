@@ -41,6 +41,7 @@ export function DestructionRecordsPanel({
 
   useEffect(() => {
     if (!detentionMemoId && !caseNo) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset/loading state for the fetch keyed on the memo/case
       setRecords([])
       return
     }

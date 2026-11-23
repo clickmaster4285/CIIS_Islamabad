@@ -1,10 +1,20 @@
 from django.contrib.auth.models import AbstractUser
 import uuid
 
+from django.core.validators import FileExtensionValidator
 from django.db import models
 from django.utils import timezone
 
 from config.field_crypto import EncryptedCharField, EncryptedDecimalField
+
+# Uploads are served back from /media/; never accept HTML, SVG or scripts.
+STAFF_DOCUMENT_EXTENSIONS = [
+    "pdf", "doc", "docx", "xls", "xlsx", "odt", "ods", "rtf", "txt", "csv",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff",
+]
+ATTENDANCE_VIDEO_EXTENSIONS = ["mp4", "webm", "mov", "avi", "mkv", "m4v"]
+validate_staff_document = FileExtensionValidator(allowed_extensions=STAFF_DOCUMENT_EXTENSIONS)
+validate_attendance_video = FileExtensionValidator(allowed_extensions=ATTENDANCE_VIDEO_EXTENSIONS)
 
 
 class User(AbstractUser):
@@ -150,12 +160,12 @@ class Staff(models.Model):
     emergency_contact_phone = models.CharField(max_length=20, null=True, blank=True)
     emergency_contact_address = models.TextField(null=True, blank=True)
     # Documents
-    resume_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
-    joining_letter_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
-    contract_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
-    id_proof_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
-    tax_form_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
-    certificates_file = models.FileField(upload_to="staff_docs/", null=True, blank=True)
+    resume_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
+    joining_letter_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
+    contract_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
+    id_proof_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
+    tax_form_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
+    certificates_file = models.FileField(upload_to="staff_docs/", null=True, blank=True, validators=[validate_staff_document])
     background_check_status = models.CharField(max_length=50, null=True, blank=True)
     # HR Analytics / Optional
     skills_competencies = models.TextField(null=True, blank=True)
@@ -282,6 +292,7 @@ class Attendance(models.Model):
         upload_to="attendance/videos/",
         null=True,
         blank=True,
+        validators=[validate_attendance_video],
         help_text="Deprecated: attendance proof is image-only; kept for old records.",
     )
     # City → HQ sync identity (city_sync Phase 2)

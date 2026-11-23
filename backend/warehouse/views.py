@@ -6,8 +6,10 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Warehouse, SiteZone
 from .serializers import WarehouseSerializer, SiteZoneSerializer
-from .zone_catalog import CUSTOMS_WAREHOUSE_ZONES
+from .zone_catalog import CUSTOMS_WAREHOUSE_ZONES, sync_fixed_zone_fields
 
+
+from rest_framework.exceptions import PermissionDenied
 
 from users.permissions import apply_location_filter, get_location_scope, resolve_location_for_write
 
@@ -105,33 +107,13 @@ class WarehouseViewSet(viewsets.ModelViewSet):
                     "camera_ids": zone_def.get("camera_ids", []),
                 }
             )
-            if not created:
-                updated = False
-                canonical_fields = {
-                    "name": zone_def["name"],
-                    "purpose": zone_def.get("purpose", ""),
-                    "category": zone_def["category"],
-                    "security_level": zone_def["security_level"],
-                    "sort_order": zone_def["sort_order"],
-                    "description": zone_def.get("description", ""),
-                    "requires_escort": zone_def.get("requires_escort", False),
-                    "vms_zone_type": zone_def.get("vms_zone_type", "Public"),
-                    "access_hours_start": zone_def.get("access_hours_start", "06:00"),
-                    "access_hours_end": zone_def.get("access_hours_end", "22:00"),
-                    "weekend_access": zone_def.get("weekend_access", False),
-                    "max_occupancy": zone_def.get("max_occupancy", 10),
-                    "allowed_visitor_categories": zone_def.get("allowed_visitor_categories", []),
-                    "gate_ids": zone_def.get("gate_ids", []),
-                    "camera_ids": zone_def.get("camera_ids", []),
-                }
-                for field, value in canonical_fields.items():
-                    if getattr(zone, field) != value:
-                        setattr(zone, field, value)
-                        updated = True
-                if updated:
-                    zone.save()
-            else:
+            if created:
                 created_zones.append(zone)
+            else:
+                # Existing zones keep everything an admin can edit (name, purpose, hours, escort,
+                # occupancy, gates, cameras, VMS type …). Only the fixed catalogue attributes,
+                # which the API never lets anyone change, are re-aligned.
+                sync_fixed_zone_fields(zone, zone_def)
 
         return Response({
             "warehouse": warehouse.id,
@@ -167,6 +149,13 @@ class SiteZoneViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(code=code)
 
         return queryset
+
+    def perform_create(self, serializer):
+        warehouse = serializer.validated_data.get("warehouse")
+        scope = get_location_scope(self.request.user)
+        if warehouse is not None and scope and (warehouse.location_code or "") != scope:
+            raise PermissionDenied("You can only add zones to warehouses in your location.")
+        serializer.save()
 
     def partial_update(self, request, *args, **kwargs):
         """Allow patching description, name, and is_active only."""

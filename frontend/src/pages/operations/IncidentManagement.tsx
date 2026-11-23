@@ -23,9 +23,7 @@ import {
   ChevronDown,
   FilePlus,
   Search,
-  FolderOpen,
   ShieldCheck,
-  MessageSquare,
   Paperclip,
   FileText,
 } from "lucide-react"

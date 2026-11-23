@@ -154,7 +154,7 @@ class RecordingTests(TestCase):
         }, format="json")
         rid = up.json()["upload_id"]
         EmployeeCallRecording.objects.filter(id=rid).update(status=EmployeeCallRecording.AVAILABLE)
-        self.assertEqual(_client(other).get(f"{BASE}/recordings/{rid}/playback/").status_code, 403)
+        self.assertEqual(_client(other).get(f"{BASE}/recordings/{rid}/playback/").status_code, 404)  # out of scope: hidden, not forbidden
         self.assertEqual(_client(owner).get(f"{BASE}/recordings/{rid}/playback/").status_code, 200)
 
     def test_handset_source_cannot_upload_audio(self):

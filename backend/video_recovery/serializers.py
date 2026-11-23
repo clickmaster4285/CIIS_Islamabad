@@ -1,6 +1,42 @@
+import os
+import re
+
+from django.conf import settings
 from rest_framework import serializers
 
 from .models import RecoveryStage, VideoRecoveryJob
+
+# Keys that carry server file-system locations; never sent to clients.
+_PATH_KEY_RE = re.compile(r"(^|_)(path|paths|dir|file)$")
+
+
+def _server_roots() -> list[str]:
+    roots = {str(getattr(settings, "MEDIA_ROOT", "") or ""), str(getattr(settings, "BASE_DIR", "") or "")}
+    out = []
+    for root in roots:
+        if root:
+            out.extend({root, root.replace("\\", "/"), os.path.abspath(root)})
+    return sorted({r for r in out if r}, key=len, reverse=True)
+
+
+def scrub(value, roots=None):
+    """Drop path-like keys and strip server directories out of report JSON (recursively)."""
+    roots = _server_roots() if roots is None else roots
+    if isinstance(value, dict):
+        return {k: scrub(v, roots) for k, v in value.items() if not _PATH_KEY_RE.search(str(k))}
+    if isinstance(value, list):
+        return [scrub(v, roots) for v in value]
+    if isinstance(value, str):
+        for root in roots:
+            if root in value:
+                value = value.replace(root, "")
+        return value
+    return value
+
+
+def damage_map_summary(damage_map: dict) -> dict:
+    """Damage map without the per-frame list (counts, segments and strip only)."""
+    return scrub({k: v for k, v in (damage_map or {}).items() if k != "frames"})
 
 
 PIPELINE_STAGES = [
@@ -57,6 +93,14 @@ class VideoRecoveryJobSerializer(serializers.ModelSerializer):
             return request.build_absolute_uri(url)
         return url
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        roots = _server_roots()
+        for key in ("stage_logs", "forensic_report", "damage_map", "hybrid_report", "quality_report", "error_message"):
+            if key in data:
+                data[key] = scrub(data[key], roots)
+        return data
+
     def get_original_url(self, obj: VideoRecoveryJob) -> str | None:
         return self._media_url(obj.original_file)
 
@@ -93,3 +137,29 @@ class VideoRecoveryJobSerializer(serializers.ModelSerializer):
                 state = "pending"
             out.append({**stage, "state": state})
         return out
+
+
+class VideoRecoveryJobListSerializer(VideoRecoveryJobSerializer):
+    """List rows: status and summary only. Full reports come from the detail endpoint."""
+
+    damage_map = serializers.SerializerMethodField()
+
+    class Meta(VideoRecoveryJobSerializer.Meta):
+        fields = [
+            "id",
+            "original_filename",
+            "original_url",
+            "recovered_url",
+            "original_sha256",
+            "status",
+            "current_stage",
+            "damage_map",
+            "error_message",
+            "created_at",
+            "updated_at",
+            "completed_at",
+        ]
+        read_only_fields = fields
+
+    def get_damage_map(self, obj: VideoRecoveryJob) -> dict:
+        return damage_map_summary(obj.damage_map or {})

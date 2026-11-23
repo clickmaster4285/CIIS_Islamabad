@@ -143,11 +143,10 @@ export default function VehicleTrackingPage() {
     setPage(1)
   }
 
-  useEffect(() => {
-    if (totalPages > 0 && page > totalPages) {
-      setPage(totalPages)
-    }
-  }, [page, totalPages])
+  // Clamp the page when the result set shrinks (adjusted during render).
+  if (totalPages > 0 && page > totalPages) {
+    setPage(totalPages)
+  }
 
   return (
     <ModulePageLayout

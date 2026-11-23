@@ -6,7 +6,6 @@ import {
     HardDrive,
     Network,
     Cpu,
-    Bell,
     Filter,
     Download,
     Eye,
@@ -19,23 +18,11 @@ import {
     BarChart3,
     TrendingUp,
     Server,
-    Wifi,
-    WifiOff,
-    Database,
-    Hdd,
-    AlertOctagon,
-    Calendar,
     Search,
     ChevronDown,
     Grid,
     Layers,
-    Info,
     Settings,
-    Shield,
-    AlertCircle,
-    Power,
-    Thermometer,
-    HardDrive as HardDriveIcon,
     Key
 } from 'lucide-react';
 
@@ -60,7 +47,7 @@ interface SystemAlert {
     estimatedResolution?: string;
     impact: 'high' | 'medium' | 'low' | 'none';
     affectedSystems?: string[];
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
 }
 
 const SystemAlerts: React.FC = () => {
@@ -899,16 +886,6 @@ const SystemAlerts: React.FC = () => {
         return 'text-green-600';
     };
 
-    const getStatusIcon = (type: string) => {
-        if (type.includes('Offline')) return <WifiOff className="w-4 h-4 text-red-500" />;
-        if (type.includes('Tampered')) return <AlertOctagon className="w-4 h-4 text-orange-500" />;
-        if (type.includes('Full') || type.includes('Low')) return <HardDriveIcon className="w-4 h-4 text-red-500" />;
-        if (type.includes('Failed')) return <XCircle className="w-4 h-4 text-red-500" />;
-        if (type.includes('Error')) return <AlertCircle className="w-4 h-4 text-orange-500" />;
-        if (type.includes('Expiring')) return <Calendar className="w-4 h-4 text-yellow-500" />;
-        return <Info className="w-4 h-4 text-blue-500" />;
-    };
-
     const filteredAlerts = alerts.filter(alert => {
         if (selectedCategory !== 'all' && alert.category !== selectedCategory) return false;
         if (selectedSeverity !== 'all' && alert.severity !== selectedSeverity) return false;
@@ -923,7 +900,7 @@ const SystemAlerts: React.FC = () => {
                 alert.type.toLowerCase().includes(searchLower) ||
                 alert.component.toLowerCase().includes(searchLower) ||
                 alert.location?.toLowerCase().includes(searchLower) ||
-                alert.metadata?.some(m => String(m).toLowerCase().includes(searchLower))
+                Object.values(alert.metadata ?? {}).some(m => String(m).toLowerCase().includes(searchLower))
             );
         }
         return true;

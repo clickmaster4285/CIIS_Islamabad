@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
+from detentions.management.seed_guard import add_guard_argument, check_seed_allowed
 from django.db import transaction
 from django.utils import timezone
 
@@ -368,8 +369,10 @@ class Command(BaseCommand):
             action="store_true",
             help="Also seed rows marked duplicate_of_sno in the JSON",
         )
+        add_guard_argument(parser)
 
     def handle(self, *args, **options):
+        check_seed_allowed(options)
         path = Path(options["file"])
         if not path.is_file():
             raise CommandError(f"Seed file not found: {path}")

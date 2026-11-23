@@ -30,7 +30,12 @@ function CameraTile({
   const [loaded, setLoaded] = useState(false)
 
   // A new frame (or a renewed pass) gives the camera another chance after a failure.
-  useEffect(() => setFailed(false), [tick, view.pass])
+  // (Adjust state during render when tick / pass change.)
+  const [retryKey, setRetryKey] = useState({ tick, pass: view.pass })
+  if (retryKey.tick !== tick || retryKey.pass !== view.pass) {
+    setRetryKey({ tick, pass: view.pass })
+    setFailed(false)
+  }
 
   return (
     <button

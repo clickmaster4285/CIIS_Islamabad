@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from django.utils import timezone
 from rest_framework import serializers
 
@@ -43,19 +45,38 @@ def officer_display_name(user) -> str:
     return (getattr(user, "username", None) or str(user.pk)).strip()
 
 
+# Sanity bounds for phone GPS values (a car on a motorway is ~150 km/h; airliners ~900).
+MAX_SPEED_KMH = 1000.0
+MIN_ALTITUDE_M = -500.0
+MAX_ALTITUDE_M = 10000.0
+MAX_ACCURACY_INPUT_M = 100000.0
+
+
+class FiniteFloatField(serializers.FloatField):
+    """FloatField that refuses NaN and +/-Infinity (they would poison maps and distance math)."""
+
+    default_error_messages = {"not_finite": "A finite number is required."}
+
+    def to_internal_value(self, data):
+        value = super().to_internal_value(data)
+        if not math.isfinite(value):
+            self.fail("not_finite")
+        return value
+
+
 class GpsPingSerializer(serializers.Serializer):
-    latitude = serializers.FloatField(min_value=-90, max_value=90)
-    longitude = serializers.FloatField(min_value=-180, max_value=180)
-    accuracy = serializers.FloatField(required=False, allow_null=True, min_value=0)
+    latitude = FiniteFloatField(min_value=-90, max_value=90)
+    longitude = FiniteFloatField(min_value=-180, max_value=180)
+    accuracy = FiniteFloatField(required=False, allow_null=True, min_value=0, max_value=MAX_ACCURACY_INPUT_M)
     recordedAt = serializers.DateTimeField(required=False, allow_null=True)
     client_timestamp = serializers.DateTimeField(required=False, allow_null=True)
     batteryPct = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=100)
     battery_level = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=100)
-    speedKmh = serializers.FloatField(required=False, allow_null=True, min_value=0)
-    speed = serializers.FloatField(required=False, allow_null=True, min_value=0)
-    headingDeg = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=360)
-    heading = serializers.FloatField(required=False, allow_null=True, min_value=0, max_value=360)
-    altitudeM = serializers.FloatField(required=False, allow_null=True)
+    speedKmh = FiniteFloatField(required=False, allow_null=True, min_value=0, max_value=MAX_SPEED_KMH)
+    speed = FiniteFloatField(required=False, allow_null=True, min_value=0, max_value=MAX_SPEED_KMH)
+    headingDeg = FiniteFloatField(required=False, allow_null=True, min_value=0, max_value=360)
+    heading = FiniteFloatField(required=False, allow_null=True, min_value=0, max_value=360)
+    altitudeM = FiniteFloatField(required=False, allow_null=True, min_value=MIN_ALTITUDE_M, max_value=MAX_ALTITUDE_M)
     event_id = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=64)
     device_uuid = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=64)
     session_id = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=64)

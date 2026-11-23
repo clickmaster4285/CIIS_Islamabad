@@ -7,7 +7,7 @@ IT / Developer = handle tickets assigned to their department.
 
 from __future__ import annotations
 
-from rest_framework.permissions import BasePermission, SAFE_METHODS
+from rest_framework.permissions import BasePermission
 
 MODULE_LABEL = "Requests & Support"
 
@@ -85,27 +85,3 @@ def capabilities_for(user) -> dict:
 class HasSupportModuleAccess(BasePermission):
     def has_permission(self, request, view):
         return can_access_support_module(request.user)
-
-
-class IsSupportAgent(BasePermission):
-    def has_permission(self, request, view):
-        return is_support_user(request.user)
-
-
-class IsTicketHandler(BasePermission):
-    """IT or Developer can act on assigned work."""
-
-    def has_permission(self, request, view):
-        return is_handler_user(request.user) or is_support_user(request.user)
-
-
-class IsSupportOrReadOwn(BasePermission):
-    def has_permission(self, request, view):
-        return can_access_support_module(request.user)
-
-    def has_object_permission(self, request, view):
-        if is_support_user(request.user):
-            return True
-        if request.method in SAFE_METHODS:
-            return True
-        return True

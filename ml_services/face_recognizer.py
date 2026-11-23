@@ -58,6 +58,12 @@ ENROLL_MAX_BRIGHTNESS = float(os.getenv("ML_FACE_ENROLL_MAX_BRIGHTNESS", "235"))
 ENROLL_MAX_YAW_RATIO = float(os.getenv("ML_FACE_ENROLL_MAX_YAW_RATIO", "0.60"))
 ENROLL_MAX_PITCH_RATIO = float(os.getenv("ML_FACE_ENROLL_MAX_PITCH_RATIO", "0.80"))
 ENROLL_UPSCALE_MIN_SIDE = int(os.getenv("ML_FACE_ENROLL_UPSCALE_MIN_SIDE", "120"))
+# Enroll the most confident face even when no face passed the enrollment gates (off by default).
+ENROLL_ALLOW_FALLBACK = os.getenv("ML_FACE_ENROLL_ALLOW_FALLBACK", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 # Step 5 — FAISS activates when enrolled vector count reaches this (0 = disabled).
 FAISS_MIN_EMBEDDINGS = int(os.getenv("ML_FACE_FAISS_MIN_EMBEDDINGS", "500"))
@@ -386,6 +392,9 @@ class KnownFaceDB:
         backend_name = "CUDA" if backend_id == cv2.dnn.DNN_BACKEND_CUDA else "CPU"
         print(f"[face] YuNet/SFace backend={backend_name}")
         self._lock = threading.Lock()
+        # Serialises gallery rebuilds (reload + apply) so two reloads cannot interleave.
+        self._build_lock = threading.Lock()
+        self._replace_pending = False
         self._faiss = _FaissGallery()
         self.unknown_cache = UnknownFaceCache()
         self.track_cache = TrackRecognitionCache()
@@ -412,27 +421,50 @@ class KnownFaceDB:
         print("[face] Recreated YuNet/SFace nets after DNN failure")
 
     def reload(self):
-        """Clear in-memory enrolled faces (database reload supplies new vectors)."""
-        self.known = []
-        self._faiss = _FaissGallery()
+        """Mark the gallery for replacement by the next ``apply_db_embeddings()`` call.
+
+        The old gallery keeps serving matches until the new one is fully built, so live
+        recognition never sees an empty (or half-built) gallery during a database reload.
+        Use ``replace_embeddings()`` to do both steps in one call.
+        """
+        with self._lock:
+            self._replace_pending = True
+
+    def clear_gallery(self) -> None:
+        """Drop every enrolled vector right now (atomic swap to an empty gallery)."""
+        self._swap_gallery([], _FaissGallery())
+
+    def _build_index(self, known: list[EnrolledFace]) -> "_FaissGallery":
+        """Build a FAISS gallery for ``known`` without touching the live one."""
+        gallery = _FaissGallery()
+        if self.faiss_min_embeddings <= 0:
+            return gallery
+        active_count = sum(1 for row in known if row.active_for_matching(self.enrollment_min_quality))
+        if active_count < self.faiss_min_embeddings:
+            return gallery
+        if gallery.rebuild(known, min_quality=self.enrollment_min_quality):
+            print(f"[face] FAISS index ready ({active_count} enrollment vectors, top_k={self.faiss_top_k})")
+        return gallery
 
     def _rebuild_index(self) -> None:
-        if self.faiss_min_embeddings <= 0:
-            return
-        active_count = sum(1 for row in self.known if row.active_for_matching(self.enrollment_min_quality))
-        if active_count < self.faiss_min_embeddings:
-            self._faiss = _FaissGallery()
-            return
-        built = self._faiss.rebuild(self.known, min_quality=self.enrollment_min_quality)
-        if built:
-            print(f"[face] FAISS index ready ({active_count} enrollment vectors, top_k={self.faiss_top_k})")
+        self._swap_gallery(list(self.known), self._build_index(self.known))
 
-    def extract_embedding(self, image: np.ndarray) -> np.ndarray | None:
+    def _swap_gallery(self, known: list[EnrolledFace], faiss_gallery: "_FaissGallery") -> None:
+        """Install a fully built gallery under the match lock; cached track identities are stale."""
+        with self._lock:
+            self.known = known
+            self._faiss = faiss_gallery
+            self._replace_pending = False
+        # Track cache entries were decided against the old gallery (e.g. a newly enrolled
+        # person cached as unknown) — force fresh recognition.
+        self.track_cache.clear()
+
+    def extract_embedding(self, image: np.ndarray, *, allow_fallback: bool | None = None) -> np.ndarray | None:
         """Return a face feature vector for enrollment (SFace embedding)."""
         if image is None or image.size == 0:
             return None
         with self._lock:
-            detail = self._extract_enrollment_feature_with_meta(image)
+            detail = self._extract_enrollment_feature_with_meta(image, allow_fallback=allow_fallback)
             if detail is None:
                 return None
             return detail["feature"]
@@ -442,6 +474,19 @@ class KnownFaceDB:
         flat = np.asarray(feature, dtype=np.float32).reshape(-1)
         return [float(v) for v in flat]
 
+    @staticmethod
+    def _make_enrolled(
+        identity: str,
+        embedding: list[float] | np.ndarray,
+        quality: float | None = None,
+    ) -> EnrolledFace | None:
+        identity = (identity or "").strip()
+        if not identity:
+            return None
+        feature = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
+        q = float(quality) if quality is not None else None
+        return EnrolledFace(identity=identity, feature=feature, quality=q)
+
     def register_embedding(
         self,
         identity: str,
@@ -449,15 +494,16 @@ class KnownFaceDB:
         *,
         quality: float | None = None,
     ) -> None:
-        identity = (identity or "").strip()
-        if not identity:
+        """Add one vector (copy-on-write; the FAISS index is rebuilt by apply_db_embeddings)."""
+        row = self._make_enrolled(identity, embedding, quality)
+        if row is None:
             return
-        feature = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
-        q = float(quality) if quality is not None else None
-        self.known.append(EnrolledFace(identity=identity, feature=feature, quality=q))
+        with self._lock:
+            self.known = [*self.known, row]
 
-    def apply_db_embeddings(self, entries: list[dict]) -> int:
-        added = 0
+    @classmethod
+    def _rows_from_entries(cls, entries: list[dict] | None) -> list[EnrolledFace]:
+        rows: list[EnrolledFace] = []
         for entry in entries or []:
             identity = str(entry.get("identity") or "").strip()
             embedding = entry.get("embedding")
@@ -465,10 +511,27 @@ class KnownFaceDB:
                 continue
             quality_raw = entry.get("quality")
             quality = float(quality_raw) if quality_raw is not None else None
-            self.register_embedding(identity, embedding, quality=quality)
-            added += 1
-        self._rebuild_index()
-        return added
+            row = cls._make_enrolled(identity, embedding, quality)
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    def replace_embeddings(self, entries: list[dict]) -> int:
+        """Build a brand-new gallery + FAISS index off to the side, then swap it in atomically."""
+        rows = self._rows_from_entries(entries)
+        with self._build_lock:
+            self._swap_gallery(rows, self._build_index(rows))
+        return len(rows)
+
+    def apply_db_embeddings(self, entries: list[dict]) -> int:
+        """Add DB vectors. After ``reload()`` this replaces the whole gallery in one atomic swap."""
+        rows = self._rows_from_entries(entries)
+        with self._build_lock:
+            with self._lock:
+                base = [] if self._replace_pending else list(self.known)
+            known = base + rows
+            self._swap_gallery(known, self._build_index(known))
+        return len(rows)
 
     def matching_stats(self) -> dict:
         active = [row for row in self.known if row.active_for_matching(self.enrollment_min_quality)]
@@ -678,11 +741,18 @@ class KnownFaceDB:
             "quality": round(float(max(0.0, min(1.0, quality))), 4),
         }
 
-    def _passes_face_quality(self, image: np.ndarray, face) -> tuple[bool, dict[str, float]]:
+    def _passes_face_quality(
+        self, image: np.ndarray, face, *, upscale: float = 1.0
+    ) -> tuple[bool, dict[str, float]]:
+        """Live quality gate. ``upscale`` = factor ``image`` was enlarged by before detection;
+        the minimum-size gate is applied to the face's size in the ORIGINAL camera pixels."""
         metrics = self._face_quality_metrics(image, face)
+        scale = max(float(upscale or 1.0), 1e-6)
+        metrics["orig_width"] = metrics["width"] / scale
+        metrics["orig_height"] = metrics["height"] / scale
         if metrics["confidence"] < FACE_MIN_CONFIDENCE:
             return False, metrics
-        if metrics["width"] < FACE_MIN_SIZE_PX or metrics["height"] < FACE_MIN_SIZE_PX:
+        if metrics["orig_width"] < FACE_MIN_SIZE_PX or metrics["orig_height"] < FACE_MIN_SIZE_PX:
             return False, metrics
         if metrics["laplacian_var"] < FACE_MIN_LAPLACIAN_VAR:
             return False, metrics
@@ -711,8 +781,17 @@ class KnownFaceDB:
             return False, metrics
         return True, metrics
 
-    def _extract_enrollment_feature_with_meta(self, image: np.ndarray) -> dict | None:
-        """Try all detected faces; pick the best-quality one that passes enrollment gates."""
+    def _extract_enrollment_feature_with_meta(
+        self, image: np.ndarray, *, allow_fallback: bool | None = None
+    ) -> dict | None:
+        """Try all detected faces; pick the best-quality one that passes enrollment gates.
+
+        When no face passes the gates the result is ``None`` unless ``allow_fallback`` (default:
+        env ML_FACE_ENROLL_ALLOW_FALLBACK, off) — then the most confident face is returned with
+        ``passed=False`` so the caller can decide whether a poor photo may still be enrolled.
+        """
+        if allow_fallback is None:
+            allow_fallback = ENROLL_ALLOW_FALLBACK
         image = self._upscale_if_small(image, min_side=ENROLL_UPSCALE_MIN_SIDE)
         best: tuple[float, object, dict[str, float]] | None = None
         fallback: tuple[float, object, dict[str, float]] | None = None
@@ -729,7 +808,8 @@ class KnownFaceDB:
             if confidence >= ENROLL_MIN_CONFIDENCE and fallback is None:
                 fallback = (confidence, face, metrics)
 
-        chosen = best or fallback
+        passed = best is not None
+        chosen = best if passed else (fallback if allow_fallback else None)
         if chosen is None:
             return None
 
@@ -738,6 +818,7 @@ class KnownFaceDB:
         return {
             "feature": feature,
             "quality": metrics["quality"],
+            "passed": passed,
         }
 
     def _align_and_feature(self, image: np.ndarray, face) -> tuple[np.ndarray, np.ndarray]:
@@ -759,13 +840,15 @@ class KnownFaceDB:
     def _extract_feature_with_meta(self, image: np.ndarray) -> dict | None:
         m = get_live_metrics()
         t0 = time.perf_counter()
+        orig_h = max(int(image.shape[0]), 1)
         image = self._upscale_if_small(image)
+        upscale = image.shape[0] / float(orig_h)
         face = self._largest_face(image)
         t1 = time.perf_counter()
         m.record_stage("face.yunet_detect", t1 - t0)
         if face is None:
             return None
-        passed, metrics = self._passes_face_quality(image, face)
+        passed, metrics = self._passes_face_quality(image, face, upscale=upscale)
         t2 = time.perf_counter()
         m.record_stage("face.quality_check", t2 - t1)
         if not passed:
@@ -777,12 +860,18 @@ class KnownFaceDB:
             "quality": metrics["quality"],
         }
 
-    def extract_embedding_detail(self, image: np.ndarray) -> dict | None:
-        """Return SFace feature vector plus enrollment quality metadata."""
+    def extract_embedding_detail(
+        self, image: np.ndarray, *, allow_fallback: bool | None = None
+    ) -> dict | None:
+        """Return SFace feature vector plus enrollment quality metadata.
+
+        ``None`` when no face passed the enrollment gates (unless ``allow_fallback``; then the
+        detail carries ``passed=False``).
+        """
         if image is None or image.size == 0:
             return None
         with self._lock:
-            return self._extract_enrollment_feature_with_meta(image)
+            return self._extract_enrollment_feature_with_meta(image, allow_fallback=allow_fallback)
 
     def _extract_feature(self, image: np.ndarray):
         detail = self._extract_feature_with_meta(image)
@@ -876,7 +965,8 @@ class KnownFaceDB:
             result = self.recognize_feature(feature)
             return result.identity, result.score
 
-    def recognize_with_detail(self, image: np.ndarray) -> RecognitionResult:
+    def recognize_with_detail(self, image: np.ndarray, *, use_unknown_cache: bool = True) -> RecognitionResult:
+        """Recognise the largest usable face. No face passed the gates → empty ``embedding``."""
         if image is None or image.size == 0:
             return RecognitionResult(identity="unknown", score=0.0)
         t0 = time.perf_counter()
@@ -886,7 +976,7 @@ class KnownFaceDB:
                 feature = self._extract_feature(image)
                 if feature is None:
                     return RecognitionResult(identity="unknown", score=0.0)
-                return self.recognize_feature(feature)
+                return self.recognize_feature(feature, use_unknown_cache=use_unknown_cache)
             finally:
                 # Metrics only: one call = YuNet + SFace on one crop under the shared face lock.
                 get_live_metrics().record_model(
@@ -983,8 +1073,14 @@ class KnownFaceDB:
         cls_id: int,
         yolo_name: str,
         bbox,
+        *,
+        use_unknown_cache: bool = True,
     ) -> dict:
-        """Return label plus optional face embedding for journey ingest."""
+        """Return label plus optional face embedding for journey ingest.
+
+        ``use_unknown_cache=False`` (offline jobs) labels unmatched faces plain "unknown" and does
+        not mint / touch the live temporary ``unknown:Uxxxx`` IDs.
+        """
         name_lower = yolo_name.lower()
         meta = {
             "label": yolo_name,
@@ -1000,7 +1096,7 @@ class KnownFaceDB:
                 meta["label"] = "unknown"
                 return meta
             crop = frame[y1:y2, x1:x2]
-            result = self.recognize_with_detail(crop)
+            result = self.recognize_with_detail(crop, use_unknown_cache=use_unknown_cache)
         elif cls_id == 0 or name_lower == "person":
             h, w = frame.shape[:2]
             x1, y1, x2, y2 = self._clamp_bbox(bbox, w, h)
@@ -1010,10 +1106,13 @@ class KnownFaceDB:
             person_h = y2 - y1
             head_y2 = y1 + max(40, int(person_h * 0.6))
             head_crop = frame[y1:head_y2, x1:x2]
-            result = self.recognize_with_detail(head_crop)
-            if is_unknown_label(result.identity):
+            result = self.recognize_with_detail(head_crop, use_unknown_cache=use_unknown_cache)
+            if not result.embedding:
+                # Only when the head region had no usable face. A face that was found but is
+                # unknown stays unknown — re-running on the full crop would just mint a second
+                # temporary unknown ID for the same face (and cost another YuNet + SFace pass).
                 person_crop = frame[y1:y2, x1:x2]
-                result = self.recognize_with_detail(person_crop)
+                result = self.recognize_with_detail(person_crop, use_unknown_cache=use_unknown_cache)
         else:
             meta["label"] = yolo_name
             return meta

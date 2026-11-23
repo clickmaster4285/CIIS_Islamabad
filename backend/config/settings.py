@@ -29,17 +29,41 @@ _DEFAULT_DEV_HOSTS = ["127.0.0.1", "localhost",
 # -----------------------------
 # Security Settings
 # -----------------------------
-_SECRET_KEY = os.getenv("SECRET_KEY")
-if not _SECRET_KEY and os.getenv("DEBUG", "False").lower() in ("true", "1", "yes"):
-    # Allow a dev-only default only when DEBUG is explicitly enabled
-    _SECRET_KEY = "dev-secret-key-do-not-use-in-production"
-if not _SECRET_KEY:
-    raise RuntimeError(
-        "SECRET_KEY environment variable is required. "
-        "Set it in .env or export SECRET_KEY=your-secret-key (never use the dev default in production)."
+_TRUTHY = frozenset({"true", "1", "yes", "on"})
+
+
+def _env_bool(key: str, default: str = "False") -> bool:
+    return os.getenv(key, default).strip().lower() in _TRUTHY
+
+
+# Parsed once; everything below uses DEBUG (it used to be read twice, two different ways).
+DEBUG = _env_bool("DEBUG")
+
+_DEV_SECRET_KEY = "dev-secret-key-do-not-use-in-production"
+_SECRET_KEY = (os.getenv("SECRET_KEY") or "").strip()
+_is_dev_key = _SECRET_KEY == _DEV_SECRET_KEY or _SECRET_KEY.startswith("django-insecure-")
+if not _SECRET_KEY and DEBUG:
+    # Dev-only default, only when DEBUG is explicitly enabled.
+    _SECRET_KEY = _DEV_SECRET_KEY
+elif not DEBUG and (not _SECRET_KEY or _is_dev_key):
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        "SECRET_KEY is missing or is a development key while DEBUG is off. Set a long random "
+        "SECRET_KEY in backend/.env, e.g. the output of: "
+        'python -c "import secrets; print(secrets.token_urlsafe(64))"'
+    )
+elif not DEBUG and len(_SECRET_KEY) < 32:
+    # Weak but present: refusing to start would take the site down, so shout instead.
+    # Rotating SECRET_KEY logs every user out and invalidates signed links (view passes).
+    import logging as _logging
+
+    _logging.getLogger("config.settings").critical(
+        "SECRET_KEY is only %d characters long. Replace it with a long random value "
+        "(python -c \"import secrets; print(secrets.token_urlsafe(64))\").",
+        len(_SECRET_KEY),
     )
 SECRET_KEY = _SECRET_KEY
-DEBUG = os.getenv("DEBUG", "False") == "True"
 ALLOWED_HOSTS = _env_list("ALLOWED_HOSTS") or []
 # In debug/development, allow LAN/IP access without frequent ALLOWED_HOSTS edits.
 if DEBUG:
@@ -101,6 +125,7 @@ INSTALLED_APPS = [
     "requests_support.apps.RequestsSupportConfig",
     "city_sync.apps.CitySyncConfig",
     "employee_monitoring.apps.EmployeeMonitoringConfig",
+    "identity.apps.IdentityConfig",
 ]
 
 # -----------------------------
@@ -226,6 +251,12 @@ LOGIN_LOCKOUT_MINUTES = int(os.getenv("LOGIN_LOCKOUT_MINUTES", "15"))
 # Ceiling for one username across all IPs (guessing spread over many machines).
 LOGIN_MAX_FAILURES_TOTAL = int(os.getenv("LOGIN_MAX_FAILURES_TOTAL", "50"))
 
+# Activity log retention for `manage.py purge_activity_logs` (run it daily).
+ACTIVITY_LOG_RETENTION_DAYS = int(os.getenv("ACTIVITY_LOG_RETENTION_DAYS", "90"))
+MOBILE_EVENT_RECEIPT_RETENTION_DAYS = int(os.getenv("MOBILE_EVENT_RECEIPT_RETENTION_DAYS", "30"))
+# Optional local MaxMind GeoLite2 folder for activity-log country/city (no network lookups).
+GEOIP_PATH = os.getenv("GEOIP_PATH", "").strip() or None
+
 CACHES = {
     "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"},
     # Wrong-password counts must be shared by every gunicorn worker, so they live on disk.
@@ -257,6 +288,9 @@ USE_TZ = True
 STATIC_URL = "/static/"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
+# /media/ serves images, video and audio inline; everything else downloads. True also
+# shows PDFs inline (HR document preview iframe), without the CSP sandbox header.
+MEDIA_INLINE_PDF = _env_bool("MEDIA_INLINE_PDF")
 
 # File upload settings for detention memo uploads (photos, documents, videos).
 # Note: These are for Django — nginx has a separate client_max_body_size limit.
@@ -449,6 +483,11 @@ ALERT_SAME_SPOT_HOURS = float(os.getenv("ALERT_SAME_SPOT_HOURS", "12"))
 ATTENDANCE_FACE_MIN_CONFIDENCE = float(os.getenv("ATTENDANCE_FACE_MIN_CONFIDENCE", "0.25"))
 ATTENDANCE_CAMERA_MARK_COOLDOWN_SECONDS = int(os.getenv("ATTENDANCE_CAMERA_MARK_COOLDOWN_SECONDS", "120"))
 ATTENDANCE_MIN_CHECKOUT_HOURS = float(os.getenv("ATTENDANCE_MIN_CHECKOUT_HOURS", "4"))
+# Exit-camera check-out after fewer hours than this marks a half day. Blank = half the
+# employee's shift (or 4 h when no shift is set).
+ATTENDANCE_HALF_DAY_HOURS = os.getenv("ATTENDANCE_HALF_DAY_HOURS", "").strip() or None
+# Webcam / kiosk recognition reuses the decoded face gallery until enrollments change.
+ATTENDANCE_GALLERY_CACHE_SECONDS = float(os.getenv("ATTENDANCE_GALLERY_CACHE_SECONDS", "60"))
 ATTENDANCE_MIN_CHECKOUT_AFTER_IN_MINUTES = float(
     os.getenv("ATTENDANCE_MIN_CHECKOUT_AFTER_IN_MINUTES", "1")
 )

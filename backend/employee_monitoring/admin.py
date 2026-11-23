@@ -1,7 +1,7 @@
 import os
 
 from django.contrib import admin
-from django.http import FileResponse, Http404
+from django.http import Http404
 from django.urls import path, reverse
 from django.utils.html import format_html
 
@@ -14,7 +14,21 @@ from .models import (
     MonitoringConsent,
     MonitoringPolicy,
 )
-from .services import record_audit, storage_path
+from .services import (
+    SCREEN_CONTENT_TYPES,
+    protected_file_response,
+    record_audit,
+    safe_storage_path,
+    scope_queryset,
+)
+
+
+def _admin_scope(qs, request):
+    """Django superusers see everything; other admin users get the same own/site scope as the
+    API (scope_queryset), so a location-scoped staff account cannot browse other sites."""
+    if request.user.is_superuser:
+        return qs
+    return scope_queryset(qs, request.user)
 
 
 @admin.register(MonitoringPolicy)
@@ -34,11 +48,21 @@ class MonitoringConsentAdmin(admin.ModelAdmin):
 
 @admin.register(EmployeeCallRecord)
 class EmployeeCallRecordAdmin(admin.ModelAdmin):
-    # Full number is encrypted and intentionally not listed; only the masked form shows.
+    # Read-only evidence. The full number is encrypted and never shown here (excluded from the
+    # form too, which would otherwise render it decrypted); only the masked form is visible.
     list_display = ("masked_number", "direction", "user", "started_at", "duration_seconds", "source", "recording_status")
     list_filter = ("direction", "recording_status", "source")
     search_fields = ("masked_number", "user__username", "source_event_id")
-    readonly_fields = ("received_at",)
+    exclude = ("number",)
+
+    def get_queryset(self, request):
+        return _admin_scope(super().get_queryset(request), request)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(EmployeeCallRecording)
@@ -46,6 +70,9 @@ class EmployeeCallRecordingAdmin(admin.ModelAdmin):
     list_display = ("source_recording_id", "user", "status", "source", "recorded_at", "retention_deadline")
     list_filter = ("status", "source")
     search_fields = ("source_recording_id", "user__username")
+
+    def get_queryset(self, request):
+        return _admin_scope(super().get_queryset(request), request)
 
 
 class DeviceDataAdmin(admin.ModelAdmin):
@@ -84,20 +111,23 @@ class EmployeeScreenCaptureAdmin(DeviceDataAdmin):
     list_select_related = ("user",)
     readonly_fields = ("preview",)
 
+    def get_queryset(self, request):
+        return _admin_scope(super().get_queryset(request), request)
+
     def get_urls(self):
         view = self.admin_site.admin_view(self.image_view)
         return [path("<uuid:capture_id>/image/", view, name="employee_monitoring_screen_image")] + super().get_urls()
 
     def image_view(self, request, capture_id):
         # Same audit trail as the API stream: every admin view of a capture is recorded.
-        cap = EmployeeScreenCapture.objects.filter(id=capture_id).first()
+        cap = self.get_queryset(request).filter(id=capture_id).first()
         if not cap or cap.status != EmployeeScreenCapture.AVAILABLE or not self.has_view_permission(request, cap):
             raise Http404
-        file_path = storage_path(cap.storage_key) if cap.storage_key else ""
-        if not file_path or not os.path.exists(file_path):
+        file_path = safe_storage_path(cap.storage_key)
+        if not file_path or not os.path.isfile(file_path):
             raise Http404
         record_audit(request, action="screen_streamed", target_type="screen", target_id=cap.id, via="admin")
-        return FileResponse(open(file_path, "rb"), content_type=cap.content_type or "image/jpeg")
+        return protected_file_response(file_path, cap.content_type or "image/jpeg", SCREEN_CONTENT_TYPES)
 
     def _image_url(self, obj):
         if obj.status != EmployeeScreenCapture.AVAILABLE:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
+from collections import deque
 from typing import Any
 
 import requests
@@ -24,6 +26,80 @@ def _pipeline_identity(
     return (rtsp_url.strip(), camera_id)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+class _ObservationSender:
+    """Posts observations to the backend from one background thread.
+
+    Pipeline threads only enqueue (never block on HTTP). The queue is bounded: when the backend
+    is slow or down, the OLDEST observations are dropped first and the drops are logged.
+    """
+
+    def __init__(self, post_fn, *, max_size: int):
+        self._post_fn = post_fn
+        self._max_size = max(1, int(max_size))
+        self._queue: deque[dict[str, Any]] = deque()
+        self._cond = threading.Condition()
+        self._thread: threading.Thread | None = None
+        self._dropped_total = 0
+        self._dropped_since_log = 0
+        self._last_drop_log = 0.0
+        self._sent_total = 0
+
+    def submit(self, payload: dict[str, Any]) -> None:
+        with self._cond:
+            if len(self._queue) >= self._max_size:
+                self._queue.popleft()
+                self._dropped_total += 1
+                self._dropped_since_log += 1
+                now = time.monotonic()
+                if not self._last_drop_log or now - self._last_drop_log >= 30.0:
+                    logger.warning(
+                        "[journey] Ingest queue full (%d): dropped %d oldest observation(s) "
+                        "since the last report (%d total) - backend ingest is too slow or down",
+                        self._max_size,
+                        self._dropped_since_log,
+                        self._dropped_total,
+                    )
+                    self._dropped_since_log = 0
+                    self._last_drop_log = now
+            self._queue.append(payload)
+            self._ensure_thread_locked()
+            self._cond.notify()
+
+    def _ensure_thread_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="journey-ingest-sender")
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._queue:
+                    self._cond.wait()
+                payload = self._queue.popleft()
+            try:
+                self._post_fn(payload)
+                self._sent_total += 1
+            except Exception as exc:  # never let the sender thread die
+                logger.debug("[journey] Ingest send error: %s", exc)
+
+    def stats(self) -> dict[str, int]:
+        with self._cond:
+            return {
+                "queued": len(self._queue),
+                "max_queue": self._max_size,
+                "dropped_total": self._dropped_total,
+                "sent_total": self._sent_total,
+            }
+
+
 class JourneyManager:
     def __init__(self):
         self._lock = threading.Lock()
@@ -33,6 +109,10 @@ class JourneyManager:
         self._configs: dict[str, tuple[str, int | None]] = {}
         self._backend_ingest_url = ""
         self._ingest_token = ""
+        self._sender = _ObservationSender(
+            self._post_observation,
+            max_size=_env_int("JOURNEY_INGEST_QUEUE_MAX", 500),
+        )
 
     def configure_ingest(self, backend_ingest_url: str, ingest_token: str = ""):
         self._backend_ingest_url = (backend_ingest_url or "").strip()
@@ -80,13 +160,14 @@ class JourneyManager:
         stopped = 0
         with self._lock:
             stale = [k for k in list(self._pipelines.keys()) if k not in desired_keys]
-            for key in stale:
-                self._stop_pipeline_locked(key)
-                stopped += 1
-                try:
-                    live.unregister_camera(key)
-                except Exception:
-                    pass
+            retired = [self._detach_pipeline_locked(key) for key in stale]
+            stopped = len(stale)
+        self._finish_stopping(retired)
+        for key in stale:
+            try:
+                live.unregister_camera(key)
+            except Exception:
+                pass
 
         return {
             "registered": registered,
@@ -104,7 +185,8 @@ class JourneyManager:
             return False
         with self._lock:
             existed = key in self._pipelines
-            self._stop_pipeline_locked(key)
+            retired = [self._detach_pipeline_locked(key)]
+        self._finish_stopping(retired)
         try:
             get_live_manager().unregister_camera(key)
         except Exception:
@@ -122,6 +204,33 @@ class JourneyManager:
     ) -> str:
         """Start only when missing/dead/config-changed. Periodic sync must not thrash."""
         identity = _pipeline_identity(rtsp_url=rtsp_url, camera_id=camera_id)
+        retired: list[tuple[JourneyCameraPipeline | None, threading.Thread | None]] = []
+        try:
+            return self._swap_pipeline(
+                key=key,
+                rtsp_url=rtsp_url,
+                camera_id=camera_id,
+                zone=zone,
+                name=name,
+                identity=identity,
+                retired=retired,
+            )
+        finally:
+            # Join the replaced pipeline's thread only after the manager lock is released.
+            self._finish_stopping(retired)
+
+    def _swap_pipeline(
+        self,
+        *,
+        key: str,
+        rtsp_url: str,
+        camera_id: int | None,
+        zone: str,
+        name: str,
+        identity: tuple[str, int | None],
+        retired: list,
+    ) -> str:
+        """Reuse or replace the pipeline under the lock; a replaced one goes to ``retired``."""
         with self._lock:
             existing = self._pipelines.get(key)
             thread = self._threads.get(key)
@@ -134,7 +243,7 @@ class JourneyManager:
                 existing.name = name
                 return "reused"
 
-            self._stop_pipeline_locked(key)
+            retired.append(self._detach_pipeline_locked(key))
             pipeline = JourneyCameraPipeline(
                 camera_key=key,
                 camera_id=camera_id,
@@ -157,25 +266,41 @@ class JourneyManager:
             logger.info("[journey] Started pipeline for %s (%s)", key, name)
             return "started"
 
-    def _stop_pipeline_locked(self, key: str):
+    def _detach_pipeline_locked(
+        self, key: str
+    ) -> tuple[JourneyCameraPipeline | None, threading.Thread | None]:
+        """Signal stop and forget the pipeline (caller holds the lock). Never blocks."""
         stop = self._stop_flags.pop(key, None)
         if stop:
             stop.set()
         pipeline = self._pipelines.pop(key, None)
-        if pipeline:
-            pipeline.stop()
         self._configs.pop(key, None)
         thread = self._threads.pop(key, None)
-        if thread:
-            thread.join(timeout=2.0)
+        return pipeline, thread
+
+    @staticmethod
+    def _finish_stopping(
+        retired: list[tuple[JourneyCameraPipeline | None, threading.Thread | None]],
+    ) -> None:
+        """Join stopped threads, then reset their pipelines. Always called WITHOUT the lock."""
+        for pipeline, thread in retired:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+            if pipeline is not None:
+                try:
+                    pipeline.stop()
+                except Exception as exc:
+                    logger.debug("[journey] Pipeline stop error: %s", exc)
 
     def _run_pipeline(self, key: str, pipeline: JourneyCameraPipeline, stop_event: threading.Event):
         interval = max(0.2, float(os.getenv("JOURNEY_INFER_INTERVAL_SEC", "0.5")))
         while not stop_event.is_set():
             try:
                 observations = pipeline.process_once()
+                if stop_event.is_set():
+                    break
                 for obs in observations:
-                    self._post_observation(obs)
+                    self._sender.submit(obs)
             except Exception as exc:
                 logger.warning("[journey] Pipeline error %s: %s", key, exc)
             stop_event.wait(interval)
@@ -196,23 +321,28 @@ class JourneyManager:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return {
+            out = {
                 "running_pipelines": len(self._pipelines),
                 "cameras": list(self._pipelines.keys()),
                 "ingest_url": self._backend_ingest_url,
             }
+        out["ingest_queue"] = self._sender.stats()
+        return out
 
     def stop_all(self):
         with self._lock:
-            for key in list(self._pipelines.keys()):
-                self._stop_pipeline_locked(key)
+            retired = [self._detach_pipeline_locked(key) for key in list(self._pipelines.keys())]
+        self._finish_stopping(retired)
 
 
 _manager: JourneyManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_journey_manager() -> JourneyManager:
     global _manager
     if _manager is None:
-        _manager = JourneyManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = JourneyManager()
     return _manager

@@ -22,14 +22,11 @@ import { ThermalVideoGrid } from "@/components/thermal/thermal-video-grid"
 import {
   ChevronDown,
   Thermometer,
-  MapPin,
-  Settings,
   UserCheck,
   Flame,
   Wrench,
   BarChart3,
   FileText,
-  Calendar,
 } from "lucide-react"
 
 const MOCK_THERMAL_CAMERAS = ["Gate Thermal", "Entrance Thermal", "Warehouse Thermal", "Hall Thermal"]
@@ -44,7 +41,6 @@ const ALERT_FREQUENCY = ["Once", "Hourly", "Daily", "Weekly"]
 export default function ThermalImagingPage() {
   const [feverThreshold, setFeverThreshold] = useState(37.5)
   const [hotSpotThreshold, setHotSpotThreshold] = useState(70)
-  const [anomalySensitivity, setAnomalySensitivity] = useState([50])
   const [emissivity, setEmissivity] = useState(0.96)
 
   return (

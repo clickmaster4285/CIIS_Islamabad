@@ -13,6 +13,7 @@ worker shares; the default in-memory cache is per process.
 from __future__ import annotations
 
 import ipaddress
+import time
 
 from django.conf import settings
 from django.core.cache import caches
@@ -59,33 +60,50 @@ def client_ip(request) -> str:
     return remote
 
 
+def _lock_key(key: str) -> str:
+    return f"{key}:locked"
+
+
+def _limits() -> tuple[int, int]:
+    per_ip = int(getattr(settings, "LOGIN_MAX_FAILURES", 5))
+    total = int(getattr(settings, "LOGIN_MAX_FAILURES_TOTAL", 50))
+    return per_ip, total
+
+
 def is_locked_out(username: str, ip: str = "") -> bool:
     if not _name(username):
         return False
-    per_ip = int(getattr(settings, "LOGIN_MAX_FAILURES", 5))
-    total = int(getattr(settings, "LOGIN_MAX_FAILURES_TOTAL", 50))
+    per_ip, total = _limits()
     cache = _cache()
-    if per_ip > 0 and int(cache.get(_ip_key(username, ip)) or 0) >= per_ip:
+    ip_key, total_key = _ip_key(username, ip), _total_key(username)
+    if per_ip > 0 and (cache.get(_lock_key(ip_key)) or int(cache.get(ip_key) or 0) >= per_ip):
         return True
-    return total > 0 and int(cache.get(_total_key(username)) or 0) >= total
+    return total > 0 and bool(cache.get(_lock_key(total_key)) or int(cache.get(total_key) or 0) >= total)
 
 
-def _bump(key: str) -> None:
+def _bump(key: str, limit: int) -> None:
+    """Count one failure. Every write carries the lockout window as its timeout: the
+    cache's incr() re-saves with the default 300 s timeout, which shortened the window."""
     cache = _cache()
-    if cache.add(key, 1, _window_seconds()):
-        return
-    try:
-        cache.incr(key)
-    except ValueError:
-        cache.set(key, 1, _window_seconds())
+    window = _window_seconds()
+    if cache.add(key, 1, window):
+        count = 1
+    else:
+        count = int(cache.get(key) or 0) + 1
+        cache.set(key, count, window)
+    if limit > 0 and count >= limit:
+        # The lockout runs for a full window from the moment it starts, independent of the counter.
+        cache.set(_lock_key(key), int(time.time()), window)
 
 
 def record_failure(username: str, ip: str = "") -> None:
     if not _name(username):
         return
-    _bump(_ip_key(username, ip))
-    _bump(_total_key(username))
+    per_ip, total = _limits()
+    _bump(_ip_key(username, ip), per_ip)
+    _bump(_total_key(username), total)
 
 
 def clear_failures(username: str, ip: str = "") -> None:
-    _cache().delete_many([_ip_key(username, ip), _total_key(username)])
+    ip_key, total_key = _ip_key(username, ip), _total_key(username)
+    _cache().delete_many([ip_key, total_key, _lock_key(ip_key), _lock_key(total_key)])

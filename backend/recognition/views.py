@@ -1,7 +1,9 @@
+import hashlib
 import json
 from pathlib import Path
 
 from django.conf import settings
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.response import Response
@@ -9,7 +11,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from city_sync.identity import local_rows_q
-from recognition.models import DetectionSnapshot, FaceEnrollment, FaceSample
+from recognition.models import FaceEnrollment, FaceSample
+from recognition.scoping import face_sample_scope_q, scoped_staff, staff_scope_q
+from recognition.serializers import FaceEnrollmentDetailSerializer
 from recognition.services.face_engine import get_face_engine
 from recognition.services.face_samples import review_sample
 from recognition.services.snapshot_saver import save_detection_snapshot, snapshot_to_dict
@@ -19,7 +23,9 @@ from users.permissions import IsAdminOrHR
 
 
 def min_enrollment_images() -> int:
-    return max(3, int(getattr(settings, "ATTENDANCE_MIN_ENROLLMENT_IMAGES", 5)))
+    from recognition.services.training import min_enrollment_images as _required
+
+    return _required()
 
 
 def ensure_enrollment(staff: Staff) -> FaceEnrollment:
@@ -83,36 +89,6 @@ def build_gallery() -> dict[str, list[float]]:
     return gallery
 
 
-class FaceEnrollmentDetailSerializer(serializers.ModelSerializer):
-    staff_id = serializers.IntegerField(source="staff.id", read_only=True)
-    employee_id = serializers.CharField(source="staff.employee_id", read_only=True, allow_null=True)
-    staff_name = serializers.CharField(source="staff.full_name", read_only=True)
-    department = serializers.CharField(source="staff.department", read_only=True)
-    images_required = serializers.SerializerMethodField()
-
-    class Meta:
-        model = FaceEnrollment
-        fields = [
-            "id",
-            "staff_id",
-            "employee_id",
-            "staff_name",
-            "department",
-            "is_enrolled",
-            "is_trained",
-            "total_images",
-            "images_required",
-            "model_version",
-            "dataset_folder",
-            "profile_image",
-            "created_at",
-            "updated_at",
-        ]
-
-    def get_images_required(self, obj):
-        return min_enrollment_images()
-
-
 class CaptureImageSerializer(serializers.Serializer):
     image = serializers.CharField(help_text="Base64-encoded JPEG image")
 
@@ -126,42 +102,11 @@ class IdentifySerializer(serializers.Serializer):
     )
 
 
-class DetectionSnapshotSerializer(serializers.ModelSerializer):
-    staff_id = serializers.IntegerField(read_only=True)
-    employee_id = serializers.CharField(source="staff.employee_id", read_only=True, allow_null=True)
-    employee_name = serializers.CharField(source="staff.full_name", read_only=True)
-    camera_label = serializers.SerializerMethodField()
-    image_url = serializers.SerializerMethodField()
-
-    class Meta:
-        model = DetectionSnapshot
-        fields = [
-            "id",
-            "staff_id",
-            "employee_id",
-            "employee_name",
-            "camera_id",
-            "camera_name",
-            "camera_label",
-            "image_url",
-            "confidence",
-            "attendance_action",
-            "detected_at",
-        ]
-
-    def get_camera_label(self, obj):
-        name = (obj.camera_name or "").strip()
-        return name or "Camera"
-
-    def get_image_url(self, obj):
-        return snapshot_to_dict(obj)["image_url"]
-
-
 class EnrollmentStatusView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def get(self, request, staff_id):
-        staff = get_object_or_404(Staff, pk=staff_id)
+        staff = get_object_or_404(scoped_staff(request.user), pk=staff_id)
         enrollment = ensure_enrollment(staff)
         coverage = pose_coverage(Path(settings.MEDIA_ROOT) / enrollment.dataset_folder)
         return Response({
@@ -178,14 +123,16 @@ class CaptureFaceView(APIView):
         serializer = CaptureImageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        staff = get_object_or_404(Staff, pk=staff_id)
+        staff = get_object_or_404(scoped_staff(request.user), pk=staff_id)
         enrollment = ensure_enrollment(staff)
         required = min_enrollment_images()
 
         engine = get_face_engine()
         try:
             image = engine.decode_base64(serializer.validated_data["image"])
-        except (ValueError, Exception):
+        except ValueError as exc:
+            return Response({"error": str(exc) or "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
             return Response({"error": "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
 
         quality = engine.check_quality(image)
@@ -196,25 +143,31 @@ class CaptureFaceView(APIView):
             return Response({"accepted": False, "quality": quality})
 
         folder = Path(settings.MEDIA_ROOT) / enrollment.dataset_folder
-        index = enrollment.total_images + 1
-        saved = engine.save_dataset_image(save_image, folder, index)
-        bucket = (quality.get("pose") or {}).get("bucket")
-        if bucket:
-            _record_pose(folder, saved.name, bucket)
-        coverage = pose_coverage(folder)
+        # Row lock: two captures for the same person (double click, two tabs) get distinct indexes and
+        # do not lose each other's poses.json entries; the file name is unique either way.
+        with transaction.atomic():
+            enrollment = FaceEnrollment.objects.select_for_update().get(pk=enrollment.pk)
+            index = enrollment.total_images + 1
+            saved = engine.save_dataset_image(save_image, folder, index, unique=True)
+            bucket = (quality.get("pose") or {}).get("bucket")
+            if bucket:
+                _record_pose(folder, saved.name, bucket)
+            coverage = pose_coverage(folder)
 
-        enrollment.total_images = index
-        enrollment.is_enrolled = enrollment.total_images >= required
-        enrollment.is_trained = False
-        enrollment.embedding = None
-        enrollment.save(
-            update_fields=["total_images", "is_enrolled", "is_trained", "embedding", "updated_at"]
-        )
+            enrollment.total_images = index
+            enrollment.is_enrolled = enrollment.total_images >= required
+            enrollment.is_trained = False
+            enrollment.embedding = None
+            update_fields = ["total_images", "is_enrolled", "is_trained", "embedding", "updated_at"]
+            if index == 1:
+                enrollment.profile_image = engine.save_profile_image(save_image, staff.pk)
+                update_fields.append("profile_image")
+            enrollment.save(update_fields=update_fields)
 
-        if index == 1:
-            profile_rel = engine.save_profile_image(save_image, staff.pk)
-            enrollment.profile_image = profile_rel
-            enrollment.save(update_fields=["profile_image", "updated_at"])
+        # The person is untrained now: drop their old vectors from the live gallery.
+        from recognition.services.gallery_index import invalidate_gallery
+
+        invalidate_gallery()
 
         return Response({
             "accepted": True,
@@ -231,7 +184,7 @@ class TrainEmbeddingsView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def post(self, request, staff_id):
-        staff = get_object_or_404(Staff, pk=staff_id)
+        staff = get_object_or_404(scoped_staff(request.user), pk=staff_id)
         enrollment = ensure_enrollment(staff)
         required = min_enrollment_images()
 
@@ -282,9 +235,12 @@ class IdentifyFaceView(APIView):
         serializer.is_valid(raise_exception=True)
 
         engine = get_face_engine()
+        raw_image = serializer.validated_data["image"]
         try:
-            image = engine.decode_base64(serializer.validated_data["image"])
-        except (ValueError, Exception):
+            image = engine.decode_base64(raw_image)
+        except ValueError as exc:
+            return Response({"error": str(exc) or "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
             return Response({"error": "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
 
         source = serializer.validated_data.get("source", Attendance.SOURCE_WEBCAM)
@@ -296,7 +252,9 @@ class IdentifyFaceView(APIView):
 
             staff_id = result.get("staff_id")
             needed = CONFIRM_CCTV if source == Attendance.SOURCE_CCTV else CONFIRM_WEBCAM
-            confirmed = get_match_confirmer().observe(f"{source}:{staff_id}", needed=needed)
+            # The same picture sent twice is one frame, not two confirmations.
+            frame_hash = hashlib.sha1(raw_image.encode("utf-8", "ignore")).hexdigest()
+            confirmed = get_match_confirmer().observe(f"{source}:{staff_id}", needed=needed, frame_hash=frame_hash)
             if not confirmed:
                 response["attendance"] = {
                     "action": "pending_confirm",
@@ -304,7 +262,7 @@ class IdentifyFaceView(APIView):
                 }
                 return Response(response)
 
-            staff = get_object_or_404(Staff.objects.select_related("user"), pk=staff_id)
+            staff = get_object_or_404(scoped_staff(request.user).select_related("user"), pk=staff_id)
             if not staff_is_enrolled_for_attendance(staff):
                 return Response(
                     {"error": "Staff face not trained"},
@@ -349,9 +307,10 @@ class GalleryStatsView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def get(self, request):
-        total = FaceEnrollment.objects.count()
-        enrolled = FaceEnrollment.objects.filter(is_enrolled=True).count()
-        trained = FaceEnrollment.objects.filter(is_trained=True).count()
+        enrollments = FaceEnrollment.objects.filter(staff_scope_q(request.user, "staff__"))
+        total = enrollments.count()
+        enrolled = enrollments.filter(is_enrolled=True).count()
+        trained = enrollments.filter(is_trained=True).count()
         return Response({
             "total_staff_with_enrollment": total,
             "enrolled": enrolled,
@@ -368,6 +327,9 @@ def selfie_punch(user, image_b64: str) -> dict:
     engine = get_face_engine()
     image = engine.decode_base64(image_b64)
     result = engine.identify_from_image(image, source="webcam")
+    if result.get("liveness_unavailable") or result.get("spoof"):
+        # Liveness is enforced for phone punches (RECOGNITION_REQUIRE_LIVENESS, default on).
+        return {"matched": False, "message": result.get("message"), "confidence": 0.0}
     if not result.get("matched") or result.get("staff_id") != staff.pk:
         return {"matched": False, "message": "Face does not match the logged-in employee", "confidence": result.get("confidence", 0.0)}
     decision = AttendanceDecisionEngine.process_recognition(
@@ -396,7 +358,9 @@ class SelfiePunchView(APIView):
             return Response({"error": "image is required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             payload = selfie_punch(request.user, image)
-        except (ValueError, Exception):
+        except ValueError as exc:
+            return Response({"error": str(exc) or "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
             return Response({"error": "Invalid image data"}, status=status.HTTP_400_BAD_REQUEST)
         code = status.HTTP_200_OK if payload.get("matched") else status.HTTP_400_BAD_REQUEST
         return Response(payload, status=code)
@@ -441,14 +405,17 @@ class FaceSampleListView(APIView):
 
     def get(self, request):
         sample_status = request.query_params.get("status") or FaceSample.STATUS_PENDING
+        if sample_status not in (FaceSample.STATUS_PENDING, FaceSample.STATUS_APPROVED, FaceSample.STATUS_REJECTED):
+            return Response({"error": "status must be pending, approved or rejected"}, status=status.HTTP_400_BAD_REQUEST)
+        visible = FaceSample.objects.filter(face_sample_scope_q(request.user))
         samples = (
-            FaceSample.objects.filter(status=sample_status)
+            visible.filter(status=sample_status)
             .select_related("staff", "suggested_staff", "camera")
             .order_by("-created_at")[:100]
         )
         return Response({
             "results": FaceSampleSerializer(samples, many=True).data,
-            "pending_count": FaceSample.objects.filter(status=FaceSample.STATUS_PENDING).count(),
+            "pending_count": visible.filter(status=FaceSample.STATUS_PENDING).count(),
         })
 
 
@@ -458,13 +425,17 @@ class FaceSampleReviewView(APIView):
     permission_classes = [IsAdminOrHR]
 
     def post(self, request, sample_id):
-        sample = get_object_or_404(FaceSample, pk=sample_id)
+        sample = get_object_or_404(FaceSample.objects.filter(face_sample_scope_q(request.user)), pk=sample_id)
         action = request.data.get("action")
         if action not in ("approve", "reject"):
             return Response({"error": "action must be approve or reject"}, status=status.HTTP_400_BAD_REQUEST)
         staff = None
         if request.data.get("staff_id"):
-            staff = get_object_or_404(Staff, pk=request.data["staff_id"])
+            try:
+                staff_pk = int(request.data["staff_id"])
+            except (TypeError, ValueError):
+                return Response({"error": "staff_id must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+            staff = get_object_or_404(scoped_staff(request.user), pk=staff_pk)
         try:
             review_sample(sample, approve=action == "approve", staff=staff, user=request.user)
         except ValueError as exc:

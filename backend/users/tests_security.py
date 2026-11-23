@@ -206,7 +206,7 @@ class NvrPasswordNotLeakedTests(TestCase):
         from cameras.models import Nvr
 
         self.client.force_authenticate(_user_with_role("guard", "GUARD"))
-        nvr = Nvr.objects.get()
+        nvr = Nvr.objects.get(ip_address="10.0.0.5")
         resp = self.client.patch(f"/api/nvrs/{nvr.pk}/", {"ip_address": "6.6.6.6"}, format="json")
         self.assertEqual(resp.status_code, 403)
 

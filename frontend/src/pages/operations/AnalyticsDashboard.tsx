@@ -49,10 +49,17 @@ export default function AnalyticsDashboardPage() {
 
   const query = useMemo(() => ({ location, from, to }), [location, from, to])
 
-  const load = useCallback(
-    (signal?: AbortSignal) => {
-      setLoading(true)
-      return fetchAnalytics(query, signal)
+  // Show the loading state as soon as the filters change (adjust state during
+  // render); the effect below then only has to fetch.
+  const [loadingQuery, setLoadingQuery] = useState(query)
+  if (loadingQuery !== query) {
+    setLoadingQuery(query)
+    setLoading(true)
+  }
+
+  const fetchData = useCallback(
+    (signal?: AbortSignal) =>
+      fetchAnalytics(query, signal)
         .then((res) => {
           setData(res)
           setError("")
@@ -63,15 +70,22 @@ export default function AnalyticsDashboardPage() {
         })
         .finally(() => {
           if (!signal?.aborted) setLoading(false)
-        })
-    },
+        }),
     [query]
+  )
+
+  const load = useCallback(
+    (signal?: AbortSignal) => {
+      setLoading(true)
+      return fetchData(signal)
+    },
+    [fetchData]
   )
 
   // Load on filter change, then refresh quietly every 30s while the tab is visible.
   useEffect(() => {
     const ac = new AbortController()
-    void load(ac.signal)
+    void fetchData(ac.signal)
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") {
         void load(ac.signal)
@@ -82,7 +96,7 @@ export default function AnalyticsDashboardPage() {
       window.clearInterval(timer)
       ac.abort()
     }
-  }, [load])
+  }, [fetchData, load])
 
   useEffect(() => {
     const ac = new AbortController()

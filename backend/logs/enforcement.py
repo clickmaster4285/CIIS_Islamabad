@@ -184,14 +184,41 @@ def resolve_alerts(*, user, device=None, alert_types: list[str]):
 
 
 def remember_event_id(user, event_id: str | None, event_type: str) -> bool:
-    """Return True if this event_id is new; False if duplicate."""
+    """Return True if this event_id is new for this user; False if duplicate.
+
+    Keys are per user, so one phone cannot burn another user's event ids, and two
+    uploads racing with the same id resolve to one receipt instead of a 500.
+    """
     if not event_id:
         return True
-    _, created = MobileEventReceipt.objects.get_or_create(
-        event_id=str(event_id)[:64],
-        defaults={"event_type": event_type[:40], "user": user},
-    )
+    from django.db import IntegrityError
+
+    key = str(event_id)[:64]
+    try:
+        with transaction.atomic():
+            _, created = MobileEventReceipt.objects.get_or_create(
+                user=user,
+                event_id=key,
+                defaults={"event_type": (event_type or "")[:40]},
+            )
+    except IntegrityError:
+        return False
     return created
+
+
+def clamp_battery_level(value):
+    """Battery percent from the phone as an int 0-100, or None when missing / not a number."""
+    if value is None or value == "":
+        return None
+    try:
+        level = float(value)
+    except (TypeError, ValueError):
+        return None
+    if level != level:  # NaN
+        return None
+    if 0 < level <= 1 and not float(level).is_integer():
+        level *= 100  # some browsers report 0.0-1.0
+    return int(max(0, min(100, round(level))))
 
 
 class SessionRevoked(Exception):
@@ -396,7 +423,7 @@ def touch_heartbeat(session: MobileAccessSession, payload: dict, request=None):
     device.last_heartbeat_at = now
     device.status = MobileDevice.STATUS_ACTIVE
     device.is_active = True
-    battery = payload.get("battery_level")
+    battery = clamp_battery_level(payload.get("battery_level"))
     if battery is not None:
         device.battery_level = battery
     gps_status = (payload.get("gps_status") or "")[:32]
@@ -443,6 +470,7 @@ def touch_gps(session: MobileAccessSession, lat, lng, accuracy, battery=None):
     device.last_longitude = lng
     device.last_accuracy = accuracy
     device.last_seen_at = now
+    battery = clamp_battery_level(battery)
     if battery is not None:
         device.battery_level = battery
     device.last_gps_status = "active"

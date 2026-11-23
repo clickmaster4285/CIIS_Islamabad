@@ -67,10 +67,15 @@ class AnthropicProvider:
     def append_assistant_text(self, history: list, text: str) -> None:
         history.append({"role": "assistant", "content": text})
 
-    def complete(self, system: str, tools: list, history: list) -> StepResult:
+    def complete(self, system: str, tools: list, history: list, timeout: float | None = None) -> StepResult:
         a = self._anthropic
+        client = self.client
+        if timeout is not None:
+            # Stay inside the turn's wall-clock budget; no retries once the budget is short.
+            budget = max(1.0, min(float(timeout), 90.0))
+            client = client.with_options(timeout=budget, max_retries=2 if budget >= 60 else 0)
         try:
-            response = self.client.beta.messages.create(
+            response = client.beta.messages.create(
                 model=self.model,
                 max_tokens=16000,
                 system=system,
@@ -78,7 +83,7 @@ class AnthropicProvider:
                     {"name": t.name, "description": t.description, "input_schema": t.input_schema}
                     for t in tools
                 ],
-                messages=history,
+                messages=_recent_anthropic(history),
                 thinking={"type": "adaptive"},
                 output_config={"effort": self.effort},
                 # Tools + system prompt are a stable prefix; cache them across turns.
@@ -92,6 +97,8 @@ class AnthropicProvider:
             raise AgentUnavailable("The AI service is not configured. Please contact IT.") from exc
         except a.RateLimitError as exc:
             raise AgentUnavailable("The AI service is busy. Please try again in a moment.") from exc
+        except a.APITimeoutError as exc:
+            raise AgentUnavailable("The AI service is taking too long. Please try again.") from exc
         except a.APIConnectionError as exc:
             raise AgentUnavailable("I can't reach the AI service right now.") from exc
         except a.APIStatusError as exc:
@@ -131,6 +138,36 @@ class AnthropicProvider:
         )
 
 
+ANTHROPIC_MAX_MESSAGES = 80
+
+
+def _is_tool_result_message(msg: dict) -> bool:
+    content = msg.get("content")
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+    )
+
+
+def _recent_anthropic(history: list) -> list:
+    """Send only the latest messages of a long chat (cost/latency/context), like Ollama's trim.
+
+    The slice starts at a plain user message — never at a tool_result, whose tool_use would then
+    be missing — so the request stays valid. The stored history itself is not trimmed.
+    """
+    if len(history) <= ANTHROPIC_MAX_MESSAGES:
+        return history
+    tail = history[-ANTHROPIC_MAX_MESSAGES:]
+    for i, msg in enumerate(tail):
+        if msg.get("role") == "user" and not _is_tool_result_message(msg):
+            return tail[i:]
+    # No clean starting point in the window: fall back to the latest plain user message.
+    for i in range(len(history) - 1, -1, -1):
+        msg = history[i]
+        if msg.get("role") == "user" and not _is_tool_result_message(msg):
+            return history[i:]
+    return history
+
+
 OLLAMA_MAX_MESSAGES = 60
 
 
@@ -164,7 +201,8 @@ class OllamaProvider:
     def append_assistant_text(self, history: list, text: str) -> None:
         history.append({"role": "assistant", "content": text})
 
-    def complete(self, system: str, tools: list, history: list) -> StepResult:
+    def complete(self, system: str, tools: list, history: list, timeout: float | None = None) -> StepResult:
+        request_timeout = 300.0 if timeout is None else max(1.0, min(float(timeout), 300.0))
         body = {
             "model": self.model,
             "stream": False,
@@ -180,7 +218,7 @@ class OllamaProvider:
             ],
         }
         try:
-            resp = requests.post(f"{self.base_url}/api/chat", json=body, timeout=300)
+            resp = requests.post(f"{self.base_url}/api/chat", json=body, timeout=request_timeout)
             resp.raise_for_status()
             msg = resp.json().get("message") or {}
         except (requests.RequestException, ValueError) as exc:

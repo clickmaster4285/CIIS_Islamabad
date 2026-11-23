@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react"
 import { useParams, Link, useSearchParams, useLocation } from "react-router-dom"
 import { ArrowLeft, FileText, Package, Pencil, QrCode, Users, Paperclip, Camera } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { PrintMenu } from "@/components/seizure/print-menu"
 import {
@@ -81,6 +81,7 @@ function ViewLocatedCameraDialog({
 
   useEffect(() => {
     if (!target) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset/loading state for the fetch keyed on `target`
       setCamera(null)
       setError(null)
       setLoading(false)
@@ -577,6 +578,7 @@ export default function DetentionMemoDetailPage() {
 
   useEffect(() => {
     if (!id) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reset/loading state for the fetch keyed on the route id
       setRow(null)
       return
     }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 import numpy as np
 
@@ -163,15 +164,54 @@ def _approved_sample_entries(trained_staff: set[int]) -> list[tuple[str, np.ndar
     return entries
 
 
+# Other processes (web workers, run_background_workers) train / approve faces too: every
+# FINGERPRINT_CHECK_SECONDS one cheap aggregate query tells us whether the DB gallery changed.
+FINGERPRINT_CHECK_SECONDS = 30.0
+_fingerprint = None
+_checked_at = 0.0
+
+
+def _db_fingerprint() -> tuple:
+    from django.db.models import Count, Max, Q
+
+    from city_sync.identity import local_rows_q
+    from recognition.models import FaceEnrollment, FaceSample
+
+    enroll = FaceEnrollment.objects.filter(local_rows_q("staff__"), is_trained=True).aggregate(
+        n=Count("id"), changed=Max("updated_at")
+    )
+    samples = FaceSample.objects.filter(reviewed_at__isnull=False).aggregate(
+        approved=Count("id", filter=Q(status=FaceSample.STATUS_APPROVED)), reviewed=Max("reviewed_at"), last=Max("id")
+    )
+    return (
+        enroll["n"],
+        enroll["changed"],
+        samples["approved"],
+        samples["reviewed"],
+        samples["last"],
+    )
+
+
 def get_gallery_index() -> GalleryIndex:
-    global _index
+    global _index, _fingerprint, _checked_at
     with _lock:
-        if _index is None:
+        now = time.monotonic()
+        if _index is not None and now - _checked_at < FINGERPRINT_CHECK_SECONDS:
+            return _index
+        try:
+            fingerprint = _db_fingerprint()
+        except Exception:
+            logger.warning("Gallery fingerprint check failed; keeping the loaded index", exc_info=True)
+            fingerprint = _fingerprint
+        _checked_at = now
+        if _index is None or fingerprint != _fingerprint:
             _index = _load_index()
+            _fingerprint = fingerprint
         return _index
 
 
 def invalidate_gallery() -> None:
+    """Reload on next use in THIS process; other processes notice the DB change within ~30 s."""
     global _index
     with _lock:
         _index = None

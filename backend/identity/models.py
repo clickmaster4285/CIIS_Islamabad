@@ -209,7 +209,7 @@ class PersonObservation(models.Model):
     journey_person = models.ForeignKey(
         "person_journey.JourneyPerson",
         on_delete=models.CASCADE,
-        related_name="observations",
+        related_name="identity_observations"  # person_journey.PersonObservation owns "observations",
     )
     camera = models.ForeignKey(
         "cameras.Camera",

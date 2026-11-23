@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useQuery } from "@tanstack/react-query"
 import { fetchSecurityAlerts, type SecurityAlertRecord } from "@/lib/vms-api"
 import { Button } from "@/components/ui/button"
 import { Link } from "react-router-dom"

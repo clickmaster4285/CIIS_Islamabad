@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
+import json
+import logging
+import re
 from concurrent.futures import ALL_COMPLETED, ThreadPoolExecutor, wait
-from urllib.parse import urlencode, urljoin
+from urllib.parse import quote, urljoin
 
 import requests
 from django.http import HttpResponse, StreamingHttpResponse
@@ -16,7 +20,12 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.permissions import is_ops_viewer
+from users.permissions import (
+    apply_remote_server_scope,
+    is_it_superadmin,
+    is_ops_viewer,
+    ops_camera_location_scope,
+)
 
 from .cache import (
     parse_camera_id as _parse_camera_id,
@@ -44,13 +53,47 @@ from .go2rtc import (
     go2rtc_configured as _go2rtc_configured,
     health_ok as _go2rtc_health_ok,
     stream_name_for as _go2rtc_stream_name,
-    warm_stream as _go2rtc_warm_stream,
 )
+from . import stream_limits
 from .utils import (
     ensure_default_remote_server,
+    ensure_http_url,
+    ensure_ml_url,
     resolve_remote_token,
-    token_for_user,
+    server_token_for,
 )
+
+logger = logging.getLogger(__name__)
+
+# Native-resolution view streams (max_width=0) are capped to this width.
+VIEW_STREAM_WIDTH_CAP = 1920
+_CAM_KEY_RE = re.compile(r"^cam-(\d+)$")
+
+
+# ---------------------------------------------------------------- viewer location scope
+
+
+def _viewer_scope_codes(user) -> set[str] | None:
+    """None = may see every location; otherwise the viewer's own location codes."""
+    from detentions.access import location_codes_for
+
+    scope = ops_camera_location_scope(user)
+    if not scope:
+        return None
+    return location_codes_for(scope)
+
+
+def _code_in_scope(user, code: str) -> bool:
+    from detentions.access import location_codes_for
+
+    allowed = _viewer_scope_codes(user)
+    if allowed is None:
+        return True
+    return bool(location_codes_for(code) & allowed)
+
+
+def _scoped_servers(user):
+    return apply_remote_server_scope(RemoteServer.objects.all(), user)
 
 
 def _token_key_from_request(request) -> str:
@@ -63,7 +106,11 @@ def _token_key_from_request(request) -> str:
 
 
 def _ops_user_from_request(request):
-    """Resolve Super Admin / IT Super Admin from session/DRF auth or ?token=."""
+    """Resolve an ops viewer from session/DRF auth, the login cookie, or ?token=.
+
+    ?token= is still accepted because the frontend (lib/api.ts withUrlToken) puts the
+    token in <img> URLs when the API is on another origin; same-origin pages use the cookie.
+    """
     user = getattr(request, "user", None)
     if user is not None and getattr(user, "is_authenticated", False) and is_ops_viewer(user):
         return user
@@ -89,47 +136,55 @@ def _cache_is_fresh(server: RemoteServer, *, refresh: bool) -> bool:
     return age < _OPS_CAMERAS_CACHE_TTL_SEC
 
 
+def _cached_camera_matches(server: RemoteServer, cam: dict, key: str) -> bool:
+    """Match a cached camera row by stream key.
+
+    ML-mode rows carry a positional ``id`` (1, 2, 3 … from /live/status), so ``cam-{id}``
+    is only a valid alias for django-mode rows, whose id is the remote Camera pk.
+    """
+    cam_key = (cam.get("ml_stream_key") or cam.get("code") or "").strip()
+    if key == cam_key:
+        return True
+    if server.is_ml_mode():
+        return False
+    cam_id = cam.get("id")
+    return bool(cam_id) and key == f"cam-{cam_id}"
+
+
 def _resolve_stream_rtsp_url(server: RemoteServer, stream_key: str) -> str:
     """Resolve RTSP URL for ops stream proxy / go2rtc (server-side only — not sent to browser)."""
     key = (stream_key or "").strip()
     if not key:
         return ""
     for cam in server.cached_cameras or []:
-        if not isinstance(cam, dict):
-            continue
-        cam_key = (cam.get("ml_stream_key") or cam.get("code") or "").strip()
-        cam_id = cam.get("id")
-        alt = f"cam-{cam_id}" if cam_id else ""
-        if key not in (cam_key, alt):
+        if not isinstance(cam, dict) or not _cached_camera_matches(server, cam, key):
             continue
         url = (cam.get("rtsp_url") or cam.get("stream_url") or "").strip()
         if url:
             return url
-    # Hub DB knows NVR credentials for local cameras (and often for distributed cams).
+    # Hub DB knows NVR credentials for cameras routed to this server (cam-{pk} keys),
+    # and for every camera when the server is this hub itself.
+    match = _CAM_KEY_RE.match(key)
+    if not match:
+        return ""
     try:
         from cameras.models import Camera
 
-        cam_id = int(key[4:]) if key.startswith("cam-") and key[4:].isdigit() else None
-        if cam_id:
-            camera = (
-                Camera.objects.filter(pk=cam_id, is_active=True)
-                .select_related("nvr", "nvr__site")
-                .first()
-            )
-            if camera:
-                return (camera.effective_stream_url() or "").strip()
-    except Exception:
-        pass
+        camera = (
+            Camera.objects.filter(pk=int(match.group(1)), is_active=True)
+            .select_related("nvr", "nvr__site")
+            .first()
+        )
+        if camera and (camera.ml_server_id == server.pk or _is_local_hub_server(server)):
+            return (camera.effective_stream_url() or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not resolve RTSP URL for %s on server %s", key, server.pk)
     return ""
 
 
 def _cached_camera_purposes(server: RemoteServer, stream_key: str) -> list[str]:
     for cam in server.cached_cameras or []:
-        if not isinstance(cam, dict):
-            continue
-        cam_key = (cam.get("ml_stream_key") or cam.get("code") or "").strip()
-        cam_id = cam.get("id")
-        if stream_key not in (cam_key, f"cam-{cam_id}" if cam_id else ""):
+        if not isinstance(cam, dict) or not _cached_camera_matches(server, cam, stream_key):
             continue
         purposes = cam.get("purposes")
         if isinstance(purposes, list):
@@ -165,43 +220,75 @@ def _ml_stream_upstream_candidates(
     django_base: str,
     stream_key: str,
     kind: str,
-    rtsp_url: str = "",
 ) -> list[str]:
+    """Upstream URLs for one camera. The RTSP URL (it holds NVR credentials) is never put in
+    a query string: a camera missing from the ML registry is re-registered with a POST body
+    (``_reregister_ml_camera``) and the stream is retried."""
+    key = quote((stream_key or "").strip(), safe="")
     kind_l = (kind or "live").strip().lower()
     if kind_l in ("jpeg", "snapshot"):
-        path = f"/live/cam/{stream_key}/jpeg"
+        path = f"/live/cam/{key}/jpeg"
     elif kind_l in ("jpeg_raw", "raw_jpeg"):
-        path = f"/live/cam/{stream_key}/jpeg/raw"
+        path = f"/live/cam/{key}/jpeg/raw"
     elif kind_l == "raw":
-        path = f"/live/cam/{stream_key}/mjpeg/raw"
+        path = f"/live/cam/{key}/mjpeg/raw"
     else:
-        path = f"/live/cam/{stream_key}/mjpeg"
-    params: dict[str, str] = {}
-    if (rtsp_url or "").strip():
-        params["rtsp_url"] = rtsp_url.strip()
-    qs = f"?{urlencode(params)}" if params else ""
-    urls = [urljoin(ml_base.rstrip("/") + "/", path.lstrip("/")) + qs]
+        path = f"/live/cam/{key}/mjpeg"
+    urls = [urljoin(ml_base.rstrip("/") + "/", path.lstrip("/"))]
     if django_base and django_base.rstrip("/") != ml_base.rstrip("/"):
-        urls.append(urljoin(django_base.rstrip("/") + "/", f"ml{path}") + qs)
+        urls.append(urljoin(django_base.rstrip("/") + "/", f"ml{path}"))
     return urls
 
 
-# Backward-compatible alias
-def _ml_mjpeg_upstream_candidates(
-    *,
-    ml_base: str,
-    django_base: str,
-    stream_key: str,
-    kind: str,
-    rtsp_url: str = "",
-) -> list[str]:
-    return _ml_stream_upstream_candidates(
-        ml_base=ml_base,
-        django_base=django_base,
-        stream_key=stream_key,
-        kind=kind,
-        rtsp_url=rtsp_url,
-    )
+_RTSP_IN_TEXT_RE = re.compile(r"rtsps?://[^\s'\"]+", re.IGNORECASE)
+
+
+def _redact(text: str) -> str:
+    """Strip RTSP URLs (NVR user/password) from error text shown to users or logged."""
+    return _RTSP_IN_TEXT_RE.sub("rtsp://[redacted]", text or "")
+
+
+# ---------------------------------------------------------------- quick-connect preview targets
+_EPHEMERAL_TARGET_TTL_SEC = 2 * 3600
+
+
+def _seal_ephemeral_target(base: str, ml_base: str) -> str:
+    """Signed {base, ml} so the preview proxy only opens URLs QuickConnect itself produced."""
+    payload = json.dumps({"b": base or "", "m": ml_base or ""}, separators=(",", ":"))
+    return _remote_token_fernet().encrypt(payload.encode()).decode()
+
+
+def _open_ephemeral_target(sealed: str) -> tuple[str, str] | None:
+    from cryptography.fernet import InvalidToken
+
+    sealed = (sealed or "").strip()
+    if not sealed:
+        return None
+    try:
+        raw = _remote_token_fernet().decrypt(sealed.encode(), ttl=_EPHEMERAL_TARGET_TTL_SEC).decode()
+        data = json.loads(raw)
+    except (InvalidToken, ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("b") or ""), str(data.get("m") or "")
+
+
+def _norm_url(url: str) -> str:
+    return (url or "").strip().rstrip("/").lower()
+
+
+def _registered_server_urls() -> set[str]:
+    """Base / ML URLs of every saved RemoteServer (the known ML nodes and remote hubs)."""
+    urls: set[str] = set()
+    for server in RemoteServer.objects.all():
+        for url in (server.normalized_base_url(), server.resolved_ml_base_url(), server.ml_base_url):
+            if (url or "").strip():
+                urls.add(_norm_url(url))
+                urls.add(_norm_url(ensure_ml_url(url)))
+                urls.add(_norm_url(ensure_http_url(url)))
+    urls.discard("")
+    return urls
 
 
 def _remote_token_fernet():
@@ -256,10 +343,11 @@ def _attach_proxy_urls(server_id: int | None, cameras: list[dict]) -> list[dict]
     out = []
     for cam in cameras:
         row = _browser_camera_row(cam)
-        key = (row.get("ml_stream_key") or "").strip()
+        raw_key = (row.get("ml_stream_key") or "").strip()
+        key = quote(raw_key, safe="")
         cam_id = row.get("id")
         if server_id is not None:
-            if key:
+            if raw_key:
                 row["ml_live_stream_url"] = (
                     f"/api/ops/servers/{server_id}/mjpeg/?stream_key={key}&kind=live"
                 )
@@ -301,6 +389,17 @@ class RemoteServerViewSet(viewsets.ModelViewSet):
     serializer_class = RemoteServerSerializer
     permission_classes = [IsOpsViewer]
 
+    def get_queryset(self):
+        from django.db.models import Count, Q
+
+        qs = (
+            RemoteServer.objects.select_related("site", "created_by")
+            .annotate(assigned_count=Count("assigned_cameras", filter=Q(assigned_cameras__is_active=True)))
+            .order_by("name")
+        )
+        # Collector officers / location admins outside HQ see only their location's servers.
+        return apply_remote_server_scope(qs, self.request.user)
+
     def get_permissions(self):
         if self.action in (
             "create",
@@ -314,16 +413,7 @@ class RemoteServerViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         ensure_default_remote_server(request.user)
-        # Keep default server token in sync with current viewer login (django mode)
-        default = (
-            RemoteServer.objects.filter(name="Local Server").first()
-            or RemoteServer.objects.filter(name="Local This Server").first()
-        )
-        if default:
-            tok = token_for_user(request.user)
-            if tok and default.auth_token != tok:
-                default.auth_token = tok
-                default.save(update_fields=["auth_token", "updated_at"])
+        # The saved token of "Local Server" is no longer replaced with each viewer's token.
         return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
@@ -347,16 +437,11 @@ class RemoteServerViewSet(viewsets.ModelViewSet):
         mark_server_health(server, ok=bool(result.get("ok")), error=result.get("error", ""))
 
     def _effective_token(self, server: RemoteServer) -> str:
+        """Saved token only (a loopback "this hub" entry may use the viewer's token,
+        which is not stored). The viewer's token is never sent to a remote server."""
         if server.is_ml_mode():
             return ""
-        stored = (server.auth_token or "").strip()
-        if stored and stored not in ("pending", "ml-only"):
-            return stored
-        tok = token_for_user(self.request.user)
-        if tok:
-            server.auth_token = tok
-            server.save(update_fields=["auth_token", "updated_at"])
-        return tok
+        return server_token_for(server, self.request.user)
 
     @action(detail=True, methods=["post"], url_path="test")
     def test_connection(self, request, pk=None):
@@ -466,29 +551,47 @@ class RemoteServerViewSet(viewsets.ModelViewSet):
     def remove_camera(self, request, pk=None):
         """Remove a camera from this server (remote delete + hub cache prune)."""
         server = self.get_object()
-        stream_key = _resolve_stream_key(
-            (request.data.get("stream_key") or request.data.get("ml_stream_key") or ""),
-            request.data.get("camera_id"),
-            (request.data.get("code") or ""),
-        )
+        explicit_key = (request.data.get("stream_key") or request.data.get("ml_stream_key") or "").strip()
         camera_id = _parse_camera_id(request.data.get("camera_id"))
         code = (request.data.get("code") or "").strip()
-        if not stream_key and camera_id is None and not code:
+        if not explicit_key and camera_id is None and not code:
             return Response(
                 {"detail": "stream_key, camera_id, or code is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if camera_id is None and stream_key.startswith("cam-"):
-            camera_id = _parse_camera_id(stream_key[4:])
+
+        if server.is_ml_mode():
+            # ML /live/status ids are list positions, not Camera pks: resolve the real
+            # stream key from the cached row and never use the id afterwards.
+            stream_key = explicit_key
+            if not stream_key and camera_id is not None:
+                for cam in server.cached_cameras or []:
+                    if isinstance(cam, dict) and cam.get("id") == camera_id:
+                        stream_key = (cam.get("ml_stream_key") or cam.get("code") or "").strip()
+                        break
+            if not stream_key and code:
+                stream_key = code
+            if not stream_key:
+                return Response(
+                    {"detail": "Could not resolve the camera's stream key on this ML server."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            camera_id = None  # positional — never a Camera pk
+        else:
+            stream_key = _resolve_stream_key(explicit_key, camera_id, code)
+            if camera_id is None and _CAM_KEY_RE.match(stream_key):
+                camera_id = _parse_camera_id(stream_key[4:])
 
         removed_remote = False
         warnings: list[str] = []
 
         # Local hub — delete from Django registry (signals unregister ML/journey).
-        if _is_local_hub_server(server) and camera_id is not None:
+        # Only a "cam-{pk}" stream key identifies a local Camera row.
+        key_match = _CAM_KEY_RE.match(stream_key or "")
+        if _is_local_hub_server(server) and key_match:
             from cameras.models import Camera
 
-            local = Camera.objects.filter(pk=camera_id).first()
+            local = Camera.objects.filter(pk=int(key_match.group(1))).first()
             if local:
                 local.delete()
                 removed_remote = True
@@ -520,6 +623,7 @@ class RemoteServerViewSet(viewsets.ModelViewSet):
             stream_key=stream_key,
             camera_id=camera_id,
             code=code,
+            match_ids=not server.is_ml_mode(),
         )
         return Response(
             {
@@ -574,10 +678,36 @@ class CityControlGridAPIView(APIView):
 
     permission_classes = [IsOpsViewer]
 
+    CACHE_TTL_SEC = 15
+
     def get(self, request):
+        from django.core.cache import cache
+
+        from .city_control import build_kpis
+
         ensure_default_remote_server(request.user)
-        board = build_city_control_board(request_user=request.user)
-        return Response(board)
+        key = "ops-city-control-grid:v1"
+        board = cache.get(key)
+        if board is None:
+            board = build_city_control_board(request_user=request.user)
+            cache.set(key, board, self.CACHE_TTL_SEC)  # many viewers, one build every 15s
+        allowed = _viewer_scope_codes(request.user)
+        if allowed is None:
+            return Response(board)
+        # Non-HQ officers only see their own location.
+        cities = [c for c in board.get("cities") or [] if _code_in_scope(request.user, c.get("location_code") or "")]
+        names = {c.get("city") for c in cities}
+        server_ids = {sid for c in cities for sid in (c.get("server_ids") or [])}
+        return Response(
+            {
+                **board,
+                "cities": cities,
+                "kpis": build_kpis(cities),
+                "alerts": [a for a in board.get("alerts") or [] if a.get("city") in names],
+                "city_count": len(cities),
+                "server_count": len(server_ids),
+            }
+        )
 
 
 class CityControlSectionAPIView(APIView):
@@ -591,7 +721,14 @@ class CityControlSectionAPIView(APIView):
     def get(self, request, city_id: str, section: str):
         from django.core.cache import cache
 
-        from .city_sections import UnknownCity, build_city_section
+        from .city_sections import UnknownCity, build_city_section, resolve_city
+
+        try:
+            code, _name, _is_hq = resolve_city(city_id)
+        except UnknownCity:
+            return Response({"detail": "City not found."}, status=404)
+        if not _code_in_scope(request.user, code):
+            return Response({"detail": "You can only view your own location."}, status=403)
 
         params = request.query_params
         import hashlib
@@ -611,6 +748,23 @@ class CityControlSectionAPIView(APIView):
             return Response({"detail": "Unknown section."}, status=404)
 
 
+def _analytics_scope(request) -> str:
+    """Requested location, forced to the viewer's own location for non-HQ officers."""
+    from city_sync.identity import location_code as site_code
+
+    requested = (request.query_params.get("location") or "ALL").strip().upper() or "ALL"
+    scope = ops_camera_location_scope(request.user)
+    if not scope:
+        return requested
+    if requested != "ALL" and _code_in_scope(request.user, requested):
+        return requested
+    from detentions.access import location_codes_for
+
+    codes = location_codes_for(scope)
+    here = site_code()
+    return here if here in codes else scope.strip().upper()
+
+
 class AnalyticsDashboardAPIView(APIView):
     """GET /ops/analytics/?location=ALL|CODE&from=YYYY-MM-DD&to=YYYY-MM-DD - Analytics Dashboard data."""
 
@@ -622,7 +776,7 @@ class AnalyticsDashboardAPIView(APIView):
         from .analytics import build_dashboard
 
         p = request.query_params
-        scope, raw_from, raw_to = p.get("location") or "ALL", p.get("from"), p.get("to")
+        scope, raw_from, raw_to = _analytics_scope(request), p.get("from"), p.get("to")
         key = f"ops-analytics:{scope}:{raw_from}:{raw_to}"
         data = cache.get(key)
         if data is None:
@@ -650,7 +804,7 @@ class AnalyticsEventLogAPIView(APIView):
             page = 1
         return Response(
             event_log(
-                scope=p.get("location") or "ALL",
+                scope=_analytics_scope(request),
                 raw_from=p.get("from"),
                 raw_to=p.get("to"),
                 q=p.get("q") or "",
@@ -678,6 +832,8 @@ class CityCamerasAPIView(APIView):
         site = SyncSite.objects.filter(location_code=code.upper()).first()
         if site is None:
             return Response({"detail": "Location not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not _code_in_scope(request.user, site.location_code):
+            return Response({"detail": "You can only view your own location."}, status=status.HTTP_403_FORBIDDEN)
         issued = issue_pass(site.location_code, user=getattr(request.user, "username", "") or "")
         if issued is None:
             return Response(
@@ -721,7 +877,7 @@ class AllCitiesStreamsAPIView(APIView):
     def get(self, request):
         ensure_default_remote_server(request.user)
         refresh = str(request.query_params.get("refresh", "")).lower() in ("1", "true", "yes")
-        servers = list(RemoteServer.objects.filter(is_active=True).order_by("name"))
+        servers = list(_scoped_servers(request.user).filter(is_active=True).order_by("name"))
         servers_out: list[dict] = []
         cameras_out: list[dict] = []
 
@@ -731,9 +887,9 @@ class AllCitiesStreamsAPIView(APIView):
                     server.resolved_ml_base_url(),
                     server_name=server.name,
                 )
-            token = (server.auth_token or "").strip()
-            if not token or token in ("pending", "ml-only"):
-                token = token_for_user(request.user) or ""
+            token = server_token_for(server, request.user)
+            if not token:
+                return {"ok": False, "error": "No auth token saved for this server.", "cameras": []}
             return fetch_remote_cameras(server.normalized_base_url(), token)
 
         live_results: dict = {}
@@ -1028,9 +1184,8 @@ class QuickConnectView(APIView):
                 server_id = server.pk
                 cameras = _attach_proxy_urls(server_id, cams.get("cameras") or [])
             else:
-                from urllib.parse import quote
-
                 cameras = []
+                target = quote(_seal_ephemeral_target(ml_base, ml_base), safe="")
                 for cam in cams.get("cameras") or []:
                     row = _browser_camera_row(cam)
                     key = (row.get("ml_stream_key") or "").strip()
@@ -1040,6 +1195,7 @@ class QuickConnectView(APIView):
                             f"&ml_base_url={quote(ml_base, safe='')}"
                             f"&stream_key={quote(key, safe='')}"
                             f"&kind=live"
+                            f"&target={target}"
                         )
                     cameras.append(row)
 
@@ -1061,7 +1217,13 @@ class QuickConnectView(APIView):
         token = resolve_remote_token(request, ser.validated_data.get("auth_token"))
         if not token:
             return Response(
-                {"ok": False, "error": "No auth token available for your account. Log in again."},
+                {
+                    "ok": False,
+                    "error": (
+                        "Enter an API token for the remote server (your own login token "
+                        "is no longer sent to other servers)."
+                    ),
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not base:
@@ -1081,7 +1243,7 @@ class QuickConnectView(APIView):
         if not cams.get("ok"):
             return Response(cams, status=status.HTTP_502_BAD_GATEWAY)
 
-        from urllib.parse import quote, urlparse, urlunparse
+        from urllib.parse import urlparse, urlunparse
 
         ml_root = ml_base
         if not ml_root:
@@ -1115,6 +1277,7 @@ class QuickConnectView(APIView):
             cameras = _attach_proxy_urls(server_id, cams.get("cameras") or [])
         else:
             cameras = []
+            target = quote(_seal_ephemeral_target(base, ml_root), safe="")
             for cam in cams.get("cameras") or []:
                 row = _browser_camera_row(cam)
                 key = (row.get("ml_stream_key") or "").strip()
@@ -1125,6 +1288,7 @@ class QuickConnectView(APIView):
                         f"&stream_key={quote(key, safe='')}"
                         f"&kind=live"
                         f"&remote_token={quote(_seal_remote_token(token), safe='')}"
+                        f"&target={target}"
                     )
                 cameras.append(row)
 
@@ -1150,11 +1314,11 @@ class RemoteMjpegProxyView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, pk):
-        if _ops_user_from_request(request) is None:
+        user = _ops_user_from_request(request)
+        if user is None:
             return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
-        try:
-            server = RemoteServer.objects.get(pk=pk, is_active=True)
-        except RemoteServer.DoesNotExist:
+        server = _scoped_servers(user).filter(pk=pk, is_active=True).first()
+        if server is None:
             return Response({"detail": "Server not found."}, status=status.HTTP_404_NOT_FOUND)
 
         stream_key = (request.query_params.get("stream_key") or "").strip()
@@ -1167,19 +1331,20 @@ class RemoteMjpegProxyView(APIView):
                 {"detail": "stream_key or camera_id is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return proxy_ml_stream(server, stream_key, kind)
+        return proxy_ml_stream(server, stream_key, kind, user=user)
 
 
-def proxy_ml_stream(server: RemoteServer, stream_key: str, kind: str = "live"):
-    """Stream MJPEG (or one JPEG for kind=jpeg) of one camera from a server's ML service."""
+def proxy_ml_stream(server: RemoteServer, stream_key: str, kind: str = "live", *, user=None):
+    """Stream MJPEG (or one JPEG for kind=jpeg) of one camera from a server's ML service.
+
+    MJPEG streams count against the global / per-user caps in ``stream_limits``.
+    """
     ml_base = server.resolved_ml_base_url()
-    rtsp_url = _resolve_stream_rtsp_url(server, stream_key)
     candidates = _ml_stream_upstream_candidates(
         ml_base=ml_base,
         django_base=server.normalized_base_url(),
         stream_key=stream_key,
         kind=kind,
-        rtsp_url=rtsp_url,
     )
     is_jpeg = kind in ("jpeg", "snapshot", "jpeg_raw", "raw_jpeg")
 
@@ -1192,7 +1357,7 @@ def proxy_ml_stream(server: RemoteServer, stream_key: str, kind: str = "live"):
                     url,
                     stream=not is_jpeg,
                     timeout=(8, 12) if is_jpeg else (10, 60),
-                    headers={"Accept": "image/jpeg,*/*" if is_jpeg else "*/*"},
+                    headers={"Accept": "image/jpeg,*/*" if is_jpeg else "*/*", **ml_auth_headers()},
                 )
             except requests.RequestException as exc:
                 last_err = str(exc)
@@ -1206,15 +1371,26 @@ def proxy_ml_stream(server: RemoteServer, stream_key: str, kind: str = "live"):
             resp.close()
         return None, last_err, not_registered
 
-    upstream, last_err, not_registered = open_upstream()
-    if upstream is None and not_registered and _reregister_ml_camera(
-        server, ml_base, stream_key, rtsp_url
-    ):
-        upstream, last_err, _ = open_upstream()
+    if not is_jpeg and not stream_limits.try_acquire(user):
+        return stream_limits.limit_response()
+    try:
+        upstream, last_err, not_registered = open_upstream()
+        if upstream is None and not_registered:
+            # Re-register with the RTSP URL in a POST body, then retry.
+            rtsp_url = _resolve_stream_rtsp_url(server, stream_key)
+            if _reregister_ml_camera(server, ml_base, stream_key, rtsp_url):
+                upstream, last_err, _ = open_upstream()
+    except Exception:
+        if not is_jpeg:
+            stream_limits.release(user)
+        raise
 
     if upstream is None:
+        if not is_jpeg:
+            stream_limits.release(user)
+        logger.warning("Ops stream %s on server %s failed: %s", stream_key, server.pk, _redact(last_err))
         return Response(
-            {"detail": f"Could not open remote stream: {last_err}"},
+            {"detail": f"Could not open remote stream: {_redact(last_err)}"},
             status=status.HTTP_502_BAD_GATEWAY,
         )
 
@@ -1240,7 +1416,7 @@ def proxy_ml_stream(server: RemoteServer, stream_key: str, kind: str = "live"):
         finally:
             upstream.close()
 
-    response = StreamingHttpResponse(generate(), content_type=content_type)
+    response = stream_limits.limited_streaming_response(generate(), user, content_type=content_type)
     response["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response["Pragma"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
@@ -1272,7 +1448,8 @@ class RemoteWebRtcProxyView(APIView):
         )
 
     def post(self, request, pk: int):
-        if _ops_user_from_request(request) is None:
+        user = _ops_user_from_request(request)
+        if user is None:
             return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
 
         from django.conf import settings
@@ -1285,9 +1462,8 @@ class RemoteWebRtcProxyView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        try:
-            server = RemoteServer.objects.get(pk=pk, is_active=True)
-        except RemoteServer.DoesNotExist:
+        server = _scoped_servers(user).filter(pk=pk, is_active=True).first()
+        if server is None:
             return Response({"detail": "Server not found."}, status=status.HTTP_404_NOT_FOUND)
 
         stream_key = (request.query_params.get("stream_key") or "").strip()
@@ -1313,14 +1489,9 @@ class RemoteWebRtcProxyView(APIView):
             )
 
         name = _go2rtc_stream_name(pk, stream_key)
-        # ensure_stream registers + warms; skip duplicate warm if already hot
+        # ensure_stream reuses a stream go2rtc already has, registers + warms otherwise,
+        # all within ~10 s (go2rtc.WARM_TOTAL_TIMEOUT_SEC).
         if not _go2rtc_ensure_stream(name, rtsp_url):
-            return Response(
-                {"detail": "Could not register stream with go2rtc. Is go2rtc running?"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-        # Ensure still warm (ensure_stream may have returned last-resort without warm)
-        if not _go2rtc_warm_stream(name):
             return Response(
                 {
                     "detail": (
@@ -1365,12 +1536,12 @@ class RemoteViewStreamView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, pk: int):
-        if _ops_user_from_request(request) is None:
+        user = _ops_user_from_request(request)
+        if user is None:
             return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
 
-        try:
-            server = RemoteServer.objects.get(pk=pk, is_active=True)
-        except RemoteServer.DoesNotExist:
+        server = _scoped_servers(user).filter(pk=pk, is_active=True).first()
+        if server is None:
             return Response({"detail": "Server not found."}, status=status.HTTP_404_NOT_FOUND)
 
         stream_key = (request.query_params.get("stream_key") or "").strip()
@@ -1411,7 +1582,9 @@ class RemoteViewStreamView(APIView):
             )
         except (TypeError, ValueError):
             max_width = 1920
-        max_width = max(0, max_width)
+        # 0 used to mean native (4K) — that costs a full-size ffmpeg encode per viewer.
+        cap = int(getattr(settings, "VIEW_STREAM_MAX_WIDTH_CAP", VIEW_STREAM_WIDTH_CAP))
+        max_width = cap if max_width <= 0 else min(max_width, cap)
         fps = int(getattr(settings, "VIEW_STREAM_FPS", 15))
         q = int(getattr(settings, "VIEW_STREAM_JPEG_QUALITY", 3))
 
@@ -1426,13 +1599,16 @@ class RemoteViewStreamView(APIView):
             response["Cache-Control"] = "no-cache, no-store, must-revalidate"
             return response
 
-        response = StreamingHttpResponse(
+        if not stream_limits.try_acquire(user):
+            return stream_limits.limit_response()
+        response = stream_limits.limited_streaming_response(
             generate_view_mjpeg_frames(
                 rtsp_url,
                 max_width=max_width,
                 fps=fps,
                 jpeg_quality=q,
             ),
+            user,
             content_type="multipart/x-mixed-replace; boundary=frame",
         )
         response["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -1442,14 +1618,24 @@ class RemoteViewStreamView(APIView):
 
 
 class EphemeralMjpegProxyView(APIView):
-    """Proxy MJPEG for quick-connect (base_url + stream_key in query). ADMIN only."""
+    """Quick-connect preview MJPEG (before a server is saved). IT Super Admin only.
+
+    Only proxies to URLs QuickConnect produced for this preview (signed ``target``) or to
+    the base / ML URL of a saved RemoteServer — never to an arbitrary URL (SSRF).
+    """
 
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def get(self, request):
-        if _ops_user_from_request(request) is None:
+        user = _ops_user_from_request(request)
+        if user is None:
             return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+        if not is_it_superadmin(user):
+            return Response(
+                {"detail": "Only IT Super Admin can open quick-connect previews."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         base = (request.query_params.get("base_url") or "").strip().rstrip("/")
         ml_base = (request.query_params.get("ml_base_url") or "").strip().rstrip("/") or base
         stream_key = (request.query_params.get("stream_key") or "").strip()
@@ -1469,15 +1655,28 @@ class EphemeralMjpegProxyView(APIView):
         if not (ml_base.startswith("http://") or ml_base.startswith("https://")):
             return Response({"detail": "Invalid ML URL."}, status=status.HTTP_400_BAD_REQUEST)
 
-        path = f"/live/cam/{stream_key}/mjpeg/raw" if kind == "raw" else f"/live/cam/{stream_key}/mjpeg"
+        wanted = {_norm_url(ml_base)} | ({_norm_url(base)} if base else set())
+        target = _open_ephemeral_target(request.query_params.get("target") or "")
+        signed = {_norm_url(u) for u in (target or ("", "")) if u}
+        if not (wanted <= signed or wanted <= _registered_server_urls()):
+            return Response(
+                {"detail": "This URL is not a registered server or a current quick-connect preview."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        key = quote(stream_key, safe="")
+        path = f"/live/cam/{key}/mjpeg/raw" if kind == "raw" else f"/live/cam/{key}/mjpeg"
         candidates = [
             urljoin(ml_base.rstrip("/") + "/", path.lstrip("/")),
         ]
         if base and base != ml_base:
             candidates.append(urljoin(base + "/", f"ml{path}"))
-        headers = {"Accept": "*/*"}
+        headers = {"Accept": "*/*", **ml_auth_headers()}
         if token:
             headers["Authorization"] = f"Token {token}"
+
+        if not stream_limits.try_acquire(user):
+            return stream_limits.limit_response()
 
         upstream = None
         last_err = ""
@@ -1494,8 +1693,9 @@ class EphemeralMjpegProxyView(APIView):
                 upstream = None
 
         if upstream is None:
+            stream_limits.release(user)
             return Response(
-                {"detail": f"Could not open remote stream: {last_err}"},
+                {"detail": f"Could not open remote stream: {_redact(last_err)}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -1511,7 +1711,7 @@ class EphemeralMjpegProxyView(APIView):
             finally:
                 upstream.close()
 
-        response = StreamingHttpResponse(generate(), content_type=content_type)
+        response = stream_limits.limited_streaming_response(generate(), user, content_type=content_type)
         response["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response["Pragma"] = "no-cache"
         response["X-Accel-Buffering"] = "no"

@@ -205,7 +205,7 @@ export default function SupportRequestList() {
   const tabs = requesterOnly ? REQUESTER_TABS : STAFF_TABS
   const activeKey = requesterOnly ? effectiveQueue : queue
 
-  const counts = (dashQ.data?.counts || {}) as Record<string, number>
+  const counts = useMemo(() => (dashQ.data?.counts || {}) as Record<string, number>, [dashQ.data?.counts])
   const allCount = useMemo(() => {
     // Approximate "all" as open + closed (cancelled still appears in unfiltered list)
     const open = Number(counts.total_open || 0)

@@ -1,8 +1,11 @@
 """
 Seed August attendance for SWH Ratta Kulachi warehouse staff.
 
+Demo data only: refuses to run unless DEBUG is on or --allow-production is given.
+
 Usage:
   python manage.py seed_august_attendance
+  python manage.py seed_august_attendance --roster C:/secure/roster.json
   python manage.py seed_august_attendance --year 2026
   python manage.py seed_august_attendance --dry-run
   python manage.py seed_august_attendance --clear
@@ -10,36 +13,24 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 from datetime import date, datetime, time, timedelta
 
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
 from users.models import Attendance, Staff
 
-# August attendance roster — Azhar Habib (0000 / 3710442631911) excluded per request.
+# Sample roster with obviously fake identifiers (real CNICs / personal numbers must never
+# live in source control). For a real roster pass --roster path/to/roster.json, a JSON list
+# of {"personal_number", "full_name", "cnic"} kept outside the repository.
 AUGUST_STAFF = [
-    {"personal_number": "000000", "full_name": "Sher Alam", "cnic": "1210190857903"},
-    {"personal_number": "50794711", "full_name": "Ubaid Griffen", "cnic": "1110107089627"},
-    {"personal_number": "50714824", "full_name": "Muhammad Masood", "cnic": "1120188640445"},
-    {"personal_number": "50710836", "full_name": "Nafid Ullah Khan", "cnic": "1110118205557"},
-    {"personal_number": "50794708", "full_name": "Niaz Ali Khan", "cnic": "1110157695791"},
-    {"personal_number": "50402298", "full_name": "Muhammad Abid", "cnic": "6110178044963"},
-    {"personal_number": "50050201", "full_name": "Aftab Khan", "cnic": "1310164871059"},
-    {"personal_number": "50794714", "full_name": "Muhammad Khalil Ahmad", "cnic": "1210179221323"},
-    {"personal_number": "50794689", "full_name": "Shalbeem Naseer", "cnic": "1210118212603"},
-    {"personal_number": "50714850", "full_name": "Irshad Ahmad", "cnic": "1120203601207"},
-    {"personal_number": "50794703", "full_name": "Shahab Alam", "cnic": "1420179920923"},
-    {"personal_number": "00090459", "full_name": "Sardar Ali Khan", "cnic": "1420215099723"},
-    {"personal_number": "50794694", "full_name": "Mohsin Farid", "cnic": "1430152553730"},
-    {"personal_number": "50605519", "full_name": "Shafi Ullah", "cnic": "1420190981989"},
-    {"personal_number": "50794680", "full_name": "Rahmat Ali Khan", "cnic": "1110199606025"},
-    {"personal_number": "50710465", "full_name": "Sadiq Amin", "cnic": "6110121323727"},
-    {"personal_number": "50703963", "full_name": "Syed Ishraq Ali Shah", "cnic": "1730168075003"},
-    {"personal_number": "50671028", "full_name": "Abdul Hai", "cnic": "3230462160693"},
-    {"personal_number": "50794749", "full_name": "Jawad Ullah", "cnic": "1110103590439"},
+    {"personal_number": f"TEST{n:04d}", "full_name": f"Sample Employee {n:02d}", "cnic": f"00000-0000000-{n % 10}"}
+    for n in range(1, 6)
 ]
 
 MONTH = 8
@@ -102,11 +93,17 @@ def _august_weekdays(year: int) -> list[date]:
 
 
 class Command(BaseCommand):
-    help = "Seed August attendance for warehouse staff (excludes Azhar Habib)."
+    help = "Seed randomized August attendance (demo data) for a staff roster."
 
     def add_arguments(self, parser):
         parser.add_argument("--year", type=int, default=2026, help="Year for August seed (default: 2026)")
         parser.add_argument("--dry-run", action="store_true", help="Preview without writing to DB")
+        parser.add_argument("--roster", type=str, default="", help="JSON roster file (kept outside git)")
+        parser.add_argument(
+            "--allow-production",
+            action="store_true",
+            help="Run even though DEBUG is off (writes fake attendance into a live database)",
+        )
         parser.add_argument(
             "--clear",
             action="store_true",
@@ -120,6 +117,18 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        if not settings.DEBUG and not options["allow_production"]:
+            raise CommandError(
+                "This writes fake attendance. Refusing with DEBUG off; pass --allow-production if you really mean it."
+            )
+        roster = AUGUST_STAFF
+        if options["roster"]:
+            path = Path(options["roster"])
+            if not path.is_file():
+                raise CommandError(f"Roster file not found: {path}")
+            roster = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(roster, list):
+                raise CommandError("Roster must be a JSON list")
         year = int(options["year"])
         dry_run = bool(options["dry_run"])
         clear = bool(options["clear"])
@@ -130,7 +139,7 @@ class Command(BaseCommand):
         resolved: list[tuple[Staff, dict]] = []
         missing: list[str] = []
 
-        for row in AUGUST_STAFF:
+        for row in roster:
             staff = _resolve_staff(row)
             if staff:
                 resolved.append((staff, row))

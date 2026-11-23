@@ -38,10 +38,17 @@ export function EventLog({ query, refreshKey }: { query: AnalyticsQuery; refresh
     return () => window.clearTimeout(t)
   }, [search])
 
-  useEffect(() => setPage(1), [q, severities, types, query.location, query.from, query.to])
+  // Back to page 1 whenever a filter changes (adjusted during render, not in an effect).
+  const filterDeps = [q, severities, types, query.location, query.from, query.to] as const
+  const [prevFilterDeps, setPrevFilterDeps] = useState(filterDeps)
+  if (filterDeps.some((d, i) => !Object.is(d, prevFilterDeps[i]))) {
+    setPrevFilterDeps(filterDeps)
+    setPage(1)
+  }
 
   useEffect(() => {
     const ac = new AbortController()
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- show the spinner for each new request; data arrives async
     setLoading(true)
     fetchEventLog({ ...query, q, severities, types, page }, ac.signal)
       .then((res) => {

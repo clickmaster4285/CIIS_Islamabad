@@ -1,15 +1,13 @@
+import ipaddress
 import logging
+import threading
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 
 from .models import UserActivityLog
 
 logger = logging.getLogger(__name__)
-
-try:
-    import requests
-except ImportError:
-    requests = None
 
 try:
     from user_agents import parse as parse_user_agent
@@ -32,10 +30,14 @@ SKIP_LOG_PATHS = (
     "/api/sync/",
 )
 
+# GET / HEAD / OPTIONS are polls and list loads (every open tab refetches every few
+# seconds), which filled the table with millions of rows. Page views still reach the
+# log through the frontend's /api/activity-logs/report/ call; login and logout are
+# logged explicitly by their views.
+LOGGED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
 
 def _valid_ip(raw) -> str | None:
-    import ipaddress
-
     value = (raw or "").strip()
     if not value:
         return None
@@ -49,10 +51,10 @@ def _valid_ip(raw) -> str | None:
 
 
 def get_ip(request):
-    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-    if x_forwarded_for:
-        return _valid_ip(x_forwarded_for.split(",")[0])
-    return _valid_ip(request.META.get("REMOTE_ADDR"))
+    """Client IP, trusting proxy headers only from nginx on this machine (same rule as login lockout)."""
+    from users.login_guard import client_ip
+
+    return _valid_ip(client_ip(request))
 
 
 def get_device_info(request):
@@ -66,19 +68,45 @@ def get_device_info(request):
     return device, os_str, browser
 
 
+_geoip_lock = threading.Lock()
+_geoip_reader = None
+_geoip_failed = False
+
+
+def _local_geoip():
+    """A local MaxMind database, only when GEOIP_PATH is configured. Never a network call."""
+    global _geoip_reader, _geoip_failed
+    if _geoip_failed or not getattr(settings, "GEOIP_PATH", None):
+        return None
+    with _geoip_lock:
+        if _geoip_reader is None and not _geoip_failed:
+            try:
+                from django.contrib.gis.geoip2 import GeoIP2
+
+                _geoip_reader = GeoIP2()
+            except Exception:
+                _geoip_failed = True
+                logger.warning("GEOIP_PATH is set but the GeoIP2 database could not be opened", exc_info=True)
+    return _geoip_reader
+
+
 def get_geo(ip):
-    if not ip or ip in ("127.0.0.1", "127.0.1", "localhost"):
-        return "Pakistan", "Local"
-    if requests is None:
+    if not ip:
         return None, None
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}", timeout=2)
-        if r.ok:
-            j = r.json()
-            return j.get("country"), j.get("city")
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None, None
+    if addr.is_loopback or addr.is_private:
+        return "Pakistan", "Local"
+    reader = _local_geoip()
+    if reader is None:
+        return None, None
+    try:
+        info = reader.city(ip)
+        return info.get("country_name"), info.get("city")
     except Exception:
-        pass
-    return None, None
+        return None, None
 
 
 def create_activity_log(user, request, action, source="web"):
@@ -105,6 +133,8 @@ class ActivityLogMiddleware:
     def __call__(self, request):
         response = self.get_response(request)
         try:
+            if request.method not in LOGGED_METHODS:
+                return response
             user = getattr(request, "user", None)
             # Sync calls authenticate as SyncPrincipal, not a User. Logging that
             # raised ValueError and turned a successful HQ response into HTTP 500.

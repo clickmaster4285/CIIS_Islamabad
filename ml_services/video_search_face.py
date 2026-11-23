@@ -94,15 +94,26 @@ def _detect_faces(image: np.ndarray):
     return faces
 
 
+def _scale_face_to_original(face, scale: float):
+    """YuNet row (x, y, w, h, 5 landmarks, score) from the upscaled image → original pixels."""
+    out = np.array(face, dtype=np.float32, copy=True)
+    if scale and abs(scale - 1.0) > 1e-6:
+        out[:14] = out[:14] / float(scale)  # box + landmarks; index 14 is the score
+    return out
+
+
 def largest_face(image: np.ndarray):
+    """Largest face in ``image`` with coordinates in ``image``'s own (original) pixels."""
     if image is None or image.size == 0:
         return None
     with _LOCK:
-        faces = _detect_faces(_upscale_if_small(image))
+        work = _upscale_if_small(image)
+        scale = work.shape[0] / float(max(image.shape[0], 1))
+        faces = _detect_faces(work)
         if faces is None:
             return None
         areas = [float(f[2] * f[3]) for f in faces]
-        return faces[int(np.argmax(areas))]
+        return _scale_face_to_original(faces[int(np.argmax(areas))], scale)
 
 
 def face_crop(image: np.ndarray, face) -> np.ndarray | None:

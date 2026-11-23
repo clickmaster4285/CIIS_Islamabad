@@ -8,6 +8,8 @@ checkpoint loads with strict=True. In eval mode the model returns the 512-d feat
 
 from __future__ import annotations
 
+import warnings
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -134,11 +136,31 @@ class OSNet(nn.Module):
         return self.classifier(v)
 
 
-def load_osnet_x1_0(weights_path: str, device: str = "cpu") -> OSNet:
-    """Build OSNet x1_0 and load a deep-person-reid checkpoint (strict: every tensor must match)."""
-    state = torch.load(weights_path, map_location="cpu", weights_only=False)
+def load_checkpoint_state(weights_path: str) -> dict:
+    """Load a checkpoint as plain tensors (``weights_only=True``: no arbitrary pickle code).
+
+    Old deep-person-reid checkpoints that also pickle non-tensor objects cannot load that way;
+    only then fall back to a full unpickle, with a loud warning (trust only your own weights).
+    """
+    try:
+        state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    except Exception as exc:  # UnpicklingError / RuntimeError depending on torch version
+        warnings.warn(
+            f"[reid] {weights_path} is not a plain tensor checkpoint ({exc}); "
+            "loading with weights_only=False — only use trusted weight files",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        print(f"[reid] WARNING: {weights_path} needs weights_only=False to load (trusted file only)")
+        state = torch.load(weights_path, map_location="cpu", weights_only=False)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
+    return state
+
+
+def load_osnet_x1_0(weights_path: str, device: str = "cpu") -> OSNet:
+    """Build OSNet x1_0 and load a deep-person-reid checkpoint (strict: every tensor must match)."""
+    state = load_checkpoint_state(weights_path)
     state = {k.removeprefix("module."): v for k, v in state.items()}
     num_classes = int(state["classifier.weight"].shape[0]) if "classifier.weight" in state else 751
     model = OSNet(num_classes=num_classes)

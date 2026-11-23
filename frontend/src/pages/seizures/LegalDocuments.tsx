@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { FileText, Upload } from "lucide-react"
+import { Upload } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -48,14 +48,10 @@ function saveRows(rows: DocRow[]) {
 const DOC_TYPES = ["Court Order", "Evidence", "FIR", "Memo", "Other"]
 
 export default function LegalDocumentsPage() {
-  const [rows, setRows] = useState<DocRow[]>([])
+  const [rows, setRows] = useState<DocRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: "", caseId: "", type: "Court Order" })
   const [search, setSearch] = useState("")
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

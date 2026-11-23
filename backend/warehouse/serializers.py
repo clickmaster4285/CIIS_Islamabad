@@ -145,8 +145,8 @@ class MemoDistributionSerializer(serializers.ModelSerializer):
         return self._absolute_media_url(obj.video.url)
 
     def get_camera_video_entries(self, obj: MemoDistribution) -> list[dict]:
-        repair = bool(self.context.get("repair_recordings"))
-        items = collect_session_recording_entries(obj, repair=repair)
+        # Read-only: never remux/re-encode recordings while serializing a GET response.
+        items = collect_session_recording_entries(obj, repair=False)
         entries: list[dict] = []
         for item in items:
             path = str(item.get("path") or "").strip()

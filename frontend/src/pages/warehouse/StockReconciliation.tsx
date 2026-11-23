@@ -66,13 +66,9 @@ const JOB_TYPES = ["Cycle Count", "Full Count", "Spot Check"]
 const STATUSES = ["Pending", "In Progress", "Completed", "Variance"]
 
 export default function StockReconciliationPage() {
-  const [rows, setRows] = useState<JobRow[]>([])
+  const [rows, setRows] = useState<JobRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ id: "", wh: "Peshawar", zone: "Z-A01", type: "Cycle Count", status: "Pending", variance: "—" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

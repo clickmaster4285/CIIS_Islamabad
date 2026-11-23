@@ -46,21 +46,41 @@ def _allocate_code_lock() -> None:
 
 
 def _max_code_seq() -> int:
-    """Highest numeric sequence across PJ-##### and legacy P/V/U codes."""
-    max_seq = 0
+    """Highest numeric sequence across PJ-##### and legacy P/V/U codes (one aggregate query, no row scan)."""
+    from django.db.models import BigIntegerField, Max
+    from django.db.models.functions import Cast, Substr
+
     # This server's own people; HQ copies of city people carry "<CITY>:" codes.
-    for code in JourneyPerson.all_objects.filter(local_rows_q()).values_list("code", flat=True):
+    own = JourneyPerson.all_objects.filter(local_rows_q())
+    pj = (
+        own.filter(code__regex=r"^[Pp][Jj]-[0-9]{1,18}$")
+        .annotate(seq=Cast(Substr("code", 4), BigIntegerField()))
+        .aggregate(m=Max("seq"))["m"]
+    )
+    legacy = (
+        own.filter(code__regex=r"^[PpVvUu][0-9]{1,18}$")
+        .annotate(seq=Cast(Substr("code", 2), BigIntegerField()))
+        .aggregate(m=Max("seq"))["m"]
+    )
+    return max(int(pj or 0), int(legacy or 0))
+
+
+def _max_code_seq_full_scan() -> int:
+    """Slow fallback for odd legacy codes (only used after a collision)."""
+    max_seq = 0
+    for code in JourneyPerson.all_objects.filter(local_rows_q()).values_list("code", flat=True).iterator():
         n = parse_person_code_seq(code)
         if n is not None:
             max_seq = max(max_seq, n)
     return max_seq
 
 
-def _next_code(person_type: str | None = None) -> str:
+def _next_code(person_type: str | None = None, *, full_scan: bool = False) -> str:
     """Allocate the next global person ID PJ-##### (person_type is unused metadata)."""
     _ = person_type  # kept for call-site compatibility
     _allocate_code_lock()
-    return format_person_code(_max_code_seq() + 1)
+    seq = _max_code_seq_full_scan() if full_scan else _max_code_seq()
+    return format_person_code(seq + 1)
 
 
 def ensure_camera_track(
@@ -99,6 +119,7 @@ def ensure_camera_track(
             track_id=track_id,
             status=TrackStatus.ACTIVE,
             journey_person=person,
+            journey_person__is_deleted=False,
         )
         .order_by("-started_at")
         .first()
@@ -112,6 +133,7 @@ def ensure_camera_track(
                 track_id=track_id,
                 status=TrackStatus.ACTIVE,
                 journey_person__status=PersonStatus.ACTIVE,
+                journey_person__is_deleted=False,
             )
             .select_related("journey_person")
             .order_by("-started_at")
@@ -217,8 +239,10 @@ def create_journey_person(*, person_type: str, max_attempts: int = 12, **fields)
     last_exc: IntegrityError | None = None
     for attempt in range(max_attempts):
         try:
-            create_fields = {**fields, "code": _next_code(person_type)}
-            return JourneyPerson.objects.create(person_type=person_type, **create_fields)
+            # Own savepoint per attempt: a failed INSERT must not poison the caller's transaction.
+            with transaction.atomic():
+                create_fields = {**fields, "code": _next_code(person_type, full_scan=attempt >= 2)}
+                return JourneyPerson.objects.create(person_type=person_type, **create_fields)
         except IntegrityError as exc:
             last_exc = exc
             err = str(exc).lower()
@@ -243,7 +267,6 @@ def _camera_zone(camera: Camera | None) -> str:
     return (camera.zone or camera.name or "").strip()
 
 
-@transaction.atomic
 def _visit_last_seen(event: JourneyEvent):
     from django.utils.dateparse import parse_datetime
 
@@ -311,7 +334,7 @@ def _extend_visit(visit: JourneyEvent, *, now, track, track_id, confidence) -> N
         "duration_seconds": duration,
         "sightings": int(meta.get("sightings") or 1) + 1,
     }
-    if track_id and track_id not in (meta.get("track_ids") or []):
+    if track_id is not None and track_id not in (meta.get("track_ids") or []):
         patch["track_ids"] = [*(meta.get("track_ids") or []), track_id][-20:]
     retry_snapshot = not visit.snapshot_path and not meta.get("snapshot_retried") and duration >= 10
     if retry_snapshot:
@@ -334,6 +357,7 @@ def _extend_visit(visit: JourneyEvent, *, now, track, track_id, confidence) -> N
         schedule_journey_snapshot(visit.pk, None, visit.camera_id)
 
 
+@transaction.atomic
 def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
     """
     Process one tracked person observation from the ML journey pipeline.
@@ -349,7 +373,11 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
     """
     camera_id = payload.get("camera_id")
     camera_key = str(payload.get("camera_key") or "").strip()
-    track_id = int(payload.get("track_id") or 0)
+    raw_track_id = payload.get("track_id")
+    try:
+        track_id = int(raw_track_id) if raw_track_id is not None and str(raw_track_id).strip() != "" else None
+    except (TypeError, ValueError):
+        track_id = None
     track_status = str(payload.get("track_status") or "active").strip().lower()
     bbox = payload.get("bbox") or []
     confidence = float(payload.get("confidence") or 0)
@@ -392,13 +420,14 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
     person: JourneyPerson | None = None
     created_person = False
 
-    if track_id:
+    if track_id is not None:
         active_track = (
             CameraTrack.objects.filter(
                 camera=camera,
                 track_id=track_id,
                 status=TrackStatus.ACTIVE,
                 journey_person__status=PersonStatus.ACTIVE,
+                journey_person__is_deleted=False,
             )
             .select_related("journey_person")
             .order_by("-started_at")
@@ -428,7 +457,7 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
             person_type_hint=None,
             staff_id=staff_id,
             visitor_id=visitor_id,
-            track_id=track_id or None,
+            track_id=track_id,
         )
         person = matched_person if match_detail.get("decision") == "match" else None
         if person is not None:
@@ -488,7 +517,7 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
                     "track_id": track_id,
                     "confidence": confidence,
                 }
-        display = staff_name or visitor_name or face_label or f"Unknown — {track_id}"
+        display = staff_name or visitor_name or face_label or f"Unknown — {track_id if track_id is not None else ''}"
         if person_type == PersonType.UNKNOWN:
             display = "Unknown"
         person = create_journey_person(
@@ -544,7 +573,7 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
     track = ensure_camera_track(
         person=person,
         camera=camera,
-        track_id=track_id or None,
+        track_id=track_id,
         now=now,
         bbox=bbox,
         track_status=track_status,
@@ -646,7 +675,7 @@ def ingest_track_observation(payload: dict[str, Any]) -> dict[str, Any]:
                 "last_seen_at": now.isoformat(),
                 "duration_seconds": 0,
                 "sightings": 1,
-                "track_ids": [track_id] if track_id else [],
+                "track_ids": [track_id] if track_id is not None else [],
             },
         )
         from .snapshot_capture import schedule_journey_snapshot
@@ -688,17 +717,79 @@ def _resolve_camera(camera_id: Any, camera_key: str) -> Camera | None:
     return camera
 
 
+def _identified(person: JourneyPerson) -> bool:
+    return bool(person.staff_id or person.visitor_id or person.person_type in (PersonType.STAFF, PersonType.VISITOR))
+
+
+def _merge_chain_end(person: JourneyPerson, *, limit: int = 20) -> tuple[JourneyPerson | None, set[int]]:
+    """Follow merged_into to the surviving row. Returns (survivor or None on a loop, pks on the chain)."""
+    seen = {person.pk}
+    current = person
+    for _ in range(limit):
+        if current.status != PersonStatus.MERGED or not current.merged_into_id:
+            return current, seen
+        nxt = JourneyPerson.all_objects.filter(pk=current.merged_into_id).first()
+        if nxt is None or nxt.pk in seen:
+            return None, seen
+        seen.add(nxt.pk)
+        current = nxt
+    return None, seen
+
+
+def merge_person_metadata(person_id: int, patch: dict, *, remove_keys: tuple[str, ...] = ()) -> None:
+    """Merge keys into JourneyPerson.metadata in SQL (jsonb ||) so concurrent writers do not erase each other."""
+    from .jsonmeta import merge_json_field
+
+    merge_json_field(JourneyPerson.all_objects, person_id, "metadata", patch, remove_keys=remove_keys)
+
+
 @transaction.atomic
 def merge_journey_person(source: JourneyPerson, target: JourneyPerson, *, reason: str = "") -> JourneyPerson:
     """
-    Fold ``source`` into ``target`` (same real-world person, duplicate global IDs).
+    Fold one duplicate global ID into another (same real-world person).
 
-    Moves tracks + events; marks source as merged. Keeps target's PJ-##### code.
+    The identified record (staff / visitor) always survives, whichever argument it came in as; two
+    different identities are never merged. Both rows are locked (lowest pk first, so two merges of the same
+    pair cannot deadlock) and merges that would create a merged_into loop are refused. Moves tracks, events,
+    observations and transitions; marks the other row as merged. Keeps the survivor's PJ-##### code.
     """
     if source.pk == target.pk:
         return target
-    if target.status == PersonStatus.MERGED and target.merged_into_id:
-        target = target.merged_into
+
+    resolved_target, target_chain = _merge_chain_end(target)
+    if resolved_target is None or source.pk in target_chain:
+        logger.warning("Journey merge %s -> %s refused: merge chain loops", source.pk, target.pk)
+        return target
+    target = resolved_target
+    if source.pk == target.pk:
+        return target
+
+    locked = {
+        p.pk: p
+        for p in JourneyPerson.all_objects.select_for_update().filter(pk__in=[source.pk, target.pk]).order_by("pk")
+    }
+    source, target = locked.get(source.pk), locked.get(target.pk)
+    if source is None or target is None:
+        return target or source
+    if source.status == PersonStatus.MERGED:
+        # Someone merged it already; report where it went.
+        survivor, _ = _merge_chain_end(source)
+        return survivor or target
+    if target.status == PersonStatus.MERGED:
+        survivor, chain = _merge_chain_end(target)
+        if survivor is None or source.pk in chain:
+            logger.warning("Journey merge %s -> %s refused: target was merged into the source", source.pk, target.pk)
+            return target
+        return merge_journey_person(source, survivor, reason=reason)
+
+    if source.staff_id and target.staff_id and source.staff_id != target.staff_id:
+        logger.warning("Journey merge refused: %s and %s are different staff", source.code, target.code)
+        return target
+    if source.visitor_id and target.visitor_id and source.visitor_id != target.visitor_id:
+        logger.warning("Journey merge refused: %s and %s are different visitors", source.code, target.code)
+        return target
+    if _identified(source) and not _identified(target):
+        source, target = target, source
 
     from .models import PersonObservation, PersonTransition
 
@@ -708,16 +799,31 @@ def merge_journey_person(source: JourneyPerson, target: JourneyPerson, *, reason
     PersonObservation.objects.filter(journey_person=source).update(journey_person=target)
     PersonTransition.objects.filter(journey_person=source).update(journey_person=target)
 
-    updates = ["status", "merged_into", "updated_at"]
     source.status = PersonStatus.MERGED
     source.merged_into = target
-    source.save(update_fields=updates)
+    source.save(update_fields=["status", "merged_into", "updated_at"])
 
-    # Prefer non-empty embeddings / display on the survivor
     t_updates: list[str] = ["updated_at", "metadata"]
     history = list((target.metadata or {}).get("merged_from") or [])
     history.append({"code": source.code, "reason": reason, "at": timezone.now().isoformat()})
     target.metadata = {**(target.metadata or {}), "merged_from": history[-50:]}
+    # Carry the identity across if only the duplicate had it.
+    if source.staff_id and not target.staff_id:
+        target.staff_id = source.staff_id
+        t_updates.append("staff_id")
+    if source.visitor_id and not target.visitor_id and not target.staff_id:
+        target.visitor_id = source.visitor_id
+        t_updates.append("visitor_id")
+    want_type = (
+        PersonType.STAFF if target.staff_id else PersonType.VISITOR if target.visitor_id else target.person_type
+    )
+    if want_type != target.person_type:
+        target.person_type = want_type
+        t_updates.append("person_type")
+        name_locked = bool((target.metadata or {}).get("name_locked"))
+        if not name_locked and source.display_name and _identified(source):
+            target.display_name = source.display_name
+            t_updates.append("display_name")
     if (not target.reid_embedding) and source.reid_embedding:
         target.reid_embedding = source.reid_embedding
         t_updates.append("reid_embedding")
@@ -837,6 +943,7 @@ def try_merge_unknown_duplicates(person: JourneyPerson) -> JourneyPerson:
     other = result.person
     if result.decision != "match" or other is None or persons_were_simultaneous(person.pk, other.pk):
         return person
+    # Older ID survives; merge_journey_person still swaps so a staff / visitor record is never the duplicate.
     target, source = (person, other) if (person.created_at, person.pk) < (other.created_at, other.pk) else (other, person)
     return merge_journey_person(
         source,
@@ -855,10 +962,12 @@ def merge_person_to_visitor(
     """Step 15 — link unknown journey person to a registered visitor."""
     from visitors.models import Visitor
 
-    person = JourneyPerson.objects.filter(uuid=person_uuid).select_for_update().first()
+    person = JourneyPerson.objects.filter(local_rows_q(), uuid=person_uuid).select_for_update().first()
     if person is None:
         return None
-    visitor = Visitor.objects.filter(pk=visitor_id).first()
+    if person.person_type == PersonType.STAFF or person.staff_id:
+        raise ValueError("This person is a staff member and cannot be linked to a visitor.")
+    visitor = Visitor.objects.filter(local_rows_q(), pk=visitor_id).first()
     if visitor is None:
         return None
 
@@ -879,6 +988,52 @@ def merge_person_to_visitor(
         metadata={"previous_code": old_code, "person_id": person.code, "visitor_id": visitor.pk},
     )
     return person
+
+
+@transaction.atomic
+def merge_person_to_staff(
+    person: JourneyPerson,
+    staff,
+    *,
+    match_score: float | None = None,
+    reason: str = "",
+) -> JourneyPerson:
+    """
+    Link a reviewed journey person to a staff member (used by identity approvals).
+
+    If the staff member already has an active journey person, fold this one into it (the staff
+    record survives); otherwise convert this person in place. Returns the surviving person.
+    Refuses to relink a person that already belongs to a different staff member.
+    """
+    person = JourneyPerson.objects.select_for_update().get(pk=person.pk)
+    if person.staff_id and person.staff_id != staff.pk:
+        raise ValueError(f"{person.code} is already linked to another staff member.")
+
+    existing = (
+        JourneyPerson.objects.filter(local_rows_q(), staff_id=staff.pk, status=PersonStatus.ACTIVE)
+        .exclude(pk=person.pk)
+        .first()
+    )
+    if existing is not None:
+        survivor = merge_journey_person(person, existing, reason=reason or "identity review")
+    else:
+        old_code = person.code
+        person.staff_id = staff.pk
+        person.visitor_id = None
+        person.person_type = PersonType.STAFF
+        person.display_name = staff.full_name or person.display_name
+        person.save(update_fields=["staff_id", "visitor_id", "person_type", "display_name", "updated_at"])
+        survivor = person
+        JourneyEvent.objects.create(
+            journey_person=person,
+            event_type=JourneyEventType.PERSON_MERGED,
+            title=f"Linked to staff {staff.full_name}",
+            description=f"Person {old_code} linked to staff record #{staff.pk}" + (f" ({reason})" if reason else ""),
+            confidence=match_score,
+            match_score=match_score,
+            metadata={"previous_code": old_code, "person_id": person.code, "staff_id": staff.pk},
+        )
+    return survivor
 
 
 @transaction.atomic

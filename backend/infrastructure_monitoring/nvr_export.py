@@ -25,6 +25,7 @@ Credentials (passwords, RTSP URLs, SNMP community) are never written.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -56,7 +57,7 @@ LIVE_TIMEOUT_SEC = 8
 CAMERA_TIMEOUT_SEC = 5
 MAX_PARALLEL_NVRS = 4
 MAX_PARALLEL_CAMERAS_PER_NVR = 6
-EXPORT_LIVE_BUDGET_SEC = 90  # total time for all live reads in one export
+EXPORT_LIVE_BUDGET_SEC = 45  # total time for all live reads in one export (request-bound)
 
 HEADER_FILL = PatternFill("solid", fgColor="1F3A5F")
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -551,6 +552,23 @@ def _registered_counts(devices: list[InfraDevice]) -> dict[int, int]:
 # ----------------------------------------------------------------- sheets
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_PLAIN_NUMBER_OR_DASHES = re.compile(r"^(-+|[-+]?\d[\d.,]*%?)$")
+
+
+def _cell_safe(value: Any) -> Any:
+    """
+    Neutralise spreadsheet formula injection: text from NVRs / cameras / admins that
+    starts with = + - @ (or tab/CR) is prefixed with an apostrophe so Excel/LibreOffice
+    show it as text instead of evaluating it. Plain numbers and dash placeholders stay.
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        if _PLAIN_NUMBER_OR_DASHES.match(value):
+            return value
+        return "'" + value
+    return value
+
+
 def _style_header(ws, headers: list[str]) -> None:
     ws.append(headers)
     for cell in ws[ws.max_row]:
@@ -561,7 +579,7 @@ def _style_header(ws, headers: list[str]) -> None:
 
 
 def _append_row(ws, values: list[Any]) -> None:
-    ws.append(values)
+    ws.append([_cell_safe(v) for v in values])
     for cell in ws[ws.max_row]:
         cell.border = BORDER
 
@@ -936,9 +954,10 @@ def build_nvr_export(devices: list[InfraDevice], *, live: bool = True) -> bytes:
         # Cameras sheet — group title row per NVR
         ws_cam.append(
             [
-                f"{device.name}  ({device.ip_address or 'no IP'})   —   "
+                # Title starts with the NVR name: escape it like any other cell
+                _cell_safe(f"{device.name}  ({device.ip_address or 'no IP'})   —   "
                 f"{summary['connected']} camera(s) connected · {summary['online']} online · "
-                f"{summary['offline']} offline · {summary['video_loss']} video loss"
+                f"{summary['offline']} offline · {summary['video_loss']} video loss")
             ]
         )
         cam_skip_rows.add(ws_cam.max_row)

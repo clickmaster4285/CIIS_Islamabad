@@ -101,8 +101,8 @@ export default function CityControlGridPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    // `loading` starts true; refreshes keep showing the last data.
     const ac = new AbortController()
-    setLoading(true)
     const load = (force: boolean) =>
       fetchCityControlGridLive({ signal: ac.signal, force })
         .then((live) => {

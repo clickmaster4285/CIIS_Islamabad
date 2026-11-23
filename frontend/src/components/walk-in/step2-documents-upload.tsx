@@ -77,7 +77,6 @@ export function WalkInStep2DocumentsUpload({
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: "instant" })
   }, [])
-  const photoInputRef = useRef<HTMLInputElement>(null)
   const idInputRef = useRef<HTMLInputElement>(null)
   const supportingInputRef = useRef<HTMLInputElement>(null)
   const authorizationLetterInputRef = useRef<HTMLInputElement>(null)

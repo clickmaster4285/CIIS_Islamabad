@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 from warehouse.models import Warehouse, SiteZone
-from warehouse.zone_catalog import CUSTOMS_WAREHOUSE_ZONES
+from warehouse.zone_catalog import CUSTOMS_WAREHOUSE_ZONES, sync_fixed_zone_fields
 
 
 class Command(BaseCommand):
@@ -89,30 +89,8 @@ class Command(BaseCommand):
                 if z_created:
                     total_zones += 1
                 else:
-                    canonical_fields = {
-                        "name": zone_def["name"],
-                        "purpose": zone_def.get("purpose", ""),
-                        "category": zone_def["category"],
-                        "security_level": zone_def["security_level"],
-                        "sort_order": zone_def["sort_order"],
-                        "description": zone_def.get("description", ""),
-                        "requires_escort": zone_def.get("requires_escort", False),
-                        "vms_zone_type": zone_def.get("vms_zone_type", "Public"),
-                        "access_hours_start": zone_def.get("access_hours_start", "06:00"),
-                        "access_hours_end": zone_def.get("access_hours_end", "22:00"),
-                        "weekend_access": zone_def.get("weekend_access", False),
-                        "max_occupancy": zone_def.get("max_occupancy", 10),
-                        "allowed_visitor_categories": zone_def.get("allowed_visitor_categories", []),
-                        "gate_ids": zone_def.get("gate_ids", []),
-                        "camera_ids": zone_def.get("camera_ids", []),
-                    }
-                    updated = False
-                    for field, value in canonical_fields.items():
-                        if getattr(zone, field) != value:
-                            setattr(zone, field, value)
-                            updated = True
-                    if updated:
-                        zone.save()
+                    # Keep admin-edited settings; only the fixed catalogue fields are re-aligned.
+                    sync_fixed_zone_fields(zone, zone_def)
 
         self.stdout.write(
             self.style.SUCCESS(

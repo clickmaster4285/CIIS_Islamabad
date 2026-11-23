@@ -16,7 +16,6 @@ from .client import (
     mark_server_health,
 )
 from .models import ConnectionMode, RemoteServer
-from .utils import token_for_user
 
 KNOWN_LOCATION_CODES = (
     "PESHAWAR",
@@ -98,11 +97,12 @@ def _camera_online(cam: dict) -> bool:
     )
 
 
-def _server_token(server: RemoteServer, request_user) -> str:
-    token = (server.auth_token or "").strip()
-    if not token or token in ("pending", "ml-only"):
-        token = token_for_user(request_user) or ""
-    return token
+def _server_token(server: RemoteServer, request_user=None) -> str:
+    """The token saved for this server. The viewer's own token is never sent to a
+    remote server (only a loopback "this hub" entry may use it)."""
+    from .utils import server_token_for
+
+    return server_token_for(server, request_user)
 
 
 def _fetch_server_cameras(server: RemoteServer, request_user) -> dict[str, Any]:
@@ -178,7 +178,8 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
     camera_jobs: dict[int, Any] = {}
     ops_jobs: dict[str, Any] = {}  # location_key -> future
 
-    with ThreadPoolExecutor(max_workers=min(12, max(2, len(servers) * 2 or 2))) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(12, max(2, len(servers) * 2 or 2)))
+    try:
         for server in servers:
             camera_jobs[server.pk] = pool.submit(_fetch_server_cameras, server, request_user)
 
@@ -201,6 +202,9 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
         futures = list(camera_jobs.values()) + list(ops_jobs.values())
         if futures:
             wait(futures, timeout=overall_timeout, return_when=ALL_COMPLETED)
+    finally:
+        # Do not block the request on slow remotes past overall_timeout.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     camera_results: dict[int, dict] = {}
     for sid, fut in camera_jobs.items():
@@ -373,20 +377,43 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
         city["bars"]["seizures"] = min(100, round(100 * city["seizures_30d"] / max_sz))
         city["bars"]["detentions"] = min(100, round(100 * city["detentions_30d"] / max_dt))
 
-    online = sum(1 for c in cities if c["status"] == "Online")
-    offline = sum(1 for c in cities if c["status"] == "Offline")
-    degraded = sum(1 for c in cities if c["status"] == "Degraded")
-    total_cams = sum(c["cameras_total"] for c in cities)
-    total_ai = sum(c["ai_detections_24h"] for c in cities)
-    total_sz = sum(c["seizures_30d"] for c in cities)
-    total_dt = sum(c["detentions_30d"] for c in cities)
+    kpis = build_kpis(cities)
 
-    kpis = [
+    alerts.sort(key=lambda a: a.get("at") or a.get("time") or "", reverse=True)
+
+    return {
+        "ok": True,
+        "cities": cities,
+        "kpis": kpis,
+        "alerts": alerts[:30],
+        "server_count": len(servers),
+        "city_count": len(cities),
+        "generated_at": timezone.now().isoformat(),
+    }
+
+
+def build_kpis(cities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Top KPI tiles for a list of board rows (all cities, or one viewer's location).
+
+    NOTE: "seizures_30d" counts note sheets filed in the period (a note sheet is the
+    first seizure document); the key name is kept because the frontend reads it.
+    """
+    online = sum(1 for c in cities if c.get("status") == "Online")
+    offline = sum(1 for c in cities if c.get("status") == "Offline")
+    degraded = sum(1 for c in cities if c.get("status") == "Degraded")
+    total_cams = sum(int(c.get("cameras_total") or 0) for c in cities)
+    total_ai = sum(int(c.get("ai_detections_24h") or 0) for c in cities)
+    total_sz = sum(int(c.get("seizures_30d") or 0) for c in cities)
+    total_dt = sum(int(c.get("detentions_30d") or 0) for c in cities)
+    single = len(cities) == 1
+    scope_label = "This location" if single else "Across all cities"
+    where = "this location" if single else "all cities"
+    return [
         {
             "id": "cameras",
             "label": "Total Cameras",
             "value": f"{total_cams:,}",
-            "support": "Across all cities",
+            "support": scope_label,
             "tone": "blue",
         },
         {
@@ -400,14 +427,14 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
             "id": "seizures",
             "label": "Seizures (30d)",
             "value": f"{total_sz:,}",
-            "support": "All cities combined",
+            "support": f"Note sheets filed · {where}",
             "tone": "red",
         },
         {
             "id": "detentions",
             "label": "Detentions (30d)",
             "value": f"{total_dt:,}",
-            "support": "All cities combined",
+            "support": f"Detention memos · {where}",
             "tone": "orange",
         },
         {
@@ -418,15 +445,3 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
             "tone": "green",
         },
     ]
-
-    alerts.sort(key=lambda a: a.get("at") or a.get("time") or "", reverse=True)
-
-    return {
-        "ok": True,
-        "cities": cities,
-        "kpis": kpis,
-        "alerts": alerts[:30],
-        "server_count": len(servers),
-        "city_count": len(cities),
-        "generated_at": timezone.now().isoformat(),
-    }

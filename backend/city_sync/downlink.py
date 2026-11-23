@@ -14,13 +14,14 @@ staff at HQ never wipes the face data the city enrolled itself.
 from __future__ import annotations
 
 import logging
-import threading
+import os
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 import requests
 from django.conf import settings
-from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
@@ -169,30 +170,38 @@ def queue_leave_request(req, *, by: str = "") -> HqDownlink | None:
 
 
 # One delivery per record per transaction, built from the saved state at commit time.
-_scheduled = threading.local()
+#
+# The dedupe map lives on the DB connection (one per thread). A key only counts as
+# "already scheduled" while its callback is still waiting in this connection's
+# run_on_commit list: Django drops that list on rollback, so a rolled-back transaction
+# never stops a later one from queueing the same record.
 
 
 def _schedule(key: tuple, build) -> None:
-    keys = getattr(_scheduled, "keys", None)
-    if keys is None:
-        keys = _scheduled.keys = set()
-    if key in keys:
-        return
-    keys.add(key)
+    conn = transaction.get_connection()
+    pending = getattr(conn, "_city_sync_downlink_pending", None)
+    if pending is None:
+        pending = conn._city_sync_downlink_pending = {}
+    func = pending.get(key)
+    if func is not None and conn.in_atomic_block:
+        if any(len(entry) > 1 and entry[1] is func for entry in getattr(conn, "run_on_commit", [])):
+            return
 
     def run():
-        keys.discard(key)
+        if pending.get(key) is run:
+            pending.pop(key, None)
         try:
             build()
         except Exception:  # noqa: BLE001
             logger.exception("Could not queue HQ change %s for the city", key)
 
+    pending[key] = run
     transaction.on_commit(run)
 
 
 def on_hq_pre_save(sender, instance, **kwargs) -> None:
     """HQ: remember a staff member's location before the save (transfer detection)."""
-    if not is_hq() or kwargs.get("raw") or getattr(instance, "_from_city", False):
+    if not is_hq() or kwargs.get("raw"):
         return
     if sender._meta.label == "users.Staff" and instance.pk:
         instance._downlink_old_location = (
@@ -202,7 +211,7 @@ def on_hq_pre_save(sender, instance, **kwargs) -> None:
 
 def on_hq_post_save(sender, instance, **kwargs) -> None:
     """HQ: queue edits of city HR records (and HQ enrollments for a city) for that city."""
-    if not is_hq() or kwargs.get("raw") or getattr(instance, "_from_city", False):
+    if not is_hq() or kwargs.get("raw"):
         return
     label = sender._meta.label
     by = getattr(instance, "_downlink_by", "")
@@ -284,12 +293,16 @@ def media_allowed(loc: str, seq, path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _hq_get(path: str, **params):
+def _hq_get(path: str, *, stream: bool = False, **params):
     from city_sync.worker import _load_api_key
 
     base = (getattr(settings, "HQ_SYNC_URL", "") or "").rstrip("/")
     return requests.get(
-        f"{base}/{path}", params=params, headers={"Authorization": f"Bearer {_load_api_key()}"}, timeout=60
+        f"{base}/{path}",
+        params=params,
+        headers={"Authorization": f"Bearer {_load_api_key()}"},
+        timeout=60,
+        stream=stream,
     )
 
 
@@ -302,15 +315,40 @@ def _hq_post(path: str, body: dict):
     )
 
 
+def _safe_media_target(path: str) -> Path:
+    """MEDIA_ROOT/<path>, refusing absolute paths and anything that climbs out of MEDIA_ROOT."""
+    from django.core.exceptions import SuspiciousFileOperation
+    from django.utils._os import safe_join
+
+    clean = os.path.normpath(str(path).replace("\\", "/")).replace("\\", "/")
+    if not clean or clean.startswith(("/", "../")) or clean == ".." or os.path.isabs(clean) or ":" in clean:
+        raise SuspiciousFileOperation(f"refusing HQ media path {path!r}")
+    return Path(safe_join(str(settings.MEDIA_ROOT), clean))
+
+
 def _download(seq: int, path: str) -> None:
-    """Fetch one file from HQ into the same MEDIA_ROOT-relative path."""
-    if not path or default_storage.exists(path):
+    """Fetch one file from HQ into the same MEDIA_ROOT-relative path (streamed, atomic)."""
+    if not path:
         return
-    resp = _hq_get("downlink/media", seq=seq, path=path)
-    resp.raise_for_status()
-    target = Path(settings.MEDIA_ROOT) / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(resp.content)
+    target = _safe_media_target(path)
+    if target.exists():
+        return
+    resp = _hq_get("downlink/media", stream=True, seq=seq, path=path)
+    try:
+        resp.raise_for_status()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".dl-", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                for block in resp.iter_content(chunk_size=1024 * 1024):
+                    if block:
+                        fh.write(block)
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    finally:
+        resp.close()
 
 
 def _set_fields(obj, payload: dict, skip: set[str]) -> None:
@@ -461,14 +499,27 @@ def apply_item(item: dict) -> bool:
         return applier(item)
 
 
-def pull_downlink(target_seq: int) -> dict[str, Any]:
-    """City: fetch and apply HQ changes up to target_seq; ack each one."""
+def pull_downlink(target_seq: int, *, max_seconds: float | None = None) -> dict[str, Any]:
+    """
+    City: fetch and apply HQ changes up to target_seq; ack each one.
+
+    Items apply strictly in seq order: the cursor never moves past an item that failed, so a
+    later change can not overtake an earlier one. An item that keeps failing is given up after
+    SYNC_DOWNLINK_MAX_TRIES pulls (HQ shows it as failed and can send the record again).
+    Runs for at most max_seconds (SYNC_DOWNLINK_MAX_SECONDS) so a big backlog does not hold up
+    the heartbeat; the next heartbeat carries on.
+    """
     if not is_city():
         return {"skipped": "not_city"}
+    if max_seconds is None:
+        max_seconds = float(getattr(settings, "SYNC_DOWNLINK_MAX_SECONDS", 20))
+    max_tries = max(1, int(getattr(settings, "SYNC_DOWNLINK_MAX_TRIES", 10)))
+    deadline = time.monotonic() + max(0.0, max_seconds)
     state = CityControlState.load()
     applied = failed = 0
     faces_changed = False
-    while state.downlink_seq < target_seq:
+    blocked = False
+    while state.downlink_seq < target_seq and not blocked and time.monotonic() < deadline:
         resp = _hq_get("downlink", after=state.downlink_seq)
         resp.raise_for_status()
         items = (resp.json() or {}).get("items") or []
@@ -476,17 +527,30 @@ def pull_downlink(target_seq: int) -> dict[str, Any]:
             break
         results = []
         for item in items:
+            if time.monotonic() >= deadline and results:
+                break
+            seq = int(item["seq"])
             try:
                 faces_changed |= bool(apply_item(item))
-                results.append({"seq": item["seq"], "status": HqDownlink.STATUS_APPLIED})
+                results.append({"seq": seq, "status": HqDownlink.STATUS_APPLIED})
                 applied += 1
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Downlink #%s failed", item.get("seq"))
-                results.append({"seq": item["seq"], "status": HqDownlink.STATUS_FAILED, "error": str(exc)})
+                results.append({"seq": seq, "status": HqDownlink.STATUS_FAILED, "error": str(exc)})
                 failed += 1
-            # Move on either way: HQ shows the failure and can send the record again.
-            state.downlink_seq = int(item["seq"])
-            state.save(update_fields=["downlink_seq", "updated_at"])
+                tries = state.downlink_failed_tries + 1 if state.downlink_failed_seq == seq else 1
+                if tries < max_tries:
+                    # Stay on this item; it is retried on the next pull.
+                    state.downlink_failed_seq = seq
+                    state.downlink_failed_tries = tries
+                    state.save(update_fields=["downlink_failed_seq", "downlink_failed_tries", "updated_at"])
+                    blocked = True
+                    break
+                logger.error("Downlink #%s failed %s times; skipping it", seq, tries)
+            state.downlink_seq = seq
+            state.downlink_failed_seq = 0
+            state.downlink_failed_tries = 0
+            state.save(update_fields=["downlink_seq", "downlink_failed_seq", "downlink_failed_tries", "updated_at"])
         try:
             _hq_post("downlink/ack", {"results": results})
         except requests.RequestException:

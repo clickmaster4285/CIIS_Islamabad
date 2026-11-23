@@ -54,13 +54,9 @@ function saveRows(rows: LotRow[]) {
 const STATUSES = ["Draft", "Published", "Sold", "Cancelled"]
 
 export default function LotCreationPage() {
-  const [rows, setRows] = useState<LotRow[]>([])
+  const [rows, setRows] = useState<LotRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ no: "", desc: "", reserve: "", status: "Draft" })
-
-  useEffect(() => {
-    setRows(loadRows())
-  }, [])
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)

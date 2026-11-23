@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useSyncExternalStore } from "react"
 import { isAuthenticated } from "@/lib/auth"
 import { haversineM } from "@/lib/gps-geofences"
 import { fetchGpsMe, postGpsDuty, postGpsHeartbeat, postGpsPing } from "@/lib/gps-tracking-api"
@@ -209,16 +209,17 @@ export function getOfficerGpsTrackingStatus(): OfficerGpsTrackingStatus {
   return status
 }
 
+function subscribeOfficerGpsTrackingStatus(onChange: () => void): () => void {
+  window.addEventListener(GPS_TRACKING_STATUS_EVENT, onChange)
+  return () => window.removeEventListener(GPS_TRACKING_STATUS_EVENT, onChange)
+}
+
 export function useOfficerGpsTrackingStatus(): OfficerGpsTrackingStatus {
-  const [current, setCurrent] = useState(status)
-  useEffect(() => {
-    const onStatus = (event: Event) => {
-      const detail = (event as CustomEvent<OfficerGpsTrackingStatus>).detail
-      setCurrent(detail ?? getOfficerGpsTrackingStatus())
-    }
-    window.addEventListener(GPS_TRACKING_STATUS_EVENT, onStatus)
-    setCurrent(getOfficerGpsTrackingStatus())
-    return () => window.removeEventListener(GPS_TRACKING_STATUS_EVENT, onStatus)
-  }, [])
-  return current
+  // The event's detail is always the module-level `status`, so reading the
+  // snapshot directly is equivalent to tracking the event payload.
+  return useSyncExternalStore(
+    subscribeOfficerGpsTrackingStatus,
+    getOfficerGpsTrackingStatus,
+    getOfficerGpsTrackingStatus,
+  )
 }

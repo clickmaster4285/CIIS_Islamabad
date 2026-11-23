@@ -1,5 +1,5 @@
 
-import { Settings, Building2, Globe, Mail } from "lucide-react"
+import { Settings, Building2, Globe } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"

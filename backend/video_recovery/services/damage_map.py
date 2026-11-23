@@ -12,13 +12,6 @@ MISSING = "missing"
 GENERATED = "generated"
 
 
-def classify_frame_visual(img) -> str:
-    """Classify a decoded frame: valid vs damaged-but-recoverable."""
-    from .corruption_types import classify_frame_corruption
-
-    return classify_frame_corruption(img).get("status", VALID)
-
-
 def build_damage_map(
     frame_entries: list[dict[str, Any]],
     *,
@@ -103,7 +96,3 @@ def _legend() -> dict[str, str]:
 
 def frame_needs_regeneration(status: str) -> bool:
     return status in (UNRECOVERABLE, MISSING)
-
-
-def frame_needs_recovery(status: str) -> bool:
-    return status in (DAMAGED_RECOVERABLE,)

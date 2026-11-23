@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Badge } from "@/components/ui/badge"
-import { Thermometer, Palette, Gauge } from "lucide-react"
+import { Thermometer, Gauge } from "lucide-react"
 
 const COLOR_PALETTES = ["Ironbow", "Rainbow", "White-Hot", "Black-Hot"]
 const MOCK_THERMAL_CAMERAS = [

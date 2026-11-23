@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { QrCode, ScanLine, Search, UserCheck, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -88,16 +88,16 @@ export default function GuardReceptionPanelPage() {
   const [scanMode, setScanMode] = useState<"scan" | "manual">("scan")
   const [qrInput, setQrInput] = useState("")
   const [search, setSearch] = useState("")
-  const [guardName, setGuardName] = useState("")
+  const [guardName, setGuardName] = useState(() => getStoredUser()?.username || "")
   const [lastCheckedIn, setLastCheckedIn] = useState<GuardVisitor | null>(null)
   const [listFilter, setListFilter] = useState<"all" | "expected" | "checked-in">("all")
 
-  useEffect(() => {
-    const user = getStoredUser()
-    if (user?.username && !guardName) {
-      setGuardName(user.username)
-    }
-  }, [guardName])
+  // Fall back to the signed-in username whenever the field is cleared
+  // (adjust state during render instead of an effect).
+  if (!guardName) {
+    const storedUsername = getStoredUser()?.username
+    if (storedUsername) setGuardName(storedUsername)
+  }
 
   const walkInQuery = useQuery({
     queryKey: ["visitors", "walk-in", "guard-panel"],

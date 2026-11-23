@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/collapsible"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Link } from "react-router-dom"
-import { ChevronDown, Search, Calendar, Zap, User, Truck, Activity, Package, Thermometer, Film, Bookmark, Download, Wrench, ScanSearch } from "lucide-react"
+import { ChevronDown, Search, Zap, Film, Bookmark, Download, Wrench, ScanSearch } from "lucide-react"
 import { CameraSelectItems } from "@/components/cameras/camera-select-items"
 import { useCameras } from "@/hooks/use-cameras"
 import { ROUTES } from "@/routes/config"
@@ -130,12 +130,17 @@ export default function PlaybackSearchPage() {
     el.playbackRate = PLAYBACK_RATE[playbackSpeed] ?? 1
   }, [playbackSpeed, activeVideoSrc])
 
+  // The <video> only exists while there is a source; when the source goes away
+  // reset the play state (adjust state during render).
+  const [playStateSrc, setPlayStateSrc] = useState(activeVideoSrc)
+  if (playStateSrc !== activeVideoSrc) {
+    setPlayStateSrc(activeVideoSrc)
+    if (!activeVideoSrc) setIsPlaying(false)
+  }
+
   useEffect(() => {
     const el = videoRef.current
-    if (!el || !activeVideoSrc) {
-      setIsPlaying(false)
-      return
-    }
+    if (!el || !activeVideoSrc) return
     el.load()
     void el.play().catch(() => setIsPlaying(false))
   }, [activeVideoSrc])

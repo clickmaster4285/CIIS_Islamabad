@@ -7,14 +7,19 @@ Usage:
   python manage.py seed_enforcement_staff
   python manage.py seed_enforcement_staff --dry-run
   python manage.py seed_enforcement_staff --update
-  python manage.py seed_enforcement_staff --create-logins --default-password ChangeMe@123
-  python manage.py seed_enforcement_staff --no-create-logins
+  python manage.py seed_enforcement_staff --create-logins
+
+Logins are opt-in (--create-logins). Each new login gets its own random password,
+printed once at the end: hand them out and have each person change it at first use
+(there is no forced-change flag on User yet). --default-password sets one password
+for every new login instead (it must pass the password validators).
 """
 
 from __future__ import annotations
 
 import json
 import re
+import secrets
 from datetime import date, datetime
 from pathlib import Path
 
@@ -138,19 +143,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--create-logins",
             action="store_true",
-            default=True,
-            help="Create login users when missing (default on)",
+            default=False,
+            help="Also create login users when missing (default off)",
         )
         parser.add_argument(
             "--no-create-logins",
             action="store_true",
-            help="Skip creating login users",
+            help="Kept for old scripts; logins are off unless --create-logins is given",
         )
         parser.add_argument(
             "--default-password",
             type=str,
-            default="123456",
-            help="Password for created logins (default: 123456)",
+            default="",
+            help="One password for every new login (default: a random password per login)",
         )
 
     def handle(self, *args, **options):
@@ -165,7 +170,16 @@ class Command(BaseCommand):
         dry = bool(options["dry_run"])
         do_update = bool(options["update"])
         create_logins = bool(options["create_logins"]) and not bool(options["no_create_logins"])
-        password = options["default_password"] or "123456"
+        shared_password = (options["default_password"] or "").strip()
+        if shared_password and create_logins:
+            from django.contrib.auth.password_validation import validate_password
+            from django.core.exceptions import ValidationError
+
+            try:
+                validate_password(shared_password)
+            except ValidationError as exc:
+                raise CommandError("--default-password is too weak: " + " ".join(exc.messages))
+        issued: list[tuple[str, str, str]] = []  # (username, full name, password)
 
         created = updated = skipped = logins = linked_existing_logins = 0
         seen_keys: set[str] = set()
@@ -330,6 +344,7 @@ class Command(BaseCommand):
                     role = "GUARD"
                     if "LDC" in desig.upper():
                         role = "RECEPTIONIST"
+                    password = shared_password or secrets.token_urlsafe(9)
                     user = User.objects.create_user(
                         username=username,
                         password=password,
@@ -348,6 +363,7 @@ class Command(BaseCommand):
                     staff.user = user
                     staff.save(update_fields=["user"])
                     logins += 1
+                    issued.append((username, full_name, password))
 
             if dry:
                 transaction.set_rollback(True)
@@ -361,3 +377,11 @@ class Command(BaseCommand):
         )
         if dry:
             self.stdout.write("No database changes were written.")
+        elif issued:
+            self.stdout.write(
+                self.style.WARNING(
+                    "New login passwords (shown once, not stored anywhere; ask each person to change theirs):"
+                )
+            )
+            for username, name, pw in issued:
+                self.stdout.write(f"  {username}	{pw}	{name}")

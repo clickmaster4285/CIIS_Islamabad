@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
 import logging
-import os
 import threading
-import time
 from collections import defaultdict
 
 from django.conf import settings
@@ -14,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 _stop = threading.Event()
 _thread: threading.Thread | None = None
+# ML nodes that got cameras last round: a node that loses all of them is sent one empty list to clear it.
+_last_targets: set[str] = set()
+LOCK_NAME = "person_journey_sync"
 
 
 def _interval() -> int:
@@ -30,13 +32,6 @@ def _journey_ingest_payload(entries: list[dict]) -> dict:
     }
 
 
-def _known_ml_urls() -> set[str]:
-    """All active ML node URLs (hub + RemoteServer). Prefer shared client helper."""
-    from ml.client import known_ml_base_urls
-
-    return set(known_ml_base_urls())
-
-
 def _post_journey_bulk(base_url: str, entries: list[dict]) -> dict:
     import requests
 
@@ -44,6 +39,7 @@ def _post_journey_bulk(base_url: str, entries: list[dict]) -> dict:
         f"{base_url.rstrip('/')}/journey/register/bulk",
         json=_journey_ingest_payload(entries),
         timeout=30,
+        headers=ml_auth_headers(),
     )
     res.raise_for_status()
     return res.json()
@@ -80,8 +76,12 @@ def sync_cameras_to_journey_ml() -> dict:
         except Exception as exc:
             logger.warning("Journey sync skip camera %s: %s", cam.pk, exc)
 
-    targets = _known_ml_urls() | set(by_url.keys())
+    global _last_targets
+    # Only nodes that own cameras (plus nodes that just lost their last one, once) — not every known node.
+    owning = set(by_url.keys())
+    targets = owning | (_last_targets - owning)
     totals = {"synced": 0, "by_server": {}, "cleared": []}
+    failed: set[str] = set()
 
     for base in sorted(targets):
         entries = by_url.get(base, [])
@@ -103,7 +103,10 @@ def sync_cameras_to_journey_ml() -> dict:
                 exc,
             )
             totals["by_server"][base] = {"cameras": len(entries), "error": str(exc)}
+            failed.add(base)
 
+    # Keep a node that failed to clear in the list so the next round retries it.
+    _last_targets = owning | {b for b in failed if b not in owning}
     return totals
 
 
@@ -134,16 +137,19 @@ def _worker_loop():
         _stop.wait(_interval())
 
 
-def start_journey_worker_thread():
+def _start_thread() -> None:
     global _thread
     if _thread and _thread.is_alive():
         return
     _stop.clear()
+    # The loop's first iteration is the initial ML sync: nothing blocks AppConfig.ready / server boot.
     _thread = threading.Thread(target=_worker_loop, daemon=True, name="person-journey-sync")
     _thread.start()
     logger.info("Person journey camera sync worker started (interval=%ss)", _interval())
-    try:
-        result = sync_cameras_to_journey_ml()
-        logger.info("Person journey initial ML sync: %s", result)
-    except Exception:
-        logger.exception("Person journey initial ML sync failed")
+
+
+def start_journey_worker_thread():
+    """Camera sync + identity consolidation — in ONE process only (cross-process file lock)."""
+    from recognition.services.autostart import run_with_process_lock
+
+    run_with_process_lock(LOCK_NAME, _start_thread)

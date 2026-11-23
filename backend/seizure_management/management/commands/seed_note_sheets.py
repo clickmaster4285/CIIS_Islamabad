@@ -4,6 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from detentions.management.seed_guard import add_guard_argument, check_seed_allowed
 from django.db import transaction
 from django.utils import timezone
 
@@ -344,9 +345,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Replace existing seed sheets with the same note sheet numbers.",
         )
+        add_guard_argument(parser)
 
     @transaction.atomic
     def handle(self, *args, **options):
+        check_seed_allowed(options)
         site = SITE_PROFILES[options["site"]]
         force = options["force"]
         created = 0

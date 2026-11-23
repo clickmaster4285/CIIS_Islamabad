@@ -152,7 +152,7 @@ export default function GpsTrackingPage() {
   })
 
   const onDuty = Boolean(meQuery.data?.onDuty)
-  const officers = liveQuery.data ?? []
+  const officers = useMemo(() => liveQuery.data ?? [], [liveQuery.data])
   const fences = useMemo(() => {
     if (station !== "all") return geofencesForStation(station)
     const locs = new Set(officers.map((o) => o.location).filter(Boolean))
@@ -181,7 +181,10 @@ export default function GpsTrackingPage() {
 
   const selected = trackAll ? null : officers.find((o) => o.userId === selectedUserId) ?? null
   const trail = trackAll ? [] : historyQuery.data?.points ?? []
-  const reportPoints = trackAll ? [] : reportQuery.data?.points ?? []
+  const reportPoints = useMemo(
+    () => (trackAll ? [] : reportQuery.data?.points ?? []),
+    [trackAll, reportQuery.data?.points]
+  )
   const closestPoint = trackAll ? null : reportQuery.data?.closest ?? null
 
   const geocodePoints = useMemo(() => {

@@ -8,9 +8,8 @@ import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { getSeizedInventoryDetailPath } from "@/routes/config"
-import { SEIZED_STORAGE_KEY, WMS_STOCK_UPDATED_EVENT, loadSeizedInventory } from "@/lib/wms-stock-storage"
+import { WMS_STOCK_UPDATED_EVENT, loadSeizedInventory } from "@/lib/wms-stock-storage"
 
-const STORAGE_KEY = SEIZED_STORAGE_KEY
 
 type SeizedRow = {
   id: string

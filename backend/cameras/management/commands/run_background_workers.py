@@ -33,8 +33,13 @@ class Command(BaseCommand):
         from logs.monitor import start_mobile_monitor_thread, stop_mobile_monitor_thread
 
         try:
+            from cameras.locks import is_leader
+
             limit = int(getattr(settings, "DETECTION_CLIP_REQUEUE_LIMIT", 50))
-            requeue_pending_clips(limit=max(1, limit))
+            if is_leader("clip_requeue"):
+                requeue_pending_clips(limit=max(1, limit))
+            else:
+                self.stdout.write("Clip requeue skipped: another process owns it.")
         except Exception as exc:
             self.stderr.write(self.style.WARNING(f"Clip requeue skipped: {exc}"))
 

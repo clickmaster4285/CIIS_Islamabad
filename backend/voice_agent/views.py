@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
 import difflib
 import logging
 import re
@@ -184,6 +185,7 @@ class VoiceTranscribeView(APIView):
                 files={"audio": ("utterance.wav", audio.read(), audio.content_type or "audio/wav")},
                 data=data,
                 timeout=(5, 60),
+                headers=ml_auth_headers(),
             )
         except requests.RequestException as exc:
             logger.warning("[voice_agent] STT unreachable at %s: %s", base, exc)
@@ -191,8 +193,14 @@ class VoiceTranscribeView(APIView):
         if resp.status_code != 200:
             return Response({"detail": f"Speech service error (HTTP {resp.status_code})."}, status=status.HTTP_502_BAD_GATEWAY)
 
-        result = resp.json()
-        text = (result.get("text") or "").strip()
+        try:
+            result = resp.json()
+        except ValueError:
+            logger.warning("[voice_agent] STT returned non-JSON from %s", base)
+            return Response({"detail": "Speech service returned an invalid response."}, status=status.HTTP_502_BAD_GATEWAY)
+        if not isinstance(result, dict):
+            return Response({"detail": "Speech service returned an invalid response."}, status=status.HTTP_502_BAD_GATEWAY)
+        text = str(result.get("text") or "").strip()
         out = {
             "text": text,
             "language": result.get("language") or "",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.db.models import Count, Q
 from django.db.models.functions import TruncDate
 from django.shortcuts import get_object_or_404
@@ -42,6 +43,40 @@ from .serializers import (
     TriageSerializer,
     VerifySerializer,
 )
+
+
+# Plain-list cap for GET /support/tickets/. The web client expects a JSON array (it accepts
+# {results} too but has no paging UI), so the shape stays a list and is bounded instead.
+TICKET_LIST_CAP = 500
+
+# Roles that may be assigned work, per department (also feeds the assignee dropdown).
+ASSIGNABLE_ROLES = {
+    Department.IT: ["IT_ADMIN", "IT_SUPERADMIN"],
+    Department.DEVELOPER: ["DEVELOPER"],
+    Department.SUPPORT: ["SUPPORT"],
+    Department.OPERATIONS: ["ADMIN", "LOCATION_ADMIN", "SUPPORT"],
+    Department.ADMIN: ["ADMIN", "LOCATION_ADMIN"],
+}
+ALL_ASSIGNABLE_ROLES = ["IT_ADMIN", "IT_SUPERADMIN", "DEVELOPER", "SUPPORT", "ADMIN", "LOCATION_ADMIN"]
+
+# Allowed source states for the simple workflow actions.
+HOLDABLE_STATUSES = (
+    TicketStatus.TRIAGED,
+    TicketStatus.ASSIGNED,
+    TicketStatus.IN_PROGRESS,
+    TicketStatus.REOPENED,
+)
+TERMINAL_STATUSES = (TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED)
+
+SLA_REFRESH_CACHE_KEY = "requests_support:sla_refresh"
+SLA_REFRESH_INTERVAL_SECONDS = 60
+
+
+def _duplicate_payload(dup: SupportTicket, user) -> dict:
+    """Name the duplicate ticket only to someone allowed to open it (its requester or Support)."""
+    if dup and (dup.requester_id == getattr(user, "id", None) or is_support_user(user)):
+        return {"duplicate_of": dup.ticket_number, "duplicate_id": dup.id}
+    return {"duplicate_of": None, "duplicate_id": None}
 
 
 def _mark_first_response(ticket: SupportTicket):
@@ -114,11 +149,13 @@ class SupportDashboardView(APIView):
         else:
             qs = base.filter(requester=user)
 
-        # Refresh SLA flags lightly for open tickets in dashboard scope
-        for t in qs.filter(sla_breached=False).exclude(
-            status__in=[TicketStatus.CLOSED, TicketStatus.CANCELLED]
-        )[:200]:
-            t.refresh_sla_breach()
+        # Refresh SLA flags for open tickets at most once a minute (per process), not on
+        # every dashboard poll.
+        if cache.add(SLA_REFRESH_CACHE_KEY, 1, SLA_REFRESH_INTERVAL_SECONDS):
+            for t in qs.filter(sla_breached=False).exclude(
+                status__in=[TicketStatus.CLOSED, TicketStatus.CANCELLED]
+            )[:200]:
+                t.refresh_sla_breach()
 
         terminal = [TicketStatus.CLOSED, TicketStatus.CANCELLED, TicketStatus.EXPIRED]
         open_qs = qs.exclude(status__in=terminal)
@@ -229,15 +266,9 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         caps = capabilities_for(user)
-        # Lazily expire due tickets in the common open set
+        # Lazily expire untriaged tickets whose window has passed (only NEW ones expire).
         due = SupportTicket.objects.filter(
-            expires_at__lte=timezone.now(),
-        ).exclude(
-            status__in=[
-                TicketStatus.CLOSED,
-                TicketStatus.CANCELLED,
-                TicketStatus.EXPIRED,
-            ]
+            expires_at__lte=timezone.now(), status=TicketStatus.NEW
         )[:100]
         for t in due:
             t.expire_if_needed()
@@ -248,7 +279,10 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             "camera",
             "infra_site",
             "infra_device",
-        ).prefetch_related("comments", "events")
+        )
+        # Comments/events are only serialized on the detail view; the list never needs them.
+        if self.action != "list":
+            qs = qs.prefetch_related("comments", "events")
 
         if not caps["can_view_all"]:
             if caps["can_handle_it"] and caps["can_handle_developer"]:
@@ -355,6 +389,10 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             )
         return qs.order_by("-created_at")
 
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())[:TICKET_LIST_CAP]
+        return Response(SupportTicketListSerializer(qs, many=True, context={"request": request}).data)
+
     def create(self, request, *args, **kwargs):
         # Super Admin / Location Admin create tickets; Support operates & chats on them.
         if not is_requester_user(request.user):
@@ -386,8 +424,7 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             return Response(
                 {
                     "detail": str(exc),
-                    "duplicate_of": exc.duplicate.ticket_number,
-                    "duplicate_id": exc.duplicate.id,
+                    **_duplicate_payload(exc.duplicate, request.user),
                     "force_create_required": True,
                 },
                 status=status.HTTP_409_CONFLICT,
@@ -395,6 +432,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
+        if ticket.duplicate_of_id:
+            meta = {**meta, **_duplicate_payload(ticket.duplicate_of, request.user)}
         out = SupportTicketDetailSerializer(ticket, context={"request": request}).data
         return Response({**out, "engine": meta}, status=status.HTTP_201_CREATED)
 
@@ -501,6 +540,13 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
                 },
                 status=400,
             )
+        if assignee and (getattr(assignee, "role", "") or "").upper() not in ASSIGNABLE_ROLES.get(
+            ticket.department, ALL_ASSIGNABLE_ROLES
+        ):
+            return Response(
+                {"detail": f"This user cannot be assigned {ticket.get_department_display()} work."},
+                status=400,
+            )
 
         from_status = ticket.status
         ticket.assigned_to = assignee
@@ -560,6 +606,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             return blocked
         if not (is_support_user(request.user) or self._can_handle(request.user, ticket)):
             return Response({"detail": "Not allowed."}, status=status.HTTP_403_FORBIDDEN)
+        if ticket.status not in HOLDABLE_STATUSES:
+            return Response({"detail": f"Cannot put on hold from {ticket.status}."}, status=400)
         from_status = ticket.status
         ticket.status = TicketStatus.ON_HOLD
         ticket.save(update_fields=["status", "updated_at"])
@@ -695,8 +743,8 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
             is_support_user(request.user) or ticket.requester_id == request.user.id
         ):
             return Response({"detail": "Not allowed."}, status=403)
-        if ticket.status == TicketStatus.CLOSED:
-            return Response({"detail": "Already closed."}, status=400)
+        if ticket.status in TERMINAL_STATUSES:
+            return Response({"detail": f"Ticket is already {ticket.status}."}, status=400)
         from_status = ticket.status
         ticket.status = TicketStatus.CANCELLED
         ticket.closed_at = timezone.now()
@@ -783,11 +831,17 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         comment.save()
         _mark_first_response(ticket)
         ticket.save(update_fields=["first_response_at", "updated_at"])
+        # Internal-note text stays in the comment (hidden from requesters); the event only says
+        # that a note was added, and the serializer hides such events from requesters too.
+        if is_internal:
+            event_message = "Internal note added."
+        else:
+            event_message = (body or comment.attachment_name or "Attachment")[:200]
         log_event(
             ticket,
             actor=request.user,
             event_type="chat",
-            message=(body or comment.attachment_name or "Attachment")[:200],
+            message=event_message,
             meta={
                 "comment_id": comment.id,
                 "is_internal": is_internal,
@@ -837,17 +891,7 @@ def assignable_users(request):
 
     User = get_user_model()
     dept = (request.query_params.get("department") or "").upper()
-    role_map = {
-        Department.IT: ["IT_ADMIN", "IT_SUPERADMIN"],
-        Department.DEVELOPER: ["DEVELOPER"],
-        Department.SUPPORT: ["SUPPORT"],
-        Department.OPERATIONS: ["ADMIN", "LOCATION_ADMIN", "SUPPORT"],
-        Department.ADMIN: ["ADMIN", "LOCATION_ADMIN"],
-    }
-    roles = role_map.get(
-        dept,
-        ["IT_ADMIN", "IT_SUPERADMIN", "DEVELOPER", "SUPPORT", "ADMIN", "LOCATION_ADMIN"],
-    )
+    roles = ASSIGNABLE_ROLES.get(dept, ALL_ASSIGNABLE_ROLES)
     users = User.objects.filter(is_active=True, role__in=roles).order_by("username")[:200]
     return Response(
         [

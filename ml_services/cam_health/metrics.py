@@ -89,6 +89,19 @@ def frame_diff_score(current_fp: list[float], previous_fp: list[float] | None) -
     return min(1.0, mad / 25.0)
 
 
+# frame_diff_score at/below this means the two fingerprints are the same picture. A live but
+# static scene still has sensor/compression noise (mean abs diff ~0.3-1 grey level → diff
+# ~0.01-0.04); a frozen stream repeats the exact same frame (diff 0).
+IDENTICAL_DIFF_MAX = 0.004
+
+
+def fingerprints_identical(diff: float | None) -> bool:
+    """True when frame_diff_score() says the two samples are the very same frame."""
+    if diff is None:
+        return False
+    return float(diff) <= IDENTICAL_DIFF_MAX
+
+
 def compute_image_metrics(frame: np.ndarray) -> dict[str, Any]:
     exp = exposure_ratios(frame)
     sharp = sharpness(frame)

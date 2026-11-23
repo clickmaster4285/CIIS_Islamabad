@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -12,9 +11,8 @@ from typing import Any
 
 from django.conf import settings
 
+from . import job_store
 from .video_search_jobs import save_upload
-
-STATUS_NAME = "status.json"
 
 
 def _safe_stem(name: str, fallback: str = "video") -> str:
@@ -41,25 +39,18 @@ def save_job_dir() -> Path:
 
 
 def _write_status(folder: Path, payload: dict[str, Any]) -> None:
-    payload["updated_at"] = time.time()
-    tmp = folder / f".{STATUS_NAME}"
-    dest = folder / STATUS_NAME
-    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(dest)
+    job_store.write_status(folder, payload)
 
 
 def read_status(job_id: str) -> dict[str, Any] | None:
-    path = _job_dir(job_id) / STATUS_NAME
-    if not path.is_file():
+    if not job_store.is_valid_job_id(job_id):
         return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+    return job_store.read_status(_job_dir(job_id))
 
 
 def tagged_file_path(job_id: str) -> Path | None:
+    if not job_store.is_valid_job_id(job_id):
+        return None
     folder = _job_dir(job_id)
     status = read_status(job_id) or {}
     result = status.get("result") if isinstance(status.get("result"), dict) else {}
@@ -90,6 +81,8 @@ def _run_job(folder: Path, params: dict[str, Any]) -> None:
     source_label = str(params.get("source_name") or "video")
     tagged_name = unique_tagged_filename(job_id, source_label)
     tagged = folder / tagged_name
+    job_store.mark_active(job_id, True)
+    deadline = time.monotonic() + job_store.max_job_seconds()
     _write_status(
         folder,
         {
@@ -174,6 +167,8 @@ def _run_job(folder: Path, params: dict[str, Any]) -> None:
                 break
             if status == "error":
                 raise MLServiceError(str(row.get("error") or row.get("message") or "Analyze failed."), 400)
+            if time.monotonic() > deadline:
+                raise MLServiceError("Video tagging took too long and was stopped.", 504)
             time.sleep(2.0)
     except Exception as exc:
         _write_status(
@@ -186,9 +181,12 @@ def _run_job(folder: Path, params: dict[str, Any]) -> None:
                 "error": str(exc),
             },
         )
+        job_store.remove_source(folder)
+    finally:
+        job_store.mark_active(job_id, False)
 
 
-def start_job(video_file, params: dict[str, Any]) -> dict[str, Any]:
+def start_job(video_file, params: dict[str, Any], *, owner_id=None) -> dict[str, Any]:
     folder = save_job_dir()
     save_upload(video_file, folder / "source.mp4")
     params = dict(params or {})
@@ -199,7 +197,7 @@ def start_job(video_file, params: dict[str, Any]) -> dict[str, Any]:
         "progress": 1,
         "message": "Uploaded. Starting AI tagging…",
     }
-    _write_status(folder, payload)
+    _write_status(folder, {**payload, "owner_id": owner_id})
     threading.Thread(
         target=_run_job,
         args=(folder, params),

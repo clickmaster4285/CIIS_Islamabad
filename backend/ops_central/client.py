@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ml.client import ml_auth_headers
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin
@@ -460,7 +461,7 @@ def probe_ml_health(ml_base_url: str) -> dict[str, Any]:
     errors: list[str] = []
     for path in ("health", "live/status"):
         try:
-            resp = requests.get(f"{base}/{path}", timeout=10, headers={"Accept": "application/json"})
+            resp = requests.get(f"{base}/{path}", timeout=10, headers={"Accept": "application/json", **ml_auth_headers()})
         except requests.RequestException as exc:
             return {"ok": False, "error": _friendly_conn_error(exc, base), "details": [str(exc)]}
         if resp.status_code == 200:
@@ -696,7 +697,7 @@ def fetch_ml_cameras(ml_base_url: str, *, server_name: str = "") -> dict[str, An
     if not base:
         return {"ok": False, "error": "ML URL is required.", "cameras": []}
     try:
-        resp = requests.get(f"{base}/live/status", timeout=8, headers={"Accept": "application/json"})
+        resp = requests.get(f"{base}/live/status", timeout=8, headers={"Accept": "application/json", **ml_auth_headers()})
     except requests.RequestException as exc:
         return {"ok": False, "error": _friendly_conn_error(exc, base), "cameras": []}
 

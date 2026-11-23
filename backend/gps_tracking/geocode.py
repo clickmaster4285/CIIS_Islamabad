@@ -2,17 +2,25 @@
 
 Uses Photon (Komoot/OSM) with Django cache so trail reports do not hammer the
 upstream API. Falls back to Nominatim when Photon has no result.
+
+Limits: failures are cached briefly too (no retry storm), at most GPS_GEOCODE_MAX_FETCH
+(default 10) uncached points are looked up per request, Nominatim is called at most once
+per second per process (its usage policy), and GPS_GEOCODE_ENABLED=False (settings)
+turns all external lookups off (cached names are still served).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Iterable
 
+from django.conf import settings
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
@@ -23,6 +31,22 @@ CACHE_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
 CACHE_PREFIX = "gps:revgeo:v2:"
 MAX_POINTS_PER_REQUEST = 80
 USER_AGENT = "CIIS-Peshawar-GPS/1.0 (customs enforcement; contact=ops)"
+# Lookups that found nothing (or failed) are remembered this long before trying again.
+NEGATIVE_CACHE_TTL_SECONDS = 60 * 60
+_NEGATIVE = "\x00none"
+DEFAULT_MAX_FETCH_PER_REQUEST = 10
+NOMINATIM_MIN_INTERVAL_SEC = 1.0
+
+_nominatim_lock = threading.Lock()
+_nominatim_last_call = 0.0
+
+
+def geocoding_enabled() -> bool:
+    return bool(getattr(settings, "GPS_GEOCODE_ENABLED", True))
+
+
+def max_fetch_per_request() -> int:
+    return max(0, int(getattr(settings, "GPS_GEOCODE_MAX_FETCH", DEFAULT_MAX_FETCH_PER_REQUEST)))
 
 
 def coord_key(lat: float, lng: float) -> str:
@@ -30,7 +54,10 @@ def coord_key(lat: float, lng: float) -> str:
 
 
 def _cache_get(key: str) -> str | None:
+    """Cached name, "" for a remembered miss/failure, None when not cached."""
     value = cache.get(f"{CACHE_PREFIX}{key}")
+    if value == _NEGATIVE:
+        return ""
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -39,6 +66,8 @@ def _cache_get(key: str) -> str | None:
 def _cache_set(key: str, name: str) -> None:
     if name:
         cache.set(f"{CACHE_PREFIX}{key}", name, CACHE_TTL_SECONDS)
+    else:
+        cache.set(f"{CACHE_PREFIX}{key}", _NEGATIVE, NEGATIVE_CACHE_TTL_SECONDS)
 
 
 def _http_get_json(url: str, timeout: float = 8.0) -> dict | list | None:
@@ -150,7 +179,16 @@ def _reverse_nominatim(lat: float, lng: float) -> str:
             "accept-language": "en",
         }
     )
-    data = _http_get_json(f"https://nominatim.openstreetmap.org/reverse?{qs}")
+    global _nominatim_last_call
+    # Nominatim allows at most 1 request/second: serialise calls from every worker thread.
+    with _nominatim_lock:
+        wait = NOMINATIM_MIN_INTERVAL_SEC - (time.monotonic() - _nominatim_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            data = _http_get_json(f"https://nominatim.openstreetmap.org/reverse?{qs}")
+        finally:
+            _nominatim_last_call = time.monotonic()
     if not isinstance(data, dict):
         return ""
     return _format_nominatim(data)
@@ -162,18 +200,21 @@ def reverse_geocode_one(lat: float, lng: float) -> str:
     cached = _cache_get(key)
     if cached is not None:
         return cached
+    if not geocoding_enabled():
+        return ""
 
     name = _reverse_photon(lat, lng) or _reverse_nominatim(lat, lng)
-    if name:
-        _cache_set(key, name)
+    _cache_set(key, name)  # an empty result is cached briefly as a miss
     return name
 
 
-def reverse_geocode_batch(points: Iterable[dict]) -> list[dict]:
+def reverse_geocode_batch(points: Iterable[dict], *, max_fetch: int | None = None) -> list[dict]:
     """
     Resolve many points. Returns one result per unique rounded key (insertion order).
 
-    Each item: {key, latitude, longitude, locationName}
+    Each item: {key, latitude, longitude, locationName}. Cached names are always served;
+    at most max_fetch (GPS_GEOCODE_MAX_FETCH) uncached points are looked up upstream, the
+    rest come back with an empty name and fill in on later requests.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -210,6 +251,9 @@ def reverse_geocode_batch(points: Iterable[dict]) -> list[dict]:
             }
         else:
             to_fetch.append((key, lat, lng))
+
+    limit = max_fetch_per_request() if max_fetch is None else max(0, int(max_fetch))
+    to_fetch = to_fetch[:limit] if geocoding_enabled() else []
 
     def _fetch(item: tuple[str, float, float]) -> tuple[str, float, float, str]:
         key, lat, lng = item

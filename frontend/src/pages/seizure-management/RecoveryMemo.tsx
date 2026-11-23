@@ -39,7 +39,6 @@ export default function RecoveryMemoPage() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
     fetchRecoveryMemos()
       .then(setRows)
       .catch(() => setRows([]))

@@ -23,7 +23,13 @@ class CamerasConfig(AppConfig):
                 ).close_old_connections
                 close_old_connections()
                 from .clip_capture import requeue_pending_clips
+                from .locks import is_leader
 
+                # Several web/worker processes boot this app; only one may re-queue,
+                # otherwise every process captures the same pending snapshots.
+                if not is_leader("clip_requeue"):
+                    logger.debug("[clip-capture] Another process owns pending-clip re-queue")
+                    return
                 requeue_pending_clips()
             except Exception:
                 logger.exception("[clip-capture] Could not re-queue pending clips")

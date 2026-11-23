@@ -204,9 +204,8 @@ class JourneyPersonDetailSerializer(JourneyPersonListSerializer):
     tracks = CameraTrackSerializer(many=True, read_only=True)
 
     class Meta(JourneyPersonListSerializer.Meta):
+        # Biometric vectors (face_embedding / reid_embedding) are never sent to the browser.
         fields = JourneyPersonListSerializer.Meta.fields + [
-            "face_embedding",
-            "reid_embedding",
             "metadata",
             "events",
             "tracks",

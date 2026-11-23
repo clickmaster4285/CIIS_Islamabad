@@ -56,7 +56,9 @@ class StaffLoginLinkTests(TestCase):
         preview = self.client.get(f"/api/staff/{staff.id}/login-preview/")
         self.assertEqual(preview.status_code, 200, preview.content)
         self.assertEqual(preview.data["username"], "ahmed.khan")
-        self.assertEqual(preview.data.get("default_password"), "123456")
+        temp = preview.data.get("default_password") or ""
+        self.assertNotEqual(temp, "123456")  # no fixed default any more: random, 12+ chars
+        self.assertGreaterEqual(len(temp), 12)
         self.assertFalse(preview.data["role_required"])
         self.assertFalse(preview.data["location_required"])
 

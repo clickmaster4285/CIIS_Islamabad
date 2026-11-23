@@ -37,7 +37,6 @@ import {
 import { resolveMediaUrl } from "@/lib/cameras-api"
 import { cn } from "@/lib/utils"
 
-const POLL_MS = 3000
 
 type StageMeta = {
   icon: typeof Film

@@ -83,7 +83,13 @@ def sync_camera_attendance_worker(cam, *, created: bool = False) -> None:
     """
     from django.conf import settings
 
+    from recognition.services import cctv_control
     from recognition.services.cctv_worker import get_cctv_manager
+
+    if not cctv_control.is_owner():
+        # Workers live in one process only (the lock holder): hand the change to it.
+        cctv_control.submit_command("sync", cam.id)
+        return
 
     manager = get_cctv_manager()
     if not getattr(settings, "ATTENDANCE_CCTV_AUTOSTART", True):
@@ -119,6 +125,10 @@ def sync_camera_attendance_worker(cam, *, created: bool = False) -> None:
 
 
 def stop_camera_attendance_worker(camera_id: int) -> None:
+    from recognition.services import cctv_control
     from recognition.services.cctv_worker import get_cctv_manager
 
-    get_cctv_manager().stop_camera(int(camera_id))
+    if cctv_control.is_owner():
+        get_cctv_manager().stop_camera(int(camera_id))
+    else:
+        cctv_control.submit_command("stop", int(camera_id))

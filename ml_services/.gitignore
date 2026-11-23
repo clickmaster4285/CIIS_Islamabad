@@ -39,3 +39,11 @@ Thumbs.db
 
 # Motion clips waiting for the backend to collect them
 motion_clips/
+
+# Runtime state written by the live service (per node) — never commit
+data/identity_counters*.json
+data/identity_counters*.json.corrupt-*
+data/.identity_counters*.tmp
+data/*.tmp
+# Face embedding cache (biometric data)
+data/face_embeddings_cache.json

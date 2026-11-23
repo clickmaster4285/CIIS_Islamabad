@@ -101,7 +101,10 @@ class MediaPushTests(TestCase):
         self.assertEqual((stats["attempted"], stats["verified"]), (6, 5))
         statuses = {r.path: MediaQueue.objects.get(pk=r.pk) for r in rows}
         self.assertEqual(statuses["img2.jpg"].status, MediaQueue.STATUS_PENDING)
-        self.assertEqual(statuses["img2.jpg"].attempts, 1)
+        # An HQ 5xx is transient: it backs off but never counts toward FAILED.
+        self.assertEqual(statuses["img2.jpg"].attempts, 0)
+        self.assertEqual(statuses["img2.jpg"].transient_failures, 1)
+        self.assertIsNotNone(statuses["img2.jpg"].next_attempt_at)
         self.assertIn("init HTTP 500", statuses["img2.jpg"].last_error)
         self.assertEqual(statuses["img0.jpg"].status, MediaQueue.STATUS_VERIFIED)
         self.assertEqual(statuses["img0.jpg"].bytes_uploaded, 9)

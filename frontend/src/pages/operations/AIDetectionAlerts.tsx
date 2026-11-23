@@ -21,7 +21,6 @@ import {
     Zap,
     Users2,
     Gauge,
-    Calendar,
     Search,
     ChevronDown,
     BarChart3,
@@ -44,7 +43,7 @@ interface DetectionAlert {
     acknowledged: boolean;
     resolved: boolean;
     thumbnail?: string;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
 }
 
 const AIDetectionAlerts: React.FC = () => {

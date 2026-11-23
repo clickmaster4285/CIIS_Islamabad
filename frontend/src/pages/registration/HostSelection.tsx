@@ -16,7 +16,6 @@ const steps = [
 export default function HostSelectionPage() {
   const [currentStep, setCurrentStep] = useState(1)
   const [activeStatus, setActiveStatus] = useState(true)
-  const [hostAcceptanceRequired, setHostAcceptanceRequired] = useState(true)
   const [escortRequired, setEscortRequired] = useState(true)
 
   return (

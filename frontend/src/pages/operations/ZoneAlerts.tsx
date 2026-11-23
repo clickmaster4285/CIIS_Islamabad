@@ -20,15 +20,12 @@ import {
     Shield,
     Circle,
     CircleDot,
-    ArrowRight,
     ArrowLeftRight,
     Maximize2,
     Minimize2,
     Grid,
     Layers,
-    Target,
-    Gauge,
-    Info
+    Target
 } from 'lucide-react';
 
 interface ZoneAlert {
@@ -53,7 +50,7 @@ interface ZoneAlert {
         x: number;
         y: number;
     };
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
 }
 
 const ZoneAlerts: React.FC = () => {

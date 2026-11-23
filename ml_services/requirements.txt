@@ -1,14 +1,32 @@
 # YOLO26 training and deployment (500-camera surveillance)
-ultralytics>=8.0.0
-PyYAML>=6.0
-opencv-python>=4.8.0
-numpy>=1.24.0,<2
-tqdm>=4.65.0
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-python-multipart>=0.0.9
-python-dotenv>=1.0.0
-requests>=2.31.0
+# Versions pinned to the ones installed in ml_services/.venv (Python 3.12) on 2026-11-23.
+# Upgrade deliberately (and re-run the test_*.py suite), not as a side effect of a reinstall.
+
+# torch / torchvision: install the CUDA wheel that matches the GPU driver first, e.g.
+#   pip install torch==2.14.0 torchvision==0.29.0 --index-url https://download.pytorch.org/whl/<cuXXX>
+torch==2.14.0
+torchvision==0.29.0
+ultralytics==8.4.149
+lap==0.5.13
+PyYAML==6.0.2
+# NOTE: the venv also has opencv-contrib-python 4.10.0.84 installed; having both opencv
+# packages installed is a known conflict (they share the cv2 module) — keep only one.
+opencv-python==5.0.0.93
+numpy==2.3.5
+tqdm==4.70.1
+fastapi==0.141.1
+starlette==1.6.0
+anyio==4.15.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+python-multipart==0.0.32
+python-dotenv==1.2.3
+requests==2.34.2
+onnxruntime==1.31.1
+
+# /live/metrics system readings (optional at runtime, but pinned so they are present)
+psutil==7.2.2
+nvidia-ml-py==13.610.43
 
 # Optional: enable FAISS gallery search when enrolled vectors >= ML_FACE_FAISS_MIN_EMBEDDINGS
 # faiss-cpu>=1.7.4
@@ -17,14 +35,14 @@ requests>=2.31.0
 # Install GPU PaddlePaddle first (CUDA 11.8 wheel matches this project's PyTorch).
 # Direct Windows cp311 wheel (official index is often slow):
 #   python -m pip install https://paddle-whl.bj.bcebos.com/stable/cu118/paddlepaddle-gpu/paddlepaddle_gpu-3.2.2-cp311-cp311-win_amd64.whl
-# Then:
-paddleocr>=3.0.0
+# Installed here: paddlepaddle==3.2.2
+paddleocr==3.7.0
 
 # Optional: for deployment / inference
 # onnx>=1.14.0
 # onnxruntime-gpu>=1.15.0
 
 # TekEye voice agent — on-prem speech-to-text
-faster-whisper>=1.1.0
+faster-whisper==1.2.1
 # PyAV 16+ dropped metadata_errors from av.open; faster-whisper 1.2 still passes it.
-av>=13,<16
+av==15.1.0

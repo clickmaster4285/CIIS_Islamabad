@@ -56,6 +56,8 @@ class SyncOutbox(models.Model):
     done_at = models.DateTimeField(null=True, blank=True)
     # Schema-unsupported retries must not count toward dead (guide fix).
     schema_hold = models.BooleanField(default=False)
+    # When a worker moved the row to "sending"; stuck-row recovery keys off this.
+    claimed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["seq"]
@@ -241,6 +243,12 @@ class MediaQueue(models.Model):
     wait_outbox_done = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     verified_at = models.DateTimeField(null=True, blank=True)
+    # Retry backoff: not picked up again before this time (null = now).
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # When a worker moved the row to "uploading" (stuck-row recovery).
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    # Network / HQ-side (5xx, auth) failures in a row; they back off but never mark the row failed.
+    transient_failures = models.PositiveIntegerField(default=0)
 
     class Meta:
         ordering = ["priority", "created_at"]
@@ -478,8 +486,14 @@ class CityControlState(models.Model):
     full_history_request_id = models.CharField(max_length=64, blank=True, default="")
     full_history_done_id = models.CharField(max_length=64, blank=True, default="")
     full_history_running = models.BooleanField(default=False)
+    # A run whose heartbeat is older than FULL_HISTORY_STALE_SEC is treated as dead.
+    full_history_started_at = models.DateTimeField(null=True, blank=True)
+    full_history_heartbeat_at = models.DateTimeField(null=True, blank=True)
     # Last HqDownlink.seq applied here (Stage 4).
     downlink_seq = models.PositiveBigIntegerField(default=0)
+    # The downlink item the cursor is stuck on, and how many pulls it has failed.
+    downlink_failed_seq = models.PositiveBigIntegerField(default=0)
+    downlink_failed_tries = models.PositiveIntegerField(default=0)
     last_hq_contact_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 

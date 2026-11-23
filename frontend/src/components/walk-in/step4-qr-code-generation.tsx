@@ -3,13 +3,6 @@
 import { useEffect, useMemo } from "react"
 import { QRCodeCanvas } from "qrcode.react"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { QrCode } from "lucide-react"
 import { formatAccessZoneLabel, resolveAccessZoneFromDepartment } from "@/lib/access-zone"
 import { useAccessZones } from "@/hooks/use-access-zones"
@@ -60,7 +53,7 @@ export function WalkInStep4QRCodeGeneration({
   onFinish,
 }: WalkInStep4QRCodeGenerationProps) {
   const { data: zoneData } = useAccessZones(formData.location ?? undefined)
-  const zoneOptions = zoneData?.options ?? []
+  const zoneOptions = useMemo(() => zoneData?.options ?? [], [zoneData?.options])
 
   const department =
     (formData as { department?: string }).department ??

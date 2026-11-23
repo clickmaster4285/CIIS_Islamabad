@@ -46,3 +46,35 @@ def screen_moire_score(image: np.ndarray) -> float:
     magnitude[cy - 4 : cy + 5, cx - 4 : cx + 5] = 0
     peak = float(magnitude.max()) + 1e-6
     return float(np.clip(magnitude.mean() / peak, 0.0, 1.0))
+
+
+def _box_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in a[:4]]
+    bx1, by1, bx2, by2 = [float(v) for v in b[:4]]
+    inter = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    if inter <= 0:
+        return 0.0
+    union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def closest_face(faces, bbox, *, min_iou: float = 0.3):
+    """
+    The face in ``faces`` that is the same person as the one at ``bbox`` (same image coordinates).
+
+    Picks the highest IoU with the original box; returns None when nothing overlaps enough, so a
+    re-detection never silently switches to a different person in a crowded frame.
+    """
+    if not faces:
+        return None
+    if bbox is None:
+        return max(faces, key=lambda f: float(getattr(f, "det_score", 0.0)))
+    best, best_iou = None, 0.0
+    for face in faces:
+        fb = getattr(face, "bbox", None)
+        if fb is None:
+            continue
+        iou = _box_iou(fb, bbox)
+        if iou > best_iou:
+            best, best_iou = face, iou
+    return best if best_iou >= min_iou else None

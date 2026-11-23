@@ -33,7 +33,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { LOCATION_OPTIONS, locationLabel } from "@/lib/locations"
 import { fetchWarehouses, createWarehouse, ensureWarehouseZones, type WarehouseRecord } from "@/lib/warehouse-zones-api"
 import { WAREHOUSE_STATUSES } from "@/lib/warehouse-zones"
-import { CREATE_WAREHOUSE_FLOW, WAREHOUSE_TABLE_COLUMNS } from "@/lib/warehouse-module-spec"
+import { CREATE_WAREHOUSE_FLOW } from "@/lib/warehouse-module-spec"
 
 export default function WarehouseSetupPage() {
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from urllib.parse import quote, urljoin
 
 import requests
@@ -49,28 +50,43 @@ def _source_variants(rtsp_url: str) -> list[str]:
     return [soft, hw]
 
 
-def _put_stream(name: str, src: str) -> bool:
+WARM_TOTAL_TIMEOUT_SEC = 10.0
+
+
+def _list_streams(timeout: float = 4.0) -> dict | None:
     base = go2rtc_base()
     try:
-        try:
-            requests.delete(f"{base}/api/streams", params={"src": name}, timeout=5)
-        except requests.RequestException:
-            pass
+        res = requests.get(f"{base}/api/streams", timeout=timeout)
+        data = res.json() if res.ok else None
+    except (requests.RequestException, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _stream_uses(entry, rtsp_url: str) -> bool:
+    """True when an existing go2rtc stream entry was registered for this RTSP URL."""
+    if not rtsp_url:
+        return False
+    text = repr(entry)
+    return rtsp_url in text
+
+
+def _put_stream(name: str, src: str, *, timeout: float = 8.0) -> bool:
+    """Register (or replace the source of) a stream. Never deletes a live stream first."""
+    base = go2rtc_base()
+    try:
         url = f"{base}/api/streams?name={quote(name, safe='')}&src={quote(src, safe='')}"
-        res = requests.put(url, timeout=8)
-        check = requests.get(f"{base}/api/streams", timeout=5)
-        streams = check.json() if check.ok else {}
-        return bool(isinstance(streams, dict) and name in streams) or res.status_code in (
-            200,
-            201,
-            204,
-        )
+        res = requests.put(url, timeout=max(1.0, timeout))
+        if res.status_code in (200, 201, 204):
+            return True
+        streams = _list_streams(timeout=min(4.0, timeout))
+        return bool(streams and name in streams)
     except requests.RequestException as exc:
         logger.warning("go2rtc put %s failed: %s", name, exc)
         return False
 
 
-def warm_stream(name: str, *, timeout: float = 25.0) -> bool:
+def warm_stream(name: str, *, timeout: float = 8.0) -> bool:
     """Pull one JPEG so go2rtc starts ffmpeg/RTSP before WebRTC SDP."""
     base = go2rtc_base()
     if not base or not name:
@@ -79,7 +95,7 @@ def warm_stream(name: str, *, timeout: float = 25.0) -> bool:
         res = requests.get(
             f"{base}/api/frame.jpeg",
             params={"src": name},
-            timeout=timeout,
+            timeout=max(1.0, timeout),
         )
         ok = res.status_code == 200 and len(res.content or b"") > 1000
         if not ok:
@@ -95,22 +111,38 @@ def warm_stream(name: str, *, timeout: float = 25.0) -> bool:
         return False
 
 
-def ensure_stream(name: str, rtsp_url: str) -> bool:
-    """Register stream; prefer first variant that warms a real JPEG frame."""
+def ensure_stream(name: str, rtsp_url: str, *, total_timeout: float = WARM_TOTAL_TIMEOUT_SEC) -> bool:
+    """Register a stream and warm it, within ``total_timeout`` seconds overall.
+
+    A stream that go2rtc already has for the same RTSP URL is reused as is (other
+    viewers may be watching it) — it is not deleted and re-registered.
+    Returns True when a frame was decoded.
+    """
     base = go2rtc_base()
     variants = _source_variants(rtsp_url)
     if not base or not name or not variants:
         return False
+    deadline = time.monotonic() + max(1.0, total_timeout)
+
+    def remaining() -> float:
+        return deadline - time.monotonic()
+
+    streams = _list_streams(timeout=min(3.0, remaining())) or {}
+    if name in streams and _stream_uses(streams.get(name), rtsp_url):
+        return warm_stream(name, timeout=min(8.0, remaining()))
 
     for src in variants:
-        if not _put_stream(name, src):
+        if remaining() < 1.0:
+            break
+        if not _put_stream(name, src, timeout=min(5.0, remaining())):
             continue
-        if warm_stream(name, timeout=20.0):
-            logger.info("go2rtc stream %s ready via %s", name, src[:90])
+        if remaining() < 1.0:
+            break
+        if warm_stream(name, timeout=min(8.0, remaining())):
+            logger.info("go2rtc stream %s ready via %s", name, src.split("#", 1)[-1][:60])
             return True
-        logger.warning("go2rtc stream %s warm failed for %s", name, src[:90])
-
-    return _put_stream(name, variants[0])
+        logger.warning("go2rtc stream %s warm failed for variant #%s", name, src.split("#", 1)[-1][:60])
+    return False
 
 
 def exchange_webrtc_sdp(name: str, offer_sdp: str) -> tuple[str | None, str]:

@@ -31,6 +31,10 @@ MOBILE_EVENTS = {
 }
 
 
+CLIENT_ACTION_PREFIX = "[client] "
+CLIENT_REPORT_SOURCES = frozenset({"web", "mobile"})
+
+
 class ActivityLogPagination(PageNumberPagination):
     page_size = 50
     page_size_query_param = "page_size"
@@ -121,11 +125,15 @@ class ReportActivityView(APIView):
             create_activity_log(request.user, request, action, source="mobile")
             return Response({"ok": True, "action": action}, status=status.HTTP_201_CREATED)
 
-        action = (request.data.get("action") or "").strip()
+        action = str(request.data.get("action") or "").strip()
         if not action:
             return Response({"detail": "action is required"}, status=status.HTTP_400_BAD_REQUEST)
-        source = (request.data.get("source") or "web").strip() or "web"
-        create_activity_log(request.user, request, action[:255], source=source)
+        # Free text from the browser: mark it as client-reported so it can never pass
+        # for a server-recorded entry (e.g. a fake "LOGIN" or "Deleted user ...").
+        source = str(request.data.get("source") or "web").strip().lower()
+        if source not in CLIENT_REPORT_SOURCES:
+            source = "web"
+        create_activity_log(request.user, request, f"{CLIENT_ACTION_PREFIX}{action}"[:255], source=source)
         return Response({"ok": True}, status=status.HTTP_201_CREATED)
 
 

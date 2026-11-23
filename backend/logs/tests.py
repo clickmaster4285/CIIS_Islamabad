@@ -112,12 +112,23 @@ class MobileEnforcementTests(TestCase):
         self.assertEqual(session.status, "LOGGED_OUT")
         self.assertIsNotNone(session.ended_at)
 
-    def test_logout_invalidates_mobile_session_not_token(self):
+    def test_logout_revokes_token_and_session(self):
         login = self._login(self.officer)
         token = login.data["token"]
         session_id = login.data["mobile_session"]["session_id"]
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
-        self.client.post("/api/auth/logout/", {"session_id": session_id}, format="json")
+        res = self.client.post("/api/auth/logout/", {"session_id": session_id}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(Token.objects.filter(key=token).exists())
+        # The copied token no longer authenticates anything.
+        self.assertEqual(self.client.get("/api/mobile-devices/").status_code, 401)
+
+    def test_logout_keep_token_invalidates_mobile_session_only(self):
+        login = self._login(self.officer)
+        token = login.data["token"]
+        session_id = login.data["mobile_session"]["session_id"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {token}")
+        self.client.post("/api/auth/logout/?keep_token=1", {"session_id": session_id}, format="json")
         self.assertTrue(Token.objects.filter(key=token).exists())
         ping = self.client.post(
             "/api/gps/ping/",
