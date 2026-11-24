@@ -1,0 +1,2556 @@
+{
+  "mode": "synthetic",
+  "video": "motion_clips/cam-27-1795157077113-457a1e.mp4",
+  "frames": 120,
+  "reader_fps": 12.0,
+  "mix": "general_objects+custom_objects+smoke_fire+weapon+face_recognition+attendance+anpr:0.75,face_recognition+attendance:0.25",
+  "env_overrides": [
+    "ML_FACE_TRACK_CACHE=true"
+  ],
+  "rows": [
+    {
+      "step": "4cams",
+      "cameras": 4,
+      "receiving": 4,
+      "starved": 0,
+      "sla_sec": 1.0,
+      "sla_met": false,
+      "total_infer_fps": 3.883,
+      "cam_fps_median": 0.892,
+      "cam_fps_min": 0.867,
+      "gap_p50_median": 1.052,
+      "gap_p95_median": 2.095,
+      "gap_p95_worst": 2.457,
+      "queue_delay_p95_median": 0.077,
+      "latency_p95_median": 2.038,
+      "stale_frames": 0,
+      "errors": 0,
+      "gpu_model_busy_pct": 63.8,
+      "gpu_util_pct": 52,
+      "gpu_mem_used_mb": 2659,
+      "gpu_decoder_pct": 7,
+      "cpu_pct": 16.7,
+      "process_cpu_pct": 167.3,
+      "process_rss_mb": 2515,
+      "models": {
+        "coco": {
+          "img_s": 3.867,
+          "batch": 1.0,
+          "p50_ms": 56.5,
+          "p95_ms": 189.5,
+          "wait_ms": 49.5,
+          "busy_pct": 30.7
+        },
+        "custom": {
+          "img_s": 0.867,
+          "batch": 1.0,
+          "p50_ms": 55.9,
+          "p95_ms": 115.2,
+          "wait_ms": 75.0,
+          "busy_pct": 5.7
+        },
+        "face_recognize": {
+          "img_s": 68.267,
+          "batch": 1.0,
+          "p50_ms": 5.8,
+          "p95_ms": 9.9,
+          "wait_ms": 9.1,
+          "busy_pct": 42.9
+        },
+        "identity_registry": {
+          "img_s": 75.567,
+          "batch": 19.46,
+          "p50_ms": 31.0,
+          "p95_ms": 63.9,
+          "wait_ms": 2.3,
+          "busy_pct": 12.9
+        },
+        "pose": {
+          "img_s": 3.867,
+          "batch": 1.0,
+          "p50_ms": 39.8,
+          "p95_ms": 101.1,
+          "wait_ms": 74.9,
+          "busy_pct": 18.9
+        },
+        "smoke": {
+          "img_s": 0.883,
+          "batch": 1.0,
+          "p50_ms": 38.8,
+          "p95_ms": 99.5,
+          "wait_ms": 57.4,
+          "busy_pct": 4.4
+        },
+        "weapon": {
+          "img_s": 0.883,
+          "batch": 1.0,
+          "p50_ms": 37.9,
+          "p95_ms": 102.0,
+          "wait_ms": 45.6,
+          "busy_pct": 4.1
+        }
+      }
+    },
+    {
+      "step": "8cams",
+      "cameras": 8,
+      "receiving": 2,
+      "starved": 6,
+      "sla_sec": 1.0,
+      "sla_met": false,
+      "total_infer_fps": 3.817,
+      "cam_fps_median": 0.483,
+      "cam_fps_min": 0.45,
+      "gap_p50_median": 2.029,
+      "gap_p95_median": 2.841,
+      "gap_p95_worst": 2.942,
+      "queue_delay_p95_median": 0.077,
+      "latency_p95_median": 1.574,
+      "stale_frames": 0,
+      "errors": 0,
+      "gpu_model_busy_pct": 65.1,
+      "gpu_util_pct": 51,
+      "gpu_mem_used_mb": 2659,
+      "gpu_decoder_pct": 3,
+      "cpu_pct": 19.1,
+      "process_cpu_pct": 192.7,
+      "process_rss_mb": 2554,
+      "models": {
+        "coco": {
+          "img_s": 3.833,
+          "batch": 1.0,
+          "p50_ms": 54.8,
+          "p95_ms": 159.5,
+          "wait_ms": 44.6,
+          "busy_pct": 30.0
+        },
+        "custom": {
+          "img_s": 0.933,
+          "batch": 1.0,
+          "p50_ms": 54.5,
+          "p95_ms": 119.5,
+          "wait_ms": 46.1,
+          "busy_pct": 6.3
+        },
+        "face_recognize": {
+          "img_s": 68.267,
+          "batch": 1.0,
+          "p50_ms": 5.7,
+          "p95_ms": 10.0,
+          "wait_ms": 9.1,
+          "busy_pct": 42.7
+        },
+        "identity_registry": {
+          "img_s": 74.683,
+          "batch": 19.57,
+          "p50_ms": 32.2,
+          "p95_ms": 72.7,
+          "wait_ms": 0.9,
+          "busy_pct": 13.6
+        },
+        "pose": {
+          "img_s": 3.833,
+          "batch": 1.0,
+          "p50_ms": 39.4,
+          "p95_ms": 111.2,
+          "wait_ms": 55.9,
+          "busy_pct": 19.8
+        },
+        "smoke": {
+          "img_s": 0.933,
+          "batch": 1.0,
+          "p50_ms": 38.2,
+          "p95_ms": 102.3,
+          "wait_ms": 42.1,
+          "busy_pct": 4.7
+        },
+        "weapon": {
+          "img_s": 0.95,
+          "batch": 1.0,
+          "p50_ms": 36.3,
+          "p95_ms": 89.7,
+          "wait_ms": 51.1,
+          "busy_pct": 4.3
+        }
+      }
+    },
+    {
+      "step": "10cams",
+      "cameras": 10,
+      "receiving": 1,
+      "starved": 9,
+      "sla_sec": 1.0,
+      "sla_met": false,
+      "total_infer_fps": 3.567,
+      "cam_fps_median": 0.3,
+      "cam_fps_min": 0.283,
+      "gap_p50_median": 3.255,
+      "gap_p95_median": 3.873,
+      "gap_p95_worst": 4.412,
+      "queue_delay_p95_median": 0.077,
+      "latency_p95_median": 1.57,
+      "stale_frames": 0,
+      "errors": 0,
+      "gpu_model_busy_pct": 61.9,
+      "gpu_util_pct": 20,
+      "gpu_mem_used_mb": 2654,
+      "gpu_decoder_pct": 6,
+      "cpu_pct": 18.4,
+      "process_cpu_pct": 178.4,
+      "process_rss_mb": 2596,
+      "models": {
+        "coco": {
+          "img_s": 3.567,
+          "batch": 1.0,
+          "p50_ms": 55.7,
+          "p95_ms": 182.8,
+          "wait_ms": 56.6,
+          "busy_pct": 29.1
+        },
+        "custom": {
+          "img_s": 0.967,
+          "batch": 1.0,
+          "p50_ms": 52.6,
+          "p95_ms": 155.7,
+          "wait_ms": 58.0,
+          "busy_pct": 6.7
+        },
+        "face_recognize": {
+          "img_s": 68.267,
+          "batch": 1.0,
+          "p50_ms": 5.7,
+          "p95_ms": 9.8,
+          "wait_ms": 10.2,
+          "busy_pct": 42.9
+        },
+        "identity_registry": {
+          "img_s": 70.833,
+          "batch": 19.86,
+          "p50_ms": 35.4,
+          "p95_ms": 70.6,
+          "wait_ms": 0.5,
+          "busy_pct": 13.6
+        },
+        "pose": {
+          "img_s": 3.583,
+          "batch": 1.0,
+          "p50_ms": 39.1,
+          "p95_ms": 90.3,
+          "wait_ms": 70.0,
+          "busy_pct": 16.5
+        },
+        "smoke": {
+          "img_s": 0.967,
+          "batch": 1.0,
+          "p50_ms": 36.7,
+          "p95_ms": 105.8,
+          "wait_ms": 51.3,
+          "busy_pct": 4.9
+        },
+        "weapon": {
+          "img_s": 0.967,
+          "batch": 1.0,
+          "p50_ms": 35.9,
+          "p95_ms": 102.8,
+          "wait_ms": 48.8,
+          "busy_pct": 4.7
+        }
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "cameras": 4,
+      "snapshot": {
+        "at": 1795239599.751,
+        "window_sec": 60.0,
+        "measured_sec": 60.0,
+        "sla_sec": 1.0,
+        "target_interval_sec": 0.5,
+        "stale_sec": 2.0,
+        "summary": {
+          "cameras_total": 4,
+          "cameras_connected": 4,
+          "cameras_receiving": 4,
+          "cameras_starved": 0,
+          "starved_keys": [],
+          "total_infer_fps": 3.883,
+          "worst_gap_p95_sec": 2.457,
+          "sla_met": false,
+          "gpu_model_busy_pct": 63.8
+        },
+        "models": {
+          "coco": {
+            "kind": "gpu",
+            "calls_per_sec": 3.867,
+            "images_per_sec": 3.867,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 56.5,
+            "latency_p95_ms": 189.5,
+            "lock_wait_avg_ms": 49.5,
+            "lock_wait_p95_ms": 126.6,
+            "busy_pct": 30.7,
+            "total_calls": 233,
+            "total_images": 233
+          },
+          "custom": {
+            "kind": "gpu",
+            "calls_per_sec": 0.867,
+            "images_per_sec": 0.867,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 55.9,
+            "latency_p95_ms": 115.2,
+            "lock_wait_avg_ms": 75.0,
+            "lock_wait_p95_ms": 149.7,
+            "busy_pct": 5.7,
+            "total_calls": 53,
+            "total_images": 53
+          },
+          "face_recognize": {
+            "kind": "cpu",
+            "calls_per_sec": 68.267,
+            "images_per_sec": 68.267,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 5.8,
+            "latency_p95_ms": 9.9,
+            "lock_wait_avg_ms": 9.1,
+            "lock_wait_p95_ms": 19.7,
+            "busy_pct": 42.9,
+            "total_calls": 6109,
+            "total_images": 6109
+          },
+          "identity_registry": {
+            "kind": "cpu",
+            "calls_per_sec": 3.883,
+            "images_per_sec": 75.567,
+            "avg_batch": 19.46,
+            "max_batch": 25,
+            "latency_p50_ms": 31.0,
+            "latency_p95_ms": 63.9,
+            "lock_wait_avg_ms": 2.3,
+            "lock_wait_p95_ms": 19.2,
+            "busy_pct": 12.9,
+            "total_calls": 235,
+            "total_images": 4574
+          },
+          "pose": {
+            "kind": "gpu",
+            "calls_per_sec": 3.867,
+            "images_per_sec": 3.867,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 39.8,
+            "latency_p95_ms": 101.1,
+            "lock_wait_avg_ms": 74.9,
+            "lock_wait_p95_ms": 148.3,
+            "busy_pct": 18.9,
+            "total_calls": 232,
+            "total_images": 232
+          },
+          "smoke": {
+            "kind": "gpu",
+            "calls_per_sec": 0.883,
+            "images_per_sec": 0.883,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 38.8,
+            "latency_p95_ms": 99.5,
+            "lock_wait_avg_ms": 57.4,
+            "lock_wait_p95_ms": 131.5,
+            "busy_pct": 4.4,
+            "total_calls": 53,
+            "total_images": 53
+          },
+          "weapon": {
+            "kind": "gpu",
+            "calls_per_sec": 0.883,
+            "images_per_sec": 0.883,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 37.9,
+            "latency_p95_ms": 102.0,
+            "lock_wait_avg_ms": 45.6,
+            "lock_wait_p95_ms": 133.7,
+            "busy_pct": 4.1,
+            "total_calls": 53,
+            "total_images": 53
+          }
+        },
+        "stages": {
+          "acquire.latest_frame_copy": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 1.23,
+            "p50_ms": 1.12,
+            "p95_ms": 1.65,
+            "max_ms": 3.19,
+            "busy_pct": 0.5
+          },
+          "event.clip_submit": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.01,
+            "busy_pct": 0.0
+          },
+          "event.motion_update": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 0.5,
+            "p50_ms": 0.49,
+            "p95_ms": 0.62,
+            "max_ms": 0.84,
+            "busy_pct": 0.2
+          },
+          "event.publish_incl_evidence_jpeg": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 6.62,
+            "p50_ms": 6.49,
+            "p95_ms": 7.25,
+            "max_ms": 21.61,
+            "busy_pct": 2.6
+          },
+          "face.call_from_coco_parse": {
+            "calls_per_sec": 49.88,
+            "avg_ms": 30.29,
+            "p50_ms": 30.53,
+            "p95_ms": 49.83,
+            "max_ms": 149.1,
+            "busy_pct": 151.1
+          },
+          "face.call_from_identity_lock": {
+            "calls_per_sec": 1.9,
+            "avg_ms": 9.77,
+            "p50_ms": 7.59,
+            "p95_ms": 17.86,
+            "max_ms": 26.01,
+            "busy_pct": 1.9
+          },
+          "face.quality_check": {
+            "calls_per_sec": 44.82,
+            "avg_ms": 0.46,
+            "p50_ms": 0.39,
+            "p95_ms": 0.87,
+            "max_ms": 6.82,
+            "busy_pct": 2.1
+          },
+          "face.reused_from_pass1": {
+            "calls_per_sec": 66.55,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "face.track_gate_hit": {
+            "calls_per_sec": 16.7,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "face.yunet_detect": {
+            "calls_per_sec": 101.67,
+            "avg_ms": 6.15,
+            "p50_ms": 5.69,
+            "p95_ms": 9.71,
+            "max_ms": 112.86,
+            "busy_pct": 62.5
+          },
+          "post.coco_parse_incl_face": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 12.27,
+            "p50_ms": 7.85,
+            "p95_ms": 35.96,
+            "max_ms": 125.21,
+            "busy_pct": 4.7
+          },
+          "pre.prepare_frame_resize": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 0.02,
+            "p50_ms": 0.02,
+            "p95_ms": 0.02,
+            "max_ms": 0.04,
+            "busy_pct": 0.0
+          },
+          "render.loop_all_cams": {
+            "calls_per_sec": 11.83,
+            "avg_ms": 0.02,
+            "p50_ms": 0.01,
+            "p95_ms": 0.02,
+            "max_ms": 0.14,
+            "busy_pct": 0.0
+          },
+          "step.bytetrack": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 11.25,
+            "p50_ms": 10.61,
+            "p95_ms": 15.6,
+            "max_ms": 44.55,
+            "busy_pct": 4.4
+          },
+          "step.coco_and_faces": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 141.2,
+            "p50_ms": 140.24,
+            "p95_ms": 232.31,
+            "max_ms": 369.8,
+            "busy_pct": 54.6
+          },
+          "step.custom_model": {
+            "calls_per_sec": 0.87,
+            "avg_ms": 141.31,
+            "p50_ms": 142.26,
+            "p95_ms": 222.81,
+            "max_ms": 260.84,
+            "busy_pct": 12.2
+          },
+          "step.faces_track_gated": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 389.59,
+            "p50_ms": 421.68,
+            "p95_ms": 708.96,
+            "max_ms": 814.05,
+            "busy_pct": 151.3
+          },
+          "step.filters": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 0.16,
+            "p50_ms": 0.16,
+            "p95_ms": 0.2,
+            "max_ms": 0.26,
+            "busy_pct": 0.1
+          },
+          "step.identity_reid": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 263.74,
+            "p50_ms": 162.17,
+            "p95_ms": 1403.56,
+            "max_ms": 1778.42,
+            "busy_pct": 102.4
+          },
+          "step.pose": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 126.08,
+            "p50_ms": 127.65,
+            "p95_ms": 211.21,
+            "max_ms": 316.7,
+            "busy_pct": 48.8
+          },
+          "step.smoke_model": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 107.21,
+            "p50_ms": 111.38,
+            "p95_ms": 190.57,
+            "max_ms": 269.68,
+            "busy_pct": 9.5
+          },
+          "step.weapon_model": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 92.26,
+            "p50_ms": 77.54,
+            "p95_ms": 175.67,
+            "max_ms": 269.5,
+            "busy_pct": 8.1
+          },
+          "sync.gil_wakeup_lag": {
+            "calls_per_sec": 177.4,
+            "avg_ms": 0.62,
+            "p50_ms": 0.51,
+            "p95_ms": 1.1,
+            "max_ms": 102.5,
+            "busy_pct": 11.0
+          },
+          "track.reid_osnet_batch": {
+            "calls_per_sec": 3.88,
+            "avg_ms": 228.1,
+            "p50_ms": 126.66,
+            "p95_ms": 1344.47,
+            "max_ms": 1722.57,
+            "busy_pct": 88.6
+          },
+          "yolo.coco.1_preprocess": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 10.38,
+            "p50_ms": 7.59,
+            "p95_ms": 24.35,
+            "max_ms": 68.48,
+            "busy_pct": 4.0
+          },
+          "yolo.coco.2_inference": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 63.84,
+            "p50_ms": 45.31,
+            "p95_ms": 143.29,
+            "max_ms": 222.75,
+            "busy_pct": 24.7
+          },
+          "yolo.coco.3_postprocess": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 2.72,
+            "p50_ms": 1.44,
+            "p95_ms": 10.49,
+            "max_ms": 38.28,
+            "busy_pct": 1.1
+          },
+          "yolo.coco.4_other_overhead": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 2.44,
+            "p50_ms": 0.53,
+            "p95_ms": 13.34,
+            "max_ms": 69.59,
+            "busy_pct": 0.9
+          },
+          "yolo.custom.1_preprocess": {
+            "calls_per_sec": 0.87,
+            "avg_ms": 9.03,
+            "p50_ms": 8.25,
+            "p95_ms": 12.75,
+            "max_ms": 14.6,
+            "busy_pct": 0.8
+          },
+          "yolo.custom.2_inference": {
+            "calls_per_sec": 0.87,
+            "avg_ms": 53.18,
+            "p50_ms": 43.93,
+            "p95_ms": 100.03,
+            "max_ms": 106.96,
+            "busy_pct": 4.6
+          },
+          "yolo.custom.3_postprocess": {
+            "calls_per_sec": 0.87,
+            "avg_ms": 2.39,
+            "p50_ms": 1.39,
+            "p95_ms": 5.73,
+            "max_ms": 27.85,
+            "busy_pct": 0.2
+          },
+          "yolo.custom.4_other_overhead": {
+            "calls_per_sec": 0.87,
+            "avg_ms": 0.9,
+            "p50_ms": 0.49,
+            "p95_ms": 1.44,
+            "max_ms": 12.03,
+            "busy_pct": 0.1
+          },
+          "yolo.pose.1_preprocess": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 3.97,
+            "p50_ms": 2.61,
+            "p95_ms": 9.07,
+            "max_ms": 13.2,
+            "busy_pct": 1.5
+          },
+          "yolo.pose.2_inference": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 40.02,
+            "p50_ms": 34.15,
+            "p95_ms": 70.09,
+            "max_ms": 128.81,
+            "busy_pct": 15.5
+          },
+          "yolo.pose.3_postprocess": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 3.04,
+            "p50_ms": 1.44,
+            "p95_ms": 13.91,
+            "max_ms": 41.22,
+            "busy_pct": 1.2
+          },
+          "yolo.pose.4_other_overhead": {
+            "calls_per_sec": 3.87,
+            "avg_ms": 1.94,
+            "p50_ms": 0.51,
+            "p95_ms": 8.57,
+            "max_ms": 48.26,
+            "busy_pct": 0.8
+          },
+          "yolo.smoke.1_preprocess": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 8.79,
+            "p50_ms": 7.36,
+            "p95_ms": 13.11,
+            "max_ms": 20.0,
+            "busy_pct": 0.8
+          },
+          "yolo.smoke.2_inference": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 35.56,
+            "p50_ms": 28.69,
+            "p95_ms": 73.9,
+            "max_ms": 89.01,
+            "busy_pct": 3.1
+          },
+          "yolo.smoke.3_postprocess": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 3.23,
+            "p50_ms": 0.68,
+            "p95_ms": 11.8,
+            "max_ms": 38.75,
+            "busy_pct": 0.3
+          },
+          "yolo.smoke.4_other_overhead": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 1.89,
+            "p50_ms": 0.48,
+            "p95_ms": 9.12,
+            "max_ms": 20.19,
+            "busy_pct": 0.2
+          },
+          "yolo.weapon.1_preprocess": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 9.17,
+            "p50_ms": 7.61,
+            "p95_ms": 13.2,
+            "max_ms": 25.18,
+            "busy_pct": 0.8
+          },
+          "yolo.weapon.2_inference": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 33.03,
+            "p50_ms": 27.21,
+            "p95_ms": 60.73,
+            "max_ms": 127.18,
+            "busy_pct": 2.9
+          },
+          "yolo.weapon.3_postprocess": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 2.22,
+            "p50_ms": 0.96,
+            "p95_ms": 9.52,
+            "max_ms": 22.62,
+            "busy_pct": 0.2
+          },
+          "yolo.weapon.4_other_overhead": {
+            "calls_per_sec": 0.88,
+            "avg_ms": 2.06,
+            "p50_ms": 0.48,
+            "p95_ms": 14.62,
+            "max_ms": 23.32,
+            "busy_pct": 0.2
+          }
+        },
+        "cameras": [
+          {
+            "key": "load-001",
+            "connected": true,
+            "purposes": [
+              "face_recognition",
+              "attendance"
+            ],
+            "receiving": true,
+            "infer_fps": 1.233,
+            "gap_p50_sec": 0.752,
+            "gap_p95_sec": 1.222,
+            "gap_max_sec": 1.891,
+            "queue_delay_p50_sec": 0.036,
+            "queue_delay_p95_sec": 0.077,
+            "latency_p50_sec": 0.798,
+            "latency_p95_sec": 1.275,
+            "last_ok_at": 1795239599.173,
+            "sec_since_last_ok": 0.578,
+            "inferences": 75,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 661,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-002",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": true,
+            "infer_fps": 0.867,
+            "gap_p50_sec": 1.017,
+            "gap_p95_sec": 2.388,
+            "gap_max_sec": 2.903,
+            "queue_delay_p50_sec": 0.052,
+            "queue_delay_p95_sec": 0.077,
+            "latency_p50_sec": 1.159,
+            "latency_p95_sec": 2.351,
+            "last_ok_at": 1795239599.402,
+            "sec_since_last_ok": 0.349,
+            "inferences": 53,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 667,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-003",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": true,
+            "infer_fps": 0.917,
+            "gap_p50_sec": 1.087,
+            "gap_p95_sec": 1.802,
+            "gap_max_sec": 2.513,
+            "queue_delay_p50_sec": 0.033,
+            "queue_delay_p95_sec": 0.079,
+            "latency_p50_sec": 1.153,
+            "latency_p95_sec": 1.879,
+            "last_ok_at": 1795239599.448,
+            "sec_since_last_ok": 0.303,
+            "inferences": 55,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 674,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-004",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": true,
+            "infer_fps": 0.867,
+            "gap_p50_sec": 1.097,
+            "gap_p95_sec": 2.457,
+            "gap_max_sec": 2.754,
+            "queue_delay_p50_sec": 0.033,
+            "queue_delay_p95_sec": 0.078,
+            "latency_p50_sec": 1.163,
+            "latency_p95_sec": 2.197,
+            "last_ok_at": 1795239599.58,
+            "sec_since_last_ok": 0.171,
+            "inferences": 52,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 665,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          }
+        ],
+        "system": {
+          "host": {
+            "cpu_pct": 16.7,
+            "cpu_count": 16,
+            "ram_used_mb": 15759,
+            "ram_total_mb": 32471,
+            "ram_pct": 48.5,
+            "process_cpu_pct": 167.3,
+            "process_rss_mb": 2515,
+            "process_threads": 19
+          },
+          "gpu": {
+            "source": "nvidia-smi",
+            "util_pct": 52,
+            "mem_used_mb": 2659,
+            "mem_total_mb": 8192,
+            "decoder_util_pct": 7,
+            "torch_allocated_mb": 386,
+            "torch_reserved_mb": 902
+          },
+          "cpu_threads": {
+            "interval_sec": 9.1,
+            "python_process_cores": 1.69,
+            "by_thread_group": {
+              "live inference workers": {
+                "cores": 1.66,
+                "threads": 4
+              },
+              "main": {
+                "cores": 0.02,
+                "threads": 1
+              },
+              "metrics probe": {
+                "cores": 0.01,
+                "threads": 1
+              },
+              "native (torch/opencv/cuda pools)": {
+                "cores": 0.0,
+                "threads": 8
+              },
+              "live render (draw + jpeg)": {
+                "cores": 0.0,
+                "threads": 1
+              },
+              "camera readers (pipe + mjpeg decode)": {
+                "cores": 0.0,
+                "threads": 4
+              }
+            },
+            "ffmpeg_processes": 0,
+            "ffmpeg_cores": 0.0
+          },
+          "sampled_at": 1795239599.5473564
+        },
+        "config": {
+          "running": true,
+          "device": "0",
+          "infer_workers": 4,
+          "infer_interval_sec": 0.5,
+          "specialist_every_n": 3,
+          "plate_ocr_every": 3,
+          "scheduler": "legacy",
+          "batch_max": 4,
+          "imgsz": 960,
+          "stream_fps": 12,
+          "offline_pause": false
+        }
+      }
+    },
+    {
+      "cameras": 8,
+      "snapshot": {
+        "at": 1795239675.249,
+        "window_sec": 60.0,
+        "measured_sec": 60.0,
+        "sla_sec": 1.0,
+        "target_interval_sec": 0.5,
+        "stale_sec": 2.0,
+        "summary": {
+          "cameras_total": 8,
+          "cameras_connected": 8,
+          "cameras_receiving": 2,
+          "cameras_starved": 6,
+          "starved_keys": [
+            "load-002",
+            "load-003",
+            "load-004",
+            "load-005",
+            "load-006",
+            "load-008"
+          ],
+          "total_infer_fps": 3.817,
+          "worst_gap_p95_sec": 2.942,
+          "sla_met": false,
+          "gpu_model_busy_pct": 65.1
+        },
+        "models": {
+          "coco": {
+            "kind": "gpu",
+            "calls_per_sec": 3.833,
+            "images_per_sec": 3.833,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 54.8,
+            "latency_p95_ms": 159.5,
+            "lock_wait_avg_ms": 44.6,
+            "lock_wait_p95_ms": 128.6,
+            "busy_pct": 30.0,
+            "total_calls": 230,
+            "total_images": 230
+          },
+          "custom": {
+            "kind": "gpu",
+            "calls_per_sec": 0.933,
+            "images_per_sec": 0.933,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 54.5,
+            "latency_p95_ms": 119.5,
+            "lock_wait_avg_ms": 46.1,
+            "lock_wait_p95_ms": 138.9,
+            "busy_pct": 6.3,
+            "total_calls": 57,
+            "total_images": 57
+          },
+          "face_recognize": {
+            "kind": "cpu",
+            "calls_per_sec": 68.267,
+            "images_per_sec": 68.267,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 5.7,
+            "latency_p95_ms": 10.0,
+            "lock_wait_avg_ms": 9.1,
+            "lock_wait_p95_ms": 19.5,
+            "busy_pct": 42.7,
+            "total_calls": 8037,
+            "total_images": 8037
+          },
+          "identity_registry": {
+            "kind": "cpu",
+            "calls_per_sec": 3.817,
+            "images_per_sec": 74.683,
+            "avg_batch": 19.57,
+            "max_batch": 25,
+            "latency_p50_ms": 32.2,
+            "latency_p95_ms": 72.7,
+            "lock_wait_avg_ms": 0.9,
+            "lock_wait_p95_ms": 0.0,
+            "busy_pct": 13.6,
+            "total_calls": 230,
+            "total_images": 4499
+          },
+          "pose": {
+            "kind": "gpu",
+            "calls_per_sec": 3.833,
+            "images_per_sec": 3.833,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 39.4,
+            "latency_p95_ms": 111.2,
+            "lock_wait_avg_ms": 55.9,
+            "lock_wait_p95_ms": 143.7,
+            "busy_pct": 19.8,
+            "total_calls": 230,
+            "total_images": 230
+          },
+          "smoke": {
+            "kind": "gpu",
+            "calls_per_sec": 0.933,
+            "images_per_sec": 0.933,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 38.2,
+            "latency_p95_ms": 102.3,
+            "lock_wait_avg_ms": 42.1,
+            "lock_wait_p95_ms": 131.8,
+            "busy_pct": 4.7,
+            "total_calls": 58,
+            "total_images": 58
+          },
+          "weapon": {
+            "kind": "gpu",
+            "calls_per_sec": 0.95,
+            "images_per_sec": 0.95,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 36.3,
+            "latency_p95_ms": 89.7,
+            "lock_wait_avg_ms": 51.1,
+            "lock_wait_p95_ms": 145.8,
+            "busy_pct": 4.3,
+            "total_calls": 58,
+            "total_images": 58
+          }
+        },
+        "stages": {
+          "acquire.latest_frame_copy": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 1.17,
+            "p50_ms": 1.1,
+            "p95_ms": 1.48,
+            "max_ms": 4.35,
+            "busy_pct": 0.4
+          },
+          "event.clip_submit": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "event.motion_update": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 0.5,
+            "p50_ms": 0.49,
+            "p95_ms": 0.6,
+            "max_ms": 0.71,
+            "busy_pct": 0.2
+          },
+          "event.publish_incl_evidence_jpeg": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 6.47,
+            "p50_ms": 6.52,
+            "p95_ms": 6.92,
+            "max_ms": 8.96,
+            "busy_pct": 2.5
+          },
+          "face.call_from_coco_parse": {
+            "calls_per_sec": 65.77,
+            "avg_ms": 31.16,
+            "p50_ms": 32.96,
+            "p95_ms": 50.02,
+            "max_ms": 136.76,
+            "busy_pct": 204.9
+          },
+          "face.call_from_identity_lock": {
+            "calls_per_sec": 1.85,
+            "avg_ms": 12.14,
+            "p50_ms": 11.71,
+            "p95_ms": 21.06,
+            "max_ms": 26.26,
+            "busy_pct": 2.2
+          },
+          "face.quality_check": {
+            "calls_per_sec": 57.83,
+            "avg_ms": 0.47,
+            "p50_ms": 0.39,
+            "p95_ms": 0.85,
+            "max_ms": 13.02,
+            "busy_pct": 2.7
+          },
+          "face.reused_from_pass1": {
+            "calls_per_sec": 65.45,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "face.yunet_detect": {
+            "calls_per_sec": 133.4,
+            "avg_ms": 6.05,
+            "p50_ms": 5.6,
+            "p95_ms": 9.6,
+            "max_ms": 105.91,
+            "busy_pct": 80.7
+          },
+          "post.coco_parse_incl_face": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 12.1,
+            "p50_ms": 7.94,
+            "p95_ms": 36.39,
+            "max_ms": 156.24,
+            "busy_pct": 4.6
+          },
+          "pre.prepare_frame_resize": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 0.02,
+            "p50_ms": 0.02,
+            "p95_ms": 0.02,
+            "max_ms": 0.03,
+            "busy_pct": 0.0
+          },
+          "render.loop_all_cams": {
+            "calls_per_sec": 11.88,
+            "avg_ms": 0.02,
+            "p50_ms": 0.02,
+            "p95_ms": 0.02,
+            "max_ms": 0.3,
+            "busy_pct": 0.0
+          },
+          "step.bytetrack": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 11.58,
+            "p50_ms": 10.74,
+            "p95_ms": 17.31,
+            "max_ms": 38.36,
+            "busy_pct": 4.4
+          },
+          "step.coco_and_faces": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 135.05,
+            "p50_ms": 142.14,
+            "p95_ms": 223.3,
+            "max_ms": 310.31,
+            "busy_pct": 51.8
+          },
+          "step.custom_model": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 114.38,
+            "p50_ms": 110.84,
+            "p95_ms": 210.48,
+            "max_ms": 257.69,
+            "busy_pct": 10.7
+          },
+          "step.faces_track_gated": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 532.69,
+            "p50_ms": 552.0,
+            "p95_ms": 748.43,
+            "max_ms": 843.99,
+            "busy_pct": 204.2
+          },
+          "step.filters": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 0.16,
+            "p50_ms": 0.17,
+            "p95_ms": 0.2,
+            "max_ms": 0.22,
+            "busy_pct": 0.1
+          },
+          "step.identity_reid": {
+            "calls_per_sec": 3.82,
+            "avg_ms": 166.28,
+            "p50_ms": 142.81,
+            "p95_ms": 272.25,
+            "max_ms": 1367.31,
+            "busy_pct": 63.5
+          },
+          "step.pose": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 109.94,
+            "p50_ms": 116.72,
+            "p95_ms": 199.43,
+            "max_ms": 276.63,
+            "busy_pct": 42.1
+          },
+          "step.smoke_model": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 92.56,
+            "p50_ms": 88.03,
+            "p95_ms": 175.08,
+            "max_ms": 256.33,
+            "busy_pct": 8.6
+          },
+          "step.weapon_model": {
+            "calls_per_sec": 0.95,
+            "avg_ms": 96.66,
+            "p50_ms": 77.61,
+            "p95_ms": 209.37,
+            "max_ms": 334.23,
+            "busy_pct": 9.2
+          },
+          "sync.gil_wakeup_lag": {
+            "calls_per_sec": 177.3,
+            "avg_ms": 0.63,
+            "p50_ms": 0.5,
+            "p95_ms": 1.04,
+            "max_ms": 97.94,
+            "busy_pct": 11.2
+          },
+          "track.reid_osnet_batch": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 129.7,
+            "p50_ms": 102.74,
+            "p95_ms": 231.41,
+            "max_ms": 1323.08,
+            "busy_pct": 49.7
+          },
+          "yolo.coco.1_preprocess": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 10.05,
+            "p50_ms": 7.41,
+            "p95_ms": 15.71,
+            "max_ms": 113.19,
+            "busy_pct": 3.9
+          },
+          "yolo.coco.2_inference": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 63.11,
+            "p50_ms": 43.57,
+            "p95_ms": 125.68,
+            "max_ms": 167.05,
+            "busy_pct": 24.2
+          },
+          "yolo.coco.3_postprocess": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 3.03,
+            "p50_ms": 1.42,
+            "p95_ms": 12.14,
+            "max_ms": 59.27,
+            "busy_pct": 1.2
+          },
+          "yolo.coco.4_other_overhead": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 2.06,
+            "p50_ms": 0.51,
+            "p95_ms": 9.92,
+            "max_ms": 53.77,
+            "busy_pct": 0.8
+          },
+          "yolo.custom.1_preprocess": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 8.5,
+            "p50_ms": 7.29,
+            "p95_ms": 11.98,
+            "max_ms": 19.8,
+            "busy_pct": 0.8
+          },
+          "yolo.custom.2_inference": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 54.63,
+            "p50_ms": 43.37,
+            "p95_ms": 98.47,
+            "max_ms": 107.49,
+            "busy_pct": 5.1
+          },
+          "yolo.custom.3_postprocess": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 2.96,
+            "p50_ms": 1.4,
+            "p95_ms": 12.54,
+            "max_ms": 37.06,
+            "busy_pct": 0.3
+          },
+          "yolo.custom.4_other_overhead": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 1.49,
+            "p50_ms": 0.52,
+            "p95_ms": 3.4,
+            "max_ms": 24.44,
+            "busy_pct": 0.1
+          },
+          "yolo.pose.1_preprocess": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 3.73,
+            "p50_ms": 2.51,
+            "p95_ms": 8.66,
+            "max_ms": 14.24,
+            "busy_pct": 1.4
+          },
+          "yolo.pose.2_inference": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 42.18,
+            "p50_ms": 34.07,
+            "p95_ms": 85.13,
+            "max_ms": 145.02,
+            "busy_pct": 16.2
+          },
+          "yolo.pose.3_postprocess": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 3.78,
+            "p50_ms": 1.4,
+            "p95_ms": 14.39,
+            "max_ms": 87.24,
+            "busy_pct": 1.4
+          },
+          "yolo.pose.4_other_overhead": {
+            "calls_per_sec": 3.83,
+            "avg_ms": 2.04,
+            "p50_ms": 0.5,
+            "p95_ms": 13.91,
+            "max_ms": 40.04,
+            "busy_pct": 0.8
+          },
+          "yolo.smoke.1_preprocess": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 8.21,
+            "p50_ms": 7.29,
+            "p95_ms": 12.4,
+            "max_ms": 17.73,
+            "busy_pct": 0.8
+          },
+          "yolo.smoke.2_inference": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 37.31,
+            "p50_ms": 28.93,
+            "p95_ms": 77.17,
+            "max_ms": 104.31,
+            "busy_pct": 3.5
+          },
+          "yolo.smoke.3_postprocess": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 2.39,
+            "p50_ms": 0.74,
+            "p95_ms": 11.27,
+            "max_ms": 17.44,
+            "busy_pct": 0.2
+          },
+          "yolo.smoke.4_other_overhead": {
+            "calls_per_sec": 0.93,
+            "avg_ms": 2.25,
+            "p50_ms": 0.48,
+            "p95_ms": 14.64,
+            "max_ms": 21.03,
+            "busy_pct": 0.2
+          },
+          "yolo.weapon.1_preprocess": {
+            "calls_per_sec": 0.95,
+            "avg_ms": 8.09,
+            "p50_ms": 7.26,
+            "p95_ms": 11.33,
+            "max_ms": 12.11,
+            "busy_pct": 0.8
+          },
+          "yolo.weapon.2_inference": {
+            "calls_per_sec": 0.95,
+            "avg_ms": 34.63,
+            "p50_ms": 26.96,
+            "p95_ms": 76.2,
+            "max_ms": 109.79,
+            "busy_pct": 3.3
+          },
+          "yolo.weapon.3_postprocess": {
+            "calls_per_sec": 0.95,
+            "avg_ms": 1.47,
+            "p50_ms": 0.96,
+            "p95_ms": 3.65,
+            "max_ms": 13.49,
+            "busy_pct": 0.1
+          },
+          "yolo.weapon.4_other_overhead": {
+            "calls_per_sec": 0.95,
+            "avg_ms": 1.21,
+            "p50_ms": 0.47,
+            "p95_ms": 5.46,
+            "max_ms": 18.24,
+            "busy_pct": 0.1
+          }
+        },
+        "cameras": [
+          {
+            "key": "load-001",
+            "connected": true,
+            "purposes": [
+              "face_recognition",
+              "attendance"
+            ],
+            "receiving": true,
+            "infer_fps": 0.5,
+            "gap_p50_sec": 1.918,
+            "gap_p95_sec": 2.869,
+            "gap_max_sec": 3.005,
+            "queue_delay_p50_sec": 0.045,
+            "queue_delay_p95_sec": 0.08,
+            "latency_p50_sec": 0.935,
+            "latency_p95_sec": 1.231,
+            "last_ok_at": 1795239674.916,
+            "sec_since_last_ok": 0.333,
+            "inferences": 30,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 706,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-002",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.483,
+            "gap_p50_sec": 1.88,
+            "gap_p95_sec": 2.874,
+            "gap_max_sec": 2.914,
+            "queue_delay_p50_sec": 0.043,
+            "queue_delay_p95_sec": 0.077,
+            "latency_p50_sec": 1.053,
+            "latency_p95_sec": 1.796,
+            "last_ok_at": 1795239673.928,
+            "sec_since_last_ok": 1.321,
+            "inferences": 30,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 716,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-003",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.467,
+            "gap_p50_sec": 2.013,
+            "gap_p95_sec": 2.637,
+            "gap_max_sec": 2.665,
+            "queue_delay_p50_sec": 0.047,
+            "queue_delay_p95_sec": 0.084,
+            "latency_p50_sec": 1.073,
+            "latency_p95_sec": 1.574,
+            "last_ok_at": 1795239672.309,
+            "sec_since_last_ok": 2.94,
+            "inferences": 28,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 667,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-004",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.483,
+            "gap_p50_sec": 2.056,
+            "gap_p95_sec": 2.691,
+            "gap_max_sec": 2.692,
+            "queue_delay_p50_sec": 0.052,
+            "queue_delay_p95_sec": 0.075,
+            "latency_p50_sec": 1.01,
+            "latency_p95_sec": 1.576,
+            "last_ok_at": 1795239673.469,
+            "sec_since_last_ok": 1.78,
+            "inferences": 29,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 690,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-005",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.467,
+            "gap_p50_sec": 2.045,
+            "gap_p95_sec": 2.942,
+            "gap_max_sec": 3.639,
+            "queue_delay_p50_sec": 0.052,
+            "queue_delay_p95_sec": 0.077,
+            "latency_p50_sec": 1.062,
+            "latency_p95_sec": 1.487,
+            "last_ok_at": 1795239673.605,
+            "sec_since_last_ok": 1.644,
+            "inferences": 28,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 699,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-006",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.45,
+            "gap_p50_sec": 2.107,
+            "gap_p95_sec": 2.812,
+            "gap_max_sec": 3.188,
+            "queue_delay_p50_sec": 0.057,
+            "queue_delay_p95_sec": 0.074,
+            "latency_p50_sec": 1.131,
+            "latency_p95_sec": 1.573,
+            "last_ok_at": 1795239672.193,
+            "sec_since_last_ok": 3.057,
+            "inferences": 27,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 669,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-007",
+            "connected": true,
+            "purposes": [
+              "face_recognition",
+              "attendance"
+            ],
+            "receiving": true,
+            "infer_fps": 0.483,
+            "gap_p50_sec": 1.946,
+            "gap_p95_sec": 2.913,
+            "gap_max_sec": 3.173,
+            "queue_delay_p50_sec": 0.035,
+            "queue_delay_p95_sec": 0.074,
+            "latency_p50_sec": 0.931,
+            "latency_p95_sec": 1.483,
+            "last_ok_at": 1795239674.404,
+            "sec_since_last_ok": 0.846,
+            "inferences": 29,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 687,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-008",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.483,
+            "gap_p50_sec": 2.122,
+            "gap_p95_sec": 2.727,
+            "gap_max_sec": 3.053,
+            "queue_delay_p50_sec": 0.036,
+            "queue_delay_p95_sec": 0.079,
+            "latency_p50_sec": 1.097,
+            "latency_p95_sec": 1.891,
+            "last_ok_at": 1795239673.697,
+            "sec_since_last_ok": 1.553,
+            "inferences": 29,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 693,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          }
+        ],
+        "system": {
+          "host": {
+            "cpu_pct": 19.1,
+            "cpu_count": 16,
+            "ram_used_mb": 15797,
+            "ram_total_mb": 32471,
+            "ram_pct": 48.7,
+            "process_cpu_pct": 192.7,
+            "process_rss_mb": 2554,
+            "process_threads": 21
+          },
+          "gpu": {
+            "source": "nvidia-smi",
+            "util_pct": 51,
+            "mem_used_mb": 2659,
+            "mem_total_mb": 8192,
+            "decoder_util_pct": 3,
+            "torch_allocated_mb": 398,
+            "torch_reserved_mb": 902
+          },
+          "cpu_threads": {
+            "interval_sec": 9.1,
+            "python_process_cores": 1.92,
+            "by_thread_group": {
+              "live inference workers": {
+                "cores": 1.89,
+                "threads": 4
+              },
+              "main": {
+                "cores": 0.02,
+                "threads": 1
+              },
+              "metrics probe": {
+                "cores": 0.01,
+                "threads": 1
+              },
+              "native (torch/opencv/cuda pools)": {
+                "cores": 0.0,
+                "threads": 6
+              },
+              "live render (draw + jpeg)": {
+                "cores": 0.0,
+                "threads": 1
+              },
+              "camera readers (pipe + mjpeg decode)": {
+                "cores": 0.0,
+                "threads": 8
+              }
+            },
+            "ffmpeg_processes": 0,
+            "ffmpeg_cores": 0.0
+          },
+          "sampled_at": 1795239675.0623393
+        },
+        "config": {
+          "running": true,
+          "device": "0",
+          "infer_workers": 4,
+          "infer_interval_sec": 0.5,
+          "specialist_every_n": 3,
+          "plate_ocr_every": 3,
+          "scheduler": "legacy",
+          "batch_max": 4,
+          "imgsz": 960,
+          "stream_fps": 12,
+          "offline_pause": false
+        }
+      }
+    },
+    {
+      "cameras": 10,
+      "snapshot": {
+        "at": 1795239750.768,
+        "window_sec": 60.0,
+        "measured_sec": 60.0,
+        "sla_sec": 1.0,
+        "target_interval_sec": 0.5,
+        "stale_sec": 2.0,
+        "summary": {
+          "cameras_total": 10,
+          "cameras_connected": 10,
+          "cameras_receiving": 1,
+          "cameras_starved": 9,
+          "starved_keys": [
+            "load-001",
+            "load-002",
+            "load-003",
+            "load-004",
+            "load-005",
+            "load-006",
+            "load-007",
+            "load-008",
+            "load-010"
+          ],
+          "total_infer_fps": 3.567,
+          "worst_gap_p95_sec": 4.412,
+          "sla_met": false,
+          "gpu_model_busy_pct": 61.9
+        },
+        "models": {
+          "coco": {
+            "kind": "gpu",
+            "calls_per_sec": 3.567,
+            "images_per_sec": 3.567,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 55.7,
+            "latency_p95_ms": 182.8,
+            "lock_wait_avg_ms": 56.6,
+            "lock_wait_p95_ms": 129.7,
+            "busy_pct": 29.1,
+            "total_calls": 215,
+            "total_images": 215
+          },
+          "custom": {
+            "kind": "gpu",
+            "calls_per_sec": 0.967,
+            "images_per_sec": 0.967,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 52.6,
+            "latency_p95_ms": 155.7,
+            "lock_wait_avg_ms": 58.0,
+            "lock_wait_p95_ms": 141.3,
+            "busy_pct": 6.7,
+            "total_calls": 58,
+            "total_images": 58
+          },
+          "face_recognize": {
+            "kind": "cpu",
+            "calls_per_sec": 68.267,
+            "images_per_sec": 68.267,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 5.7,
+            "latency_p95_ms": 9.8,
+            "lock_wait_avg_ms": 10.2,
+            "lock_wait_p95_ms": 20.3,
+            "busy_pct": 42.9,
+            "total_calls": 7592,
+            "total_images": 7592
+          },
+          "identity_registry": {
+            "kind": "cpu",
+            "calls_per_sec": 3.567,
+            "images_per_sec": 70.833,
+            "avg_batch": 19.86,
+            "max_batch": 25,
+            "latency_p50_ms": 35.4,
+            "latency_p95_ms": 70.6,
+            "lock_wait_avg_ms": 0.5,
+            "lock_wait_p95_ms": 0.0,
+            "busy_pct": 13.6,
+            "total_calls": 215,
+            "total_images": 4272
+          },
+          "pose": {
+            "kind": "gpu",
+            "calls_per_sec": 3.583,
+            "images_per_sec": 3.583,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 39.1,
+            "latency_p95_ms": 90.3,
+            "lock_wait_avg_ms": 70.0,
+            "lock_wait_p95_ms": 138.9,
+            "busy_pct": 16.5,
+            "total_calls": 215,
+            "total_images": 215
+          },
+          "smoke": {
+            "kind": "gpu",
+            "calls_per_sec": 0.967,
+            "images_per_sec": 0.967,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 36.7,
+            "latency_p95_ms": 105.8,
+            "lock_wait_avg_ms": 51.3,
+            "lock_wait_p95_ms": 143.1,
+            "busy_pct": 4.9,
+            "total_calls": 59,
+            "total_images": 59
+          },
+          "weapon": {
+            "kind": "gpu",
+            "calls_per_sec": 0.967,
+            "images_per_sec": 0.967,
+            "avg_batch": 1.0,
+            "max_batch": 1,
+            "latency_p50_ms": 35.9,
+            "latency_p95_ms": 102.8,
+            "lock_wait_avg_ms": 48.8,
+            "lock_wait_p95_ms": 138.0,
+            "busy_pct": 4.7,
+            "total_calls": 59,
+            "total_images": 59
+          }
+        },
+        "stages": {
+          "acquire.latest_frame_copy": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 1.19,
+            "p50_ms": 1.1,
+            "p95_ms": 1.52,
+            "max_ms": 5.1,
+            "busy_pct": 0.4
+          },
+          "event.clip_submit": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "event.motion_update": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 0.49,
+            "p50_ms": 0.48,
+            "p95_ms": 0.59,
+            "max_ms": 0.73,
+            "busy_pct": 0.2
+          },
+          "event.publish_incl_evidence_jpeg": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 6.53,
+            "p50_ms": 6.57,
+            "p95_ms": 6.88,
+            "max_ms": 8.82,
+            "busy_pct": 2.3
+          },
+          "face.call_from_coco_parse": {
+            "calls_per_sec": 62.08,
+            "avg_ms": 32.82,
+            "p50_ms": 34.56,
+            "p95_ms": 51.25,
+            "max_ms": 152.38,
+            "busy_pct": 203.7
+          },
+          "face.call_from_identity_lock": {
+            "calls_per_sec": 1.78,
+            "avg_ms": 11.16,
+            "p50_ms": 9.28,
+            "p95_ms": 21.46,
+            "max_ms": 24.87,
+            "busy_pct": 2.0
+          },
+          "face.quality_check": {
+            "calls_per_sec": 54.27,
+            "avg_ms": 0.47,
+            "p50_ms": 0.37,
+            "p95_ms": 0.86,
+            "max_ms": 101.88,
+            "busy_pct": 2.5
+          },
+          "face.reused_from_pass1": {
+            "calls_per_sec": 61.37,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "busy_pct": 0.0
+          },
+          "face.yunet_detect": {
+            "calls_per_sec": 125.93,
+            "avg_ms": 5.99,
+            "p50_ms": 5.56,
+            "p95_ms": 9.53,
+            "max_ms": 102.01,
+            "busy_pct": 75.5
+          },
+          "post.coco_parse_incl_face": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 13.1,
+            "p50_ms": 8.41,
+            "p95_ms": 37.51,
+            "max_ms": 115.3,
+            "busy_pct": 4.7
+          },
+          "pre.prepare_frame_resize": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 0.02,
+            "p50_ms": 0.02,
+            "p95_ms": 0.02,
+            "max_ms": 0.05,
+            "busy_pct": 0.0
+          },
+          "render.loop_all_cams": {
+            "calls_per_sec": 11.85,
+            "avg_ms": 0.02,
+            "p50_ms": 0.02,
+            "p95_ms": 0.03,
+            "max_ms": 0.09,
+            "busy_pct": 0.0
+          },
+          "step.bytetrack": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 11.55,
+            "p50_ms": 11.12,
+            "p95_ms": 15.33,
+            "max_ms": 38.33,
+            "busy_pct": 4.1
+          },
+          "step.coco_and_faces": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 151.53,
+            "p50_ms": 156.54,
+            "p95_ms": 251.0,
+            "max_ms": 280.24,
+            "busy_pct": 54.3
+          },
+          "step.custom_model": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 127.71,
+            "p50_ms": 123.59,
+            "p95_ms": 231.07,
+            "max_ms": 281.23,
+            "busy_pct": 12.3
+          },
+          "step.faces_track_gated": {
+            "calls_per_sec": 3.6,
+            "avg_ms": 567.0,
+            "p50_ms": 616.78,
+            "p95_ms": 784.29,
+            "max_ms": 882.2,
+            "busy_pct": 204.1
+          },
+          "step.filters": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 0.17,
+            "p50_ms": 0.17,
+            "p95_ms": 0.21,
+            "max_ms": 0.32,
+            "busy_pct": 0.1
+          },
+          "step.identity_reid": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 166.93,
+            "p50_ms": 150.97,
+            "p95_ms": 250.01,
+            "max_ms": 1381.61,
+            "busy_pct": 59.5
+          },
+          "step.pose": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 118.39,
+            "p50_ms": 126.53,
+            "p95_ms": 187.92,
+            "max_ms": 250.47,
+            "busy_pct": 42.4
+          },
+          "step.smoke_model": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 102.24,
+            "p50_ms": 90.24,
+            "p95_ms": 177.62,
+            "max_ms": 264.15,
+            "busy_pct": 9.9
+          },
+          "step.weapon_model": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 98.12,
+            "p50_ms": 93.99,
+            "p95_ms": 182.72,
+            "max_ms": 229.3,
+            "busy_pct": 9.5
+          },
+          "sync.gil_wakeup_lag": {
+            "calls_per_sec": 177.42,
+            "avg_ms": 0.62,
+            "p50_ms": 0.5,
+            "p95_ms": 1.02,
+            "max_ms": 101.72,
+            "busy_pct": 11.0
+          },
+          "track.reid_osnet_batch": {
+            "calls_per_sec": 3.55,
+            "avg_ms": 128.29,
+            "p50_ms": 104.38,
+            "p95_ms": 209.19,
+            "max_ms": 1358.4,
+            "busy_pct": 45.5
+          },
+          "yolo.coco.1_preprocess": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 10.54,
+            "p50_ms": 7.59,
+            "p95_ms": 23.71,
+            "max_ms": 61.4,
+            "busy_pct": 3.8
+          },
+          "yolo.coco.2_inference": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 63.87,
+            "p50_ms": 43.77,
+            "p95_ms": 134.32,
+            "max_ms": 185.71,
+            "busy_pct": 22.8
+          },
+          "yolo.coco.3_postprocess": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 3.96,
+            "p50_ms": 1.44,
+            "p95_ms": 14.85,
+            "max_ms": 64.12,
+            "busy_pct": 1.4
+          },
+          "yolo.coco.4_other_overhead": {
+            "calls_per_sec": 3.57,
+            "avg_ms": 3.31,
+            "p50_ms": 0.51,
+            "p95_ms": 20.69,
+            "max_ms": 35.34,
+            "busy_pct": 1.2
+          },
+          "yolo.custom.1_preprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 9.97,
+            "p50_ms": 7.09,
+            "p95_ms": 12.53,
+            "max_ms": 73.88,
+            "busy_pct": 1.0
+          },
+          "yolo.custom.2_inference": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 55.1,
+            "p50_ms": 43.05,
+            "p95_ms": 137.01,
+            "max_ms": 178.7,
+            "busy_pct": 5.3
+          },
+          "yolo.custom.3_postprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 2.58,
+            "p50_ms": 1.34,
+            "p95_ms": 6.29,
+            "max_ms": 51.76,
+            "busy_pct": 0.2
+          },
+          "yolo.custom.4_other_overhead": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 1.38,
+            "p50_ms": 0.48,
+            "p95_ms": 1.41,
+            "max_ms": 27.64,
+            "busy_pct": 0.1
+          },
+          "yolo.pose.1_preprocess": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 4.12,
+            "p50_ms": 2.57,
+            "p95_ms": 9.83,
+            "max_ms": 22.04,
+            "busy_pct": 1.5
+          },
+          "yolo.pose.2_inference": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 38.43,
+            "p50_ms": 33.41,
+            "p95_ms": 73.34,
+            "max_ms": 106.25,
+            "busy_pct": 13.8
+          },
+          "yolo.pose.3_postprocess": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 2.59,
+            "p50_ms": 1.43,
+            "p95_ms": 5.83,
+            "max_ms": 69.97,
+            "busy_pct": 0.9
+          },
+          "yolo.pose.4_other_overhead": {
+            "calls_per_sec": 3.58,
+            "avg_ms": 0.99,
+            "p50_ms": 0.5,
+            "p95_ms": 2.19,
+            "max_ms": 26.85,
+            "busy_pct": 0.4
+          },
+          "yolo.smoke.1_preprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 8.04,
+            "p50_ms": 7.16,
+            "p95_ms": 12.99,
+            "max_ms": 14.11,
+            "busy_pct": 0.8
+          },
+          "yolo.smoke.2_inference": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 39.65,
+            "p50_ms": 28.46,
+            "p95_ms": 87.49,
+            "max_ms": 132.91,
+            "busy_pct": 3.8
+          },
+          "yolo.smoke.3_postprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 1.18,
+            "p50_ms": 0.67,
+            "p95_ms": 3.25,
+            "max_ms": 8.78,
+            "busy_pct": 0.1
+          },
+          "yolo.smoke.4_other_overhead": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 1.72,
+            "p50_ms": 0.47,
+            "p95_ms": 1.28,
+            "max_ms": 61.23,
+            "busy_pct": 0.2
+          },
+          "yolo.weapon.1_preprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 8.08,
+            "p50_ms": 7.0,
+            "p95_ms": 12.63,
+            "max_ms": 16.8,
+            "busy_pct": 0.8
+          },
+          "yolo.weapon.2_inference": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 35.65,
+            "p50_ms": 26.77,
+            "p95_ms": 72.19,
+            "max_ms": 98.14,
+            "busy_pct": 3.4
+          },
+          "yolo.weapon.3_postprocess": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 2.95,
+            "p50_ms": 0.94,
+            "p95_ms": 12.61,
+            "max_ms": 35.37,
+            "busy_pct": 0.3
+          },
+          "yolo.weapon.4_other_overhead": {
+            "calls_per_sec": 0.97,
+            "avg_ms": 2.41,
+            "p50_ms": 0.48,
+            "p95_ms": 15.74,
+            "max_ms": 25.99,
+            "busy_pct": 0.2
+          }
+        },
+        "cameras": [
+          {
+            "key": "load-001",
+            "connected": true,
+            "purposes": [
+              "face_recognition",
+              "attendance"
+            ],
+            "receiving": false,
+            "infer_fps": 0.3,
+            "gap_p50_sec": 3.435,
+            "gap_p95_sec": 4.034,
+            "gap_max_sec": 4.097,
+            "queue_delay_p50_sec": 0.051,
+            "queue_delay_p95_sec": 0.075,
+            "latency_p50_sec": 1.023,
+            "latency_p95_sec": 1.306,
+            "last_ok_at": 1795239749.576,
+            "sec_since_last_ok": 1.192,
+            "inferences": 18,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 705,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-002",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.283,
+            "gap_p50_sec": 3.394,
+            "gap_p95_sec": 3.76,
+            "gap_max_sec": 3.842,
+            "queue_delay_p50_sec": 0.03,
+            "queue_delay_p95_sec": 0.08,
+            "latency_p50_sec": 1.312,
+            "latency_p95_sec": 1.566,
+            "last_ok_at": 1795239747.479,
+            "sec_since_last_ok": 3.288,
+            "inferences": 18,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 700,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-003",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.3,
+            "gap_p50_sec": 3.355,
+            "gap_p95_sec": 3.987,
+            "gap_max_sec": 4.46,
+            "queue_delay_p50_sec": 0.038,
+            "queue_delay_p95_sec": 0.077,
+            "latency_p50_sec": 1.223,
+            "latency_p95_sec": 1.548,
+            "last_ok_at": 1795239748.774,
+            "sec_since_last_ok": 1.994,
+            "inferences": 18,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 702,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-004",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.283,
+            "gap_p50_sec": 3.339,
+            "gap_p95_sec": 4.412,
+            "gap_max_sec": 4.682,
+            "queue_delay_p50_sec": 0.041,
+            "queue_delay_p95_sec": 0.07,
+            "latency_p50_sec": 1.191,
+            "latency_p95_sec": 1.58,
+            "last_ok_at": 1795239746.059,
+            "sec_since_last_ok": 4.709,
+            "inferences": 17,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 672,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-005",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.283,
+            "gap_p50_sec": 3.183,
+            "gap_p95_sec": 4.28,
+            "gap_max_sec": 4.812,
+            "queue_delay_p50_sec": 0.031,
+            "queue_delay_p95_sec": 0.076,
+            "latency_p50_sec": 1.038,
+            "latency_p95_sec": 1.574,
+            "last_ok_at": 1795239747.609,
+            "sec_since_last_ok": 3.158,
+            "inferences": 17,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 672,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-006",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.3,
+            "gap_p50_sec": 3.327,
+            "gap_p95_sec": 4.341,
+            "gap_max_sec": 4.655,
+            "queue_delay_p50_sec": 0.06,
+            "queue_delay_p95_sec": 0.079,
+            "latency_p50_sec": 1.199,
+            "latency_p95_sec": 1.713,
+            "last_ok_at": 1795239748.946,
+            "sec_since_last_ok": 1.822,
+            "inferences": 18,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 726,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-007",
+            "connected": true,
+            "purposes": [
+              "face_recognition",
+              "attendance"
+            ],
+            "receiving": false,
+            "infer_fps": 0.467,
+            "gap_p50_sec": 2.156,
+            "gap_p95_sec": 2.786,
+            "gap_max_sec": 2.934,
+            "queue_delay_p50_sec": 0.046,
+            "queue_delay_p95_sec": 0.078,
+            "latency_p50_sec": 1.084,
+            "latency_p95_sec": 1.334,
+            "last_ok_at": 1795239749.19,
+            "sec_since_last_ok": 1.578,
+            "inferences": 28,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 694,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-008",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.45,
+            "gap_p50_sec": 2.116,
+            "gap_p95_sec": 2.669,
+            "gap_max_sec": 3.0,
+            "queue_delay_p50_sec": 0.063,
+            "queue_delay_p95_sec": 0.084,
+            "latency_p50_sec": 1.155,
+            "latency_p95_sec": 1.725,
+            "last_ok_at": 1795239748.524,
+            "sec_since_last_ok": 2.244,
+            "inferences": 27,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 669,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-009",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": true,
+            "infer_fps": 0.45,
+            "gap_p50_sec": 2.198,
+            "gap_p95_sec": 3.042,
+            "gap_max_sec": 3.199,
+            "queue_delay_p50_sec": 0.04,
+            "queue_delay_p95_sec": 0.081,
+            "latency_p50_sec": 1.114,
+            "latency_p95_sec": 1.551,
+            "last_ok_at": 1795239750.252,
+            "sec_since_last_ok": 0.516,
+            "inferences": 27,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 690,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          },
+          {
+            "key": "load-010",
+            "connected": true,
+            "purposes": [
+              "general_objects",
+              "custom_objects",
+              "smoke_fire",
+              "weapon",
+              "face_recognition",
+              "attendance",
+              "anpr"
+            ],
+            "receiving": false,
+            "infer_fps": 0.45,
+            "gap_p50_sec": 2.166,
+            "gap_p95_sec": 2.78,
+            "gap_max_sec": 2.835,
+            "queue_delay_p50_sec": 0.041,
+            "queue_delay_p95_sec": 0.075,
+            "latency_p50_sec": 1.185,
+            "latency_p95_sec": 1.727,
+            "last_ok_at": 1795239748.847,
+            "sec_since_last_ok": 1.921,
+            "inferences": 27,
+            "errors": 0,
+            "last_error": null,
+            "frames_skipped": 685,
+            "stale_frames": 0,
+            "no_new_frame": 0,
+            "no_frame": 0
+          }
+        ],
+        "system": {
+          "host": {
+            "cpu_pct": 18.4,
+            "cpu_count": 16,
+            "ram_used_mb": 15823,
+            "ram_total_mb": 32471,
+            "ram_pct": 48.7,
+            "process_cpu_pct": 178.4,
+            "process_rss_mb": 2596,
+            "process_threads": 23
+          },
+          "gpu": {
+            "source": "nvidia-smi",
+            "util_pct": 20,
+            "mem_used_mb": 2654,
+            "mem_total_mb": 8192,
+            "decoder_util_pct": 6,
+            "torch_allocated_mb": 442,
+            "torch_reserved_mb": 902
+          },
+          "cpu_threads": {
+            "interval_sec": 9.2,
+            "python_process_cores": 1.78,
+            "by_thread_group": {
+              "live inference workers": {
+                "cores": 1.75,
+                "threads": 4
+              },
+              "main": {
+                "cores": 0.02,
+                "threads": 1
+              },
+              "metrics probe": {
+                "cores": 0.01,
+                "threads": 1
+              },
+              "native (torch/opencv/cuda pools)": {
+                "cores": 0.0,
+                "threads": 6
+              },
+              "live render (draw + jpeg)": {
+                "cores": 0.0,
+                "threads": 1
+              },
+              "camera readers (pipe + mjpeg decode)": {
+                "cores": 0.0,
+                "threads": 10
+              }
+            },
+            "ffmpeg_processes": 0,
+            "ffmpeg_cores": 0.0
+          },
+          "sampled_at": 1795239750.5771432
+        },
+        "config": {
+          "running": true,
+          "device": "0",
+          "infer_workers": 4,
+          "infer_interval_sec": 0.5,
+          "specialist_every_n": 3,
+          "plate_ocr_every": 3,
+          "scheduler": "legacy",
+          "batch_max": 4,
+          "imgsz": 960,
+          "stream_fps": 12,
+          "offline_pause": false
+        }
+      }
+    }
+  ]
+}

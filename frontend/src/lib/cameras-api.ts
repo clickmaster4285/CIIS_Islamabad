@@ -1010,3 +1010,49 @@ export async function fetchVehicleJourney(plateKey: string): Promise<VehicleJour
   if (!res.ok) throw new Error(`Failed to load vehicle journey (${res.status})`);
   return res.json();
 }
+
+// ——— Camera offline alerts (Super Admin, IT Super Admin, Location Admin) ———
+
+export type CameraOfflineAlert = {
+  id: number;
+  camera_id: number;
+  camera_name: string;
+  location: string;
+  zone: string;
+  reason: string;
+  went_offline_at: string | null;
+  back_online_at: string | null;
+  is_open: boolean;
+  acknowledged: boolean;
+  acknowledged_by: string;
+  acknowledged_at: string | null;
+};
+
+export type CameraOfflineAlertsPage = { open_count: number; results: CameraOfflineAlert[] };
+
+/** Roles that receive camera offline alerts (the API enforces the same list). */
+export const CAMERA_OFFLINE_ALERT_ROLES = ["ADMIN", "IT_SUPERADMIN", "LOCATION_ADMIN"] as const;
+
+export function canReceiveCameraOfflineAlerts(role?: string | null): boolean {
+  const r = (role || "").trim().toUpperCase();
+  return (CAMERA_OFFLINE_ALERT_ROLES as readonly string[]).includes(r);
+}
+
+/** Open offline alerts plus cameras that came back in the last 24 h. */
+export async function fetchCameraOfflineAlerts(scope: "recent" | "open" = "recent"): Promise<CameraOfflineAlertsPage> {
+  const res = await fetch(`${API}/cameras/offline-alerts/?scope=${scope}&limit=50`, {
+    headers: getAuthHeaders(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`Failed to load camera alerts (${res.status})`);
+  return res.json();
+}
+
+export async function acknowledgeCameraOfflineAlert(id: number): Promise<CameraOfflineAlert> {
+  const res = await fetch(`${API}/cameras/offline-alerts/${id}/acknowledge/`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error(`Failed to acknowledge camera alert (${res.status})`);
+  return res.json();
+}

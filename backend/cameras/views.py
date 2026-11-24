@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from types import SimpleNamespace
 
 from django.conf import settings
@@ -1183,3 +1184,89 @@ class CameraPreviewMjpegView(APIView):
         response["Pragma"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+
+# ——— Camera offline alerts (admins) ———
+
+_OFFLINE_ALERT_ROLES = frozenset({"ADMIN", "IT_SUPERADMIN", "LOCATION_ADMIN"})
+
+
+def _can_see_offline_alerts(user) -> bool:
+    return bool(
+        user
+        and user.is_authenticated
+        and (getattr(user, "is_superuser", False) or (getattr(user, "role", "") or "").upper() in _OFFLINE_ALERT_ROLES)
+    )
+
+
+def _offline_alert_qs(user):
+    from cameras.access import camera_location_scope, camera_scope_q
+
+    from .models import CameraOfflineAlert
+
+    qs = CameraOfflineAlert.objects.select_related("camera", "acknowledged_by")
+    scope = camera_location_scope(user)
+    if scope:
+        qs = qs.filter(camera_scope_q(scope, "camera__"))
+    return qs
+
+
+def _offline_alert_dict(a) -> dict:
+    cam = a.camera
+    return {
+        "id": a.pk,
+        "camera_id": a.camera_id,
+        "camera_name": (cam.name or cam.code or f"Camera {cam.pk}") if cam else "",
+        "location": a.location or (cam.location if cam else ""),
+        "zone": (cam.zone or "") if cam else "",
+        "reason": a.reason,
+        "went_offline_at": a.went_offline_at.isoformat() if a.went_offline_at else None,
+        "back_online_at": a.back_online_at.isoformat() if a.back_online_at else None,
+        "is_open": a.is_open,
+        "acknowledged": a.acknowledged_at is not None,
+        "acknowledged_by": (a.acknowledged_by.get_full_name() or a.acknowledged_by.username) if a.acknowledged_by else "",
+        "acknowledged_at": a.acknowledged_at.isoformat() if a.acknowledged_at else None,
+    }
+
+
+class CameraOfflineAlertListView(APIView):
+    """GET /api/cameras/offline-alerts/?scope=open|recent — Super Admin, IT Super Admin, Location Admin."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _can_see_offline_alerts(request.user):
+            return Response({"detail": "Only administrators receive camera offline alerts."}, status=status.HTTP_403_FORBIDDEN)
+        qs = _offline_alert_qs(request.user)
+        mode = (request.query_params.get("scope") or "recent").strip().lower()
+        if mode == "open":
+            qs = qs.filter(is_open=True)
+        else:
+            # Open ones plus anything that recovered in the last 24 h (so "back online" shows too).
+            since = timezone.now() - timedelta(hours=24)
+            qs = qs.filter(Q(is_open=True) | Q(back_online_at__gte=since))
+        try:
+            limit = max(1, min(200, int(request.query_params.get("limit") or 50)))
+        except (TypeError, ValueError):
+            return Response({"detail": "limit must be a number."}, status=status.HTTP_400_BAD_REQUEST)
+        rows = list(qs.order_by("-is_open", "-went_offline_at")[:limit])
+        open_count = _offline_alert_qs(request.user).filter(is_open=True).count()
+        return Response({"open_count": open_count, "results": [_offline_alert_dict(a) for a in rows]})
+
+
+class CameraOfflineAlertAcknowledgeView(APIView):
+    """POST /api/cameras/offline-alerts/<id>/acknowledge/"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        if not _can_see_offline_alerts(request.user):
+            return Response({"detail": "Only administrators can acknowledge camera alerts."}, status=status.HTTP_403_FORBIDDEN)
+        alert = _offline_alert_qs(request.user).filter(pk=pk).first()
+        if alert is None:
+            return Response({"detail": "Alert not found."}, status=status.HTTP_404_NOT_FOUND)
+        if alert.acknowledged_at is None:
+            alert.acknowledged_at = timezone.now()
+            alert.acknowledged_by = request.user
+            alert.save(update_fields=["acknowledged_at", "acknowledged_by"])
+        return Response(_offline_alert_dict(alert))

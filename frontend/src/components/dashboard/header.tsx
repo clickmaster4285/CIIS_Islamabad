@@ -38,7 +38,14 @@ import {
   markNoteSheetNotificationRead,
   type NoteSheetNotificationItem,
 } from "@/lib/seizure-management-api"
-import { fetchDetectionEventsPage, type DetectionEvent } from "@/lib/cameras-api"
+import {
+  acknowledgeCameraOfflineAlert,
+  canReceiveCameraOfflineAlerts,
+  fetchCameraOfflineAlerts,
+  fetchDetectionEventsPage,
+  type CameraOfflineAlert,
+  type DetectionEvent,
+} from "@/lib/cameras-api"
 import { cn } from "@/lib/utils"
 import { REALTIME_INVALIDATE_EVENT } from "@/lib/realtime-socket"
 import { resolveMediaUrl } from "@/lib/cameras-api"
@@ -72,6 +79,37 @@ type HeaderNotification =
       cameraName: string
       zone: string
     }
+  | {
+      kind: "camera_offline"
+      id: string
+      title: string
+      message: string
+      isRead: boolean
+      createdAt: string
+      alertId: number
+      cameraName: string
+      zone: string
+      location: string
+      isOpen: boolean
+    }
+
+function cameraOfflineToHeaderNotification(a: CameraOfflineAlert): HeaderNotification {
+  const when = a.is_open ? a.went_offline_at : a.back_online_at || a.went_offline_at
+  return {
+    kind: "camera_offline",
+    id: `camera-offline-${a.id}-${a.is_open ? "open" : "closed"}`,
+    title: a.is_open ? "Camera offline" : "Camera back online",
+    message: a.is_open ? a.reason || "No video from this camera." : "The camera is streaming again.",
+    // Open + unacknowledged stays "new"; a recovered camera is informational.
+    isRead: a.acknowledged || !a.is_open,
+    createdAt: when || new Date(0).toISOString(),
+    alertId: a.id,
+    cameraName: a.camera_name,
+    zone: a.zone,
+    location: a.location,
+    isOpen: a.is_open,
+  }
+}
 
 function readSeenAiAlertIds(): Set<string> {
   try {
@@ -352,6 +390,8 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
     }
   }, [location.pathname])
 
+  const receivesCameraAlerts = canReceiveCameraOfflineAlerts(user?.role)
+
   const loadNotifications = useCallback(() => {
     if (!isAuthenticated()) return
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return
@@ -366,7 +406,10 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
       fetchDetectionEventsPage({ is_alert: true, page: 1, page_size: 40 }).catch(() => ({
         results: [] as DetectionEvent[],
       })),
-    ]).then(([seizureData, alertPage]) => {
+      receivesCameraAlerts
+        ? fetchCameraOfflineAlerts("recent").catch(() => ({ open_count: 0, results: [] as CameraOfflineAlert[] }))
+        : Promise.resolve({ open_count: 0, results: [] as CameraOfflineAlert[] }),
+    ]).then(([seizureData, alertPage, cameraAlerts]) => {
       const approvalItems: HeaderNotification[] = (seizureData.results || []).map((n) => ({
         kind: "approval" as const,
         id: `approval-${n.id}`,
@@ -381,8 +424,11 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
         detectionToHeaderNotification(row, seenAi)
       )
 
-      const merged = [...approvalItems, ...aiItems].sort((a, b) => {
+      const cameraItems: HeaderNotification[] = (cameraAlerts.results || []).map(cameraOfflineToHeaderNotification)
+
+      const merged = [...cameraItems, ...approvalItems, ...aiItems].sort((a, b) => {
         const rank = (n: HeaderNotification) => {
+          if (!n.isRead && n.kind === "camera_offline") return -1
           if (!n.isRead && n.kind === "approval") return 0
           if (!n.isRead) return 1
           return 2
@@ -394,7 +440,7 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
       setNotifications(merged)
       setUnreadCount(merged.filter((n) => !n.isRead).length)
     })
-  }, [])
+  }, [receivesCameraAlerts])
 
   useEffect(() => {
     loadNotifications()
@@ -413,9 +459,15 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
     }
     window.addEventListener(REALTIME_INVALIDATE_EVENT, onRealtime)
     document.addEventListener("visibilitychange", onVisibility)
+    // Camera offline alerts come from the background-worker process, whose realtime pushes do
+    // not reach this browser without a shared socket manager, so the bell also polls.
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadNotifications()
+    }, 30000)
     return () => {
       window.removeEventListener(REALTIME_INVALIDATE_EVENT, onRealtime)
       document.removeEventListener("visibilitychange", onVisibility)
+      window.clearInterval(poll)
     }
   }, [loadNotifications])
 
@@ -429,6 +481,17 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
   }
 
   const openNotification = async (n: HeaderNotification) => {
+    if (n.kind === "camera_offline") {
+      try {
+        if (n.isOpen && !n.isRead) await acknowledgeCameraOfflineAlert(n.alertId)
+      } catch {
+        /* ignore */
+      }
+      setNotifOpen(false)
+      loadNotifications()
+      navigate(ROUTES.LIVE_CAMERA_GRID)
+      return
+    }
     if (n.kind === "ai_alert") {
       const seen = readSeenAiAlertIds()
       seen.add(n.id)
@@ -470,6 +533,13 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
     for (const n of notifications) {
       if (n.kind === "ai_alert") seenAi.add(n.id)
     }
+    await Promise.all(
+      notifications.map((n) =>
+        n.kind === "camera_offline" && n.isOpen && !n.isRead
+          ? acknowledgeCameraOfflineAlert(n.alertId).catch(() => null)
+          : null,
+      ),
+    )
     writeSeenAiAlertIds(seenAi)
     loadNotifications()
   }
@@ -644,6 +714,69 @@ export const Header = memo(function Header({ onMenuClick }: HeaderProps) {
               ) : (
                 <div className="divide-y divide-gray-100">
                   {notifications.map((n) => {
+                    if (n.kind === "camera_offline") {
+                      return (
+                        <DropdownMenuItem
+                          key={n.id}
+                          className={cn(
+                            "cursor-pointer items-start gap-3 rounded-none border-l-4 px-4 py-3.5 focus:bg-gray-50",
+                            n.isOpen ? "border-l-red-600" : "border-l-emerald-500",
+                            !n.isRead ? "bg-[#fffbfb]" : "bg-white",
+                          )}
+                          onClick={() => void openNotification(n)}
+                        >
+                          <span
+                            className={cn(
+                              "mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border",
+                              n.isOpen ? "border-red-200 bg-red-50" : "border-emerald-200 bg-emerald-50",
+                            )}
+                            aria-hidden
+                          >
+                            {n.isOpen ? (
+                              <WifiOff className="h-[18px] w-[18px] text-red-600" />
+                            ) : (
+                              <Wifi className="h-[18px] w-[18px] text-emerald-600" />
+                            )}
+                          </span>
+                          <span className="min-w-0 flex-1 space-y-1.5">
+                            <span className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  "inline-flex rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                                  n.isOpen ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700",
+                                )}
+                              >
+                                {n.isOpen ? "Offline" : "Online"}
+                              </span>
+                              {!n.isRead && (
+                                <span className="inline-flex rounded-md bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white">
+                                  New
+                                </span>
+                              )}
+                            </span>
+                            <span className="block text-[13px] font-semibold leading-snug text-[#101727]">
+                              {n.title}: {n.cameraName}
+                            </span>
+                            <span className="block text-xs leading-snug text-[#4b5563]">{n.message}</span>
+                            <span className="grid gap-1 pt-0.5 text-[11px] text-[#697282]">
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <MapPin className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+                                <span className="truncate">
+                                  {[n.location, n.zone].filter(Boolean).join(" · ") || "—"}
+                                </span>
+                              </span>
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <Clock3 className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+                                <span className="truncate">
+                                  {n.isOpen ? "Offline since " : "Back online at "}
+                                  {new Date(n.createdAt).toLocaleString()}
+                                </span>
+                              </span>
+                            </span>
+                          </span>
+                        </DropdownMenuItem>
+                      )
+                    }
                     if (n.kind === "ai_alert") {
                       const { Icon, iconWrap, iconColor, badge, badgeText, accent } = alertTone(
                         n.className,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Maximize2, Minimize2 } from "lucide-react"
+import { Maximize2, Minimize2, WifiOff } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -93,13 +93,15 @@ export function MlCameraFeed({
     return () => document.removeEventListener("visibilitychange", onVis)
   }, [])
 
+  // Set by the backend camera offline monitor when the camera stops sending video.
+  const isOffline = (camera.status || "").toLowerCase() === "offline"
   const mlLiveSrc = getMlLiveMultipartUrl(camera)
   const rawMjpegSrc = getRawMjpegUrl(camera)
   // Dashboard: clean camera only. Elsewhere: AI live feed, raw as fallback.
   const streamSrcBase = preferRaw
     ? rawMjpegSrc || mlLiveSrc
     : mlLiveSrc || rawMjpegSrc
-  const streamSrc = streamSrcBase && pageVisible
+  const streamSrc = streamSrcBase && pageVisible && !isOffline
     ? `${streamSrcBase}${streamSrcBase.includes("?") ? "&" : "?"}r=${streamRetry}`
     : null
   const usingMlAnnotated = Boolean(streamSrcBase && mlLiveSrc && streamSrcBase === mlLiveSrc)
@@ -176,7 +178,16 @@ export function MlCameraFeed({
           isFullscreen && "min-h-0 flex-1 aspect-auto"
         )}
       >
-        {streamSrc ? (
+        {isOffline ? (
+          <div className="flex h-full min-h-[120px] flex-col items-center justify-center gap-2 bg-neutral-950 px-4 text-center">
+            <WifiOff className="h-8 w-8 text-red-500" aria-hidden />
+            <span className="rounded bg-red-600 px-2 py-0.5 text-xs font-bold uppercase tracking-widest text-white">
+              Offline
+            </span>
+            <span className="text-sm font-medium text-white/90">This camera is offline</span>
+            <span className="text-xs text-white/60">No video is coming from this camera. Administrators have been alerted.</span>
+          </div>
+        ) : streamSrc ? (
           <img
             key={`${streamSrcBase}-${streamRetry}`}
             src={streamSrc}
@@ -209,7 +220,11 @@ export function MlCameraFeed({
           <Badge variant="secondary" className="text-xs">
             {camera.name}
           </Badge>
-          {streamSrc && <Badge className="bg-[#3b82f6] text-xs">Live</Badge>}
+          {isOffline ? (
+            <Badge className="bg-red-600 text-xs hover:bg-red-600">Offline</Badge>
+          ) : (
+            streamSrc && <Badge className="bg-[#3b82f6] text-xs">Live</Badge>
+          )}
         </div>
 
         {showFullscreenButton && (

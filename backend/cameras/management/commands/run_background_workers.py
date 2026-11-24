@@ -52,6 +52,10 @@ class Command(BaseCommand):
 
         start_motion_clip_worker()
 
+        from cameras.offline_monitor import start_camera_offline_monitor, stop_camera_offline_monitor
+
+        start_camera_offline_monitor()
+
         if getattr(settings, "PERSON_JOURNEY_WORKER_ENABLED", False):
             from person_journey.journey_worker import start_journey_worker_thread
 
@@ -69,6 +73,7 @@ class Command(BaseCommand):
             stop_background_worker()
             stop_mobile_monitor_thread()
             stop_motion_clip_worker()
+            stop_camera_offline_monitor()
             stop.set()
 
         signal.signal(signal.SIGINT, _shutdown)
@@ -76,7 +81,8 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                "Background workers running (detection + journey + attendance + CIIS mobile monitor + motion clips). "
+                "Background workers running (detection + journey + attendance + CIIS mobile monitor + motion clips "
+                "+ camera offline alerts). "
                 "Ctrl+C to stop."
             )
         )

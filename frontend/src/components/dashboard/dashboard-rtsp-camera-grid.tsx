@@ -63,8 +63,13 @@ export function DashboardRtspCameraGrid() {
     reloadCameras({ blocking: false })
     const onCustom = () => reloadCameras()
     window.addEventListener("camera-integration-updated", onCustom)
+    // Quiet refresh so an offline camera's tile switches to "Offline" without a page reload.
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") reloadCameras({ blocking: false })
+    }, 30000)
     return () => {
       window.removeEventListener("camera-integration-updated", onCustom)
+      window.clearInterval(poll)
     }
   }, [reloadCameras])
 
@@ -99,7 +104,8 @@ export function DashboardRtspCameraGrid() {
   }
 
   const feeds = useMemo(() => {
-    let list = allocatedCameras.filter((c) => c.is_active && c.status === "Online")
+    // Offline cameras stay on the wall (their tile says "Offline") instead of disappearing.
+    let list = allocatedCameras.filter((c) => c.is_active)
     if (location !== ALL_LOCATIONS) {
       list = list.filter((c) => c.location === location)
     }
@@ -109,7 +115,8 @@ export function DashboardRtspCameraGrid() {
     if (cameraId !== ALL_CAMERAS) {
       list = list.filter((c) => String(c.id) === cameraId)
     }
-    return list.slice(0, MAX_FEEDS)
+    const isOffline = (c: (typeof list)[number]) => (c.status || "").toLowerCase() === "offline"
+    return [...list].sort((a, b) => Number(isOffline(a)) - Number(isOffline(b))).slice(0, MAX_FEEDS)
   }, [allocatedCameras, location, zone, cameraId])
 
   const locationLabel =
@@ -222,7 +229,7 @@ export function DashboardRtspCameraGrid() {
           </div>
         ) : feeds.length === 0 ? (
           <div className="rounded-lg border border-dashed py-12 text-center text-sm text-muted-foreground">
-            No online allocated cameras for {emptyFilterLabel}.{" "}
+            No allocated cameras for {emptyFilterLabel}.{" "}
             <Link to={ROUTES.OPS_CAMERA_DISTRIBUTION} className="text-[#3b82f6] underline">
               Camera Distribution
             </Link>

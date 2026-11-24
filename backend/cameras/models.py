@@ -357,3 +357,29 @@ class DetectionEvent(models.Model):
             cam = "no-camera"
         when = f"{self.created_at:%Y-%m-%d %H:%M}" if self.created_at else "unsaved"
         return f"{cam} {self.label} @ {when}"
+
+
+class CameraOfflineAlert(models.Model):
+    """
+    One row per offline episode of a camera (opened when its ML stream stops, closed when it
+    comes back). Admins see open episodes in the header bell and on the camera tile.
+    """
+
+    camera = models.ForeignKey(Camera, on_delete=models.CASCADE, related_name="offline_alerts")
+    location = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    reason = models.CharField(max_length=200, blank=True, default="")
+    went_offline_at = models.DateTimeField(db_index=True)
+    back_online_at = models.DateTimeField(null=True, blank=True)
+    is_open = models.BooleanField(default=True, db_index=True)
+    acknowledged_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-went_offline_at"]
+        indexes = [models.Index(fields=["is_open", "-went_offline_at"])]
+
+    def __str__(self) -> str:
+        state = "offline" if self.is_open else "recovered"
+        return f"{self.camera_id} {state} since {self.went_offline_at:%Y-%m-%d %H:%M}"

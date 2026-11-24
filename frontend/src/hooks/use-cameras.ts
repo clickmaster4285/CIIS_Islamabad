@@ -11,9 +11,11 @@ export function useCameras(options?: {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const reload = useCallback(() => {
-    setLoading(true)
-    setError(null)
+  const reload = useCallback((silent = false) => {
+    if (!silent) {
+      setLoading(true)
+      setError(null)
+    }
     fetchCameras({ allocatedOnly: options?.allocatedOnly === true })
       .then((rows) => {
         let list = rows
@@ -30,8 +32,13 @@ export function useCameras(options?: {
     reload()
     const onUpdate = () => reload()
     window.addEventListener("camera-integration-updated", onUpdate)
+    // Quiet refresh so camera status (e.g. "Offline" from the offline monitor) stays current.
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === "visible") reload(true)
+    }, 30000)
     return () => {
       window.removeEventListener("camera-integration-updated", onUpdate)
+      window.clearInterval(poll)
     }
   }, [reload])
 
