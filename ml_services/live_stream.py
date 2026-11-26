@@ -2641,6 +2641,11 @@ class LiveStreamManager:
         worker_id = max(0, min(int(worker_id), n_workers - 1))
         with self._lock:
             sessions = sorted(self._sessions.values(), key=lambda s: s.ip)
+        # Only cameras that are streaming get a worker: an offline camera has no frames to
+        # analyse, and counting it gave its worker nothing to do while two live cameras
+        # shared another worker (each analysed half as often). Re-checked every loop, so a
+        # camera that reconnects is picked up again at once.
+        sessions = [s for s in sessions if getattr(s.stream, "connected", False)]
         total = len(sessions)
         if total == 0:
             return []

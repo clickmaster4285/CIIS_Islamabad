@@ -19,6 +19,7 @@ import { ROUTES } from "@/routes/config"
 import { getStoredUser } from "@/lib/auth"
 import { cn } from "@/lib/utils"
 import { fetchVmsOverview } from "@/lib/vms-api"
+import { fetchDashboardGlance } from "@/lib/dashboard-api"
 import type { VmsOverviewVisitorRow } from "@/lib/vms-api"
 import { LiveAlerts } from "@/components/dashboard/live-alerts"
 import {
@@ -88,7 +89,15 @@ export function Dashboard() {
     queryFn: fetchVmsOverview
   })
 
+  const { data: glance, isLoading: glanceLoading } = useQuery({
+    queryKey: ["dashboard", "glance"],
+    queryFn: fetchDashboardGlance,
+    refetchInterval: 60_000,
+  })
+
   const stat = (n: number | undefined) => (vmsLoading ? "—" : String(n ?? 0))
+  const glanceStat = (n: number | null | undefined, suffix = "") =>
+    glanceLoading ? "—" : n == null ? "No data" : `${n}${suffix}`
 
   return (
     <div className="flex min-h-full w-full min-w-0 max-w-full flex-col">
@@ -234,11 +243,15 @@ export function Dashboard() {
                     <div className="grid grid-cols-2 gap-3 sm:gap-4">
                       <div className="flex flex-col bg-blue-50 p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#155DFC] text-sm">Active Operations</span>
-                        <span className="text-[#1C398E] text-xl font-bold">142</span>
+                        <span className="text-[#1C398E] text-xl font-bold">
+                          {glanceStat(glance?.warehouse.active_operations)}
+                        </span>
                       </div>
                       <div className="flex flex-col bg-orange-50 p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#F54900] text-sm">Pending Items</span>
-                        <span className="text-[#7E2A0C] text-xl font-bold">38</span>
+                        <span className="text-[#7E2A0C] text-xl font-bold">
+                          {glanceStat(glance?.warehouse.pending_items)}
+                        </span>
                       </div>
                     </div>
                     <Link to={ROUTES.OPERATIONS_DASHBOARD}>
@@ -264,11 +277,15 @@ export function Dashboard() {
                     <div className="grid grid-cols-2 gap-3 sm:gap-4">
                       <div className="flex flex-col bg-[#FDF8F0] p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#FC7115] text-sm">Peak Hours</span>
-                        <span className="text-sm font-bold leading-tight text-[#8E4B1C] sm:text-xl">10AM - 2PM</span>
+                        <span className="text-sm font-bold leading-tight text-[#8E4B1C] sm:text-xl">
+                          {glanceLoading ? "—" : glance?.analytics.peak_hours ?? "No data"}
+                        </span>
                       </div>
                       <div className="flex flex-col bg-green-50 p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#00A63E] text-sm">Efficiency</span>
-                        <span className="text-[#0D542B] text-xl font-bold">93%</span>
+                        <span className="text-[#0D542B] text-xl font-bold">
+                          {glanceStat(glance?.analytics.efficiency_pct, "%")}
+                        </span>
                       </div>
                     </div>
                     <Link to={ROUTES.ANALYTICS_DASHBOARD}>
@@ -295,11 +312,15 @@ export function Dashboard() {
                     <div className="grid grid-cols-2 gap-3 sm:gap-4">
                       <div className="flex flex-col bg-[#F1FFEF] p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#019639] text-sm">Employees</span>
-                        <span className="text-[#1C620C] text-xl font-bold">142</span>
+                        <span className="text-[#1C620C] text-xl font-bold">
+                          {glanceStat(glance?.hr.employees)}
+                        </span>
                       </div>
                       <div className="flex flex-col bg-green-50 p-3 gap-1 rounded-[10px] min-w-0">
                         <span className="text-[#00A63E] text-sm">Present Today</span>
-                        <span className="text-[#0D542B] text-xl font-bold">131</span>
+                        <span className="text-[#0D542B] text-xl font-bold">
+                          {glanceStat(glance?.hr.present_today)}
+                        </span>
                       </div>
                     </div>
                     <Link to={ROUTES.EMPLOYEES}>

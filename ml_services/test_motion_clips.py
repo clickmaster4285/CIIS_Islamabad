@@ -38,7 +38,8 @@ def stop(at: float, tid: int = 1, gid: str = "GV1") -> dict:
 class MotionClipRecorderTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="motion-clips-")
-        cfg = ClipConfig(fps=FPS, preroll_sec=5.0, postroll_sec=2.0, min_sec=10.0, max_sec=30.0, out_dir=self.dir)
+        cfg = ClipConfig(fps=FPS, preroll_sec=5.0, postroll_sec=2.0, min_sec=10.0, max_sec=30.0, out_dir=self.dir,
+                        pixel_trigger=False)
         self.rec = MotionClipRecorder(cfg, ffmpeg_path=_resolve_ffmpeg_path)
         self.t = 1000.0
         self.i = 0
@@ -278,7 +279,7 @@ class DangerClipTests(unittest.TestCase):
         self.assertEqual(self.rec.danger_class({"class_name": "person", "model": "coco"}), "")
 
     def test_danger_ignores_cooldown(self):
-        rec = MotionClipRecorder(ClipConfig(cooldown_sec=999, out_dir=self.dir), ffmpeg_path=_resolve_ffmpeg_path)
+        rec = MotionClipRecorder(ClipConfig(cooldown_sec=999, out_dir=self.dir, pixel_trigger=False), ffmpeg_path=_resolve_ffmpeg_path)
         rec._cameras["cam-5"] = __import__("motion_clips")._Camera(cooldown_until=self.t + 999)
         rec.on_motion("cam-5", [], [], self.t, [{"class_name": "fire", "bbox": [1, 1, 5, 5]}])
         self.assertIsNotNone(rec._cameras["cam-5"].recording)
@@ -304,9 +305,40 @@ class RealMovementRuleTests(unittest.TestCase):
         self.assertFalse(self.real(self.mv("car", dx=40)))   # 4%
         self.assertTrue(self.real(self.mv("car", dx=55)))    # 5.5%
 
-    def test_person_needs_3_percent(self):
-        self.assertFalse(self.real(self.mv("person", dx=25)))  # 2.5%
-        self.assertTrue(self.real(self.mv("person", dx=35)))   # 3.5%
+    def test_person_needs_5_percent(self):
+        self.assertFalse(self.real(self.mv("person", dx=40)))  # 4%
+        self.assertTrue(self.real(self.mv("person", dx=55)))   # 5.5%
+
+    def test_vehicle_types_need_5_percent(self):
+        for cls in ("truck", "motorcycle", "microbus", "pickup-van"):
+            self.assertFalse(self.real(self.mv(cls, dx=40)), cls)
+            self.assertTrue(self.real(self.mv(cls, dx=55)), cls)
+
+    def test_hand_wave_does_not_count(self):
+        # Arm raised above the head: box grows upward, feet stay where they are
+        mv = self.mv("person")
+        mv.to_bbox = [100, 20, 200, 200]
+        self.assertFalse(self.real(mv))
+        # Arm stretched out sideways: box widens, feet move a little
+        mv.to_bbox = [100, 100, 260, 200]
+        self.assertFalse(self.real(mv))
+
+    def test_hips_must_move_when_pose_seen(self):
+        mv = self.mv("person", dx=80)  # box moved 8%
+        mv.body_shift = 0.4  # but the hips barely moved: wrong / stretched box
+        self.assertFalse(self.real(mv))
+        mv.body_shift = 2.0
+        self.assertTrue(self.real(mv))
+
+    def test_standing_up_in_place_does_not_count(self):
+        mv = self.mv("person", dx=5)
+        mv.posture_from, mv.posture_to, mv.body_shift = "sitting", "standing", 0.6
+        mv.to_bbox = [105, 40, 205, 205]  # taller box, same place
+        self.assertFalse(self.real(mv))
+
+    def test_other_objects_make_no_clip(self):
+        self.assertFalse(self.real(self.mv("cell phone", dx=200)))
+        self.assertFalse(self.real(self.mv("chair", dx=200)))
 
     def test_walking_toward_or_away_from_camera_counts(self):
         self.assertTrue(self.real(self.mv("person", grow=1.6)))
@@ -317,12 +349,178 @@ class RealMovementRuleTests(unittest.TestCase):
         self.assertTrue(self.real(self.mv("heavy-weapon", dx=1)))
         self.assertTrue(self.real(self.mv("gun")))
 
+    def test_other_object_start_does_not_open_a_recording(self):
+        ev = {"event": "start", "at": 1.0, "track_id": 9, "class_name": "cell phone",
+              "from_bbox": [10, 10, 20, 20], "to_bbox": [30, 10, 40, 20]}
+        self.rec.on_motion("cam-x", [], [ev], 1.0)
+        self.assertIsNone(self.rec._cameras["cam-x"].recording)
+        self.rec.on_motion("cam-x", [], [dict(ev, class_name="person")], 1.0)
+        self.assertIsNotNone(self.rec._cameras["cam-x"].recording)
+
     def test_unknown_size_is_kept(self):
         self.assertTrue(self.rec.is_real_move(self.mv("car", dx=1), 0, 0))
 
     def test_zero_threshold_keeps_everything(self):
         rec = MotionClipRecorder(ClipConfig(keep_min_pct=0, keep_person_pct=0, out_dir=tempfile.gettempdir()))
         self.assertTrue(rec.is_real_move(self.mv("person", dx=1), 600, 800))
+
+
+def scene(person_x: float | None, arm_up: bool = False, clock: int = 0) -> np.ndarray:
+    """Grey room; a white 'person' (12x40 px) standing / walking at person_x."""
+    img = np.full((120, 160, 3), 100, dtype=np.uint8)
+    if person_x is not None:
+        x = int(person_x)
+        img[60:100, x : x + 12] = 240
+        if arm_up:
+            img[52:60, x + 12 : x + 20] = 240  # raised hand beside the head
+    if clock:
+        img[2:6, 2:6] = 100 + 60 * (clock % 2)  # on-screen clock digit flickering
+    return img
+
+
+def white_box_pose(images):
+    """Fake YOLO pose: the white 'person' in each image (big blob only, hand ignored for hips)."""
+    out = []
+    for img in images:
+        ys, xs = np.where(img[:, :, 0] > 200)
+        if len(xs) < 50:
+            out.append([])
+            continue
+        x1, y1, x2, y2 = float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+        body_x = float(np.median(xs))
+        kps = [[0.0, 0.0, 0.0] for _ in range(17)]
+        kps[5], kps[6] = [body_x - 4, 66, 0.9], [body_x + 4, 66, 0.9]
+        kps[11], kps[12] = [body_x - 3, 82, 0.9], [body_x + 3, 82, 0.9]
+        out.append([{"bbox": [x1, y1, x2, y2], "score": 0.9, "keypoints": kps}])
+    return out
+
+
+class PixelMotionCheckTests(unittest.TestCase):
+    def setUp(self):
+        from motion_clips import _Camera
+
+        self.rec = MotionClipRecorder(ClipConfig(out_dir=tempfile.mkdtemp()))
+        self.cam = _Camera()
+
+    def feed(self, imgs) -> list[bool]:
+        return [self.rec.pixel_motion(self.cam, img) for img in imgs]
+
+    def test_still_scene_is_quiet(self):
+        self.assertFalse(any(self.feed([scene(60)] * 20)))
+
+    def test_walking_person_is_motion(self):
+        self.feed([scene(None)] * 5)
+        self.assertTrue(any(self.feed([scene(10 + 3 * i) for i in range(6)])))
+
+    def test_onscreen_clock_is_not_motion(self):
+        self.assertFalse(any(self.feed([scene(None, clock=i) for i in range(20)])))
+
+    def test_light_switch_is_not_motion(self):
+        self.feed([scene(None)] * 5)
+        bright = np.full((120, 160, 3), 220, dtype=np.uint8)
+        self.assertFalse(any(self.feed([bright] * 3)))
+
+
+@unittest.skipUnless(_resolve_ffmpeg_path(), "ffmpeg not installed")
+class PixelTriggerClipTests(unittest.TestCase):
+    """Live AI never saw the movement; the pixel check starts the clip, YOLO on the clip decides."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="motion-clips-")
+        cfg = ClipConfig(fps=FPS, preroll_sec=5.0, postroll_sec=2.0, min_sec=10.0, max_sec=30.0, out_dir=self.dir)
+        self.rec = MotionClipRecorder(cfg, ffmpeg_path=_resolve_ffmpeg_path, pose_batch=white_box_pose)
+        self.t = 1000.0
+
+    tearDown = MotionClipRecorderTests.tearDown
+    flush = MotionClipRecorderTests.flush
+
+    def play(self, imgs):
+        for img in imgs:
+            self.rec.add_frame("cam-p", img, self.t)
+            self.t += 1 / FPS
+
+    def test_quick_walk_past_is_recorded_without_live_ai(self):
+        self.play([scene(None)] * int(6 * FPS))                   # empty doorway
+        self.play([scene(5 + 4 * i) for i in range(30)])          # walks across in ~4 s
+        self.play([scene(None)] * int(14 * FPS))                  # gone
+        clips = self.flush()
+        self.assertEqual(len(clips), 1)
+        movers = clips[0]["movements"]
+        self.assertEqual([m["class_name"] for m in movers], ["person"])
+        self.assertLess(movers[0]["from_bbox"][0], 30)
+        self.assertGreater(movers[0]["to_bbox"][0], 100)
+        self.assertEqual(self.rec.stats["clips_discovered_movers"], 1)
+
+    def test_hand_wave_in_place_is_not_kept(self):
+        self.play([scene(60)] * int(6 * FPS))                     # person standing
+        self.play([scene(60, arm_up=(i // 4) % 2 == 0) for i in range(40)])  # waves a hand
+        self.play([scene(60)] * int(14 * FPS))
+        self.assertEqual(self.flush(), [])
+        self.assertGreaterEqual(self.rec.stats["clips_skipped_small"], 1)
+
+
+class ManyMoversTests(unittest.TestCase):
+    """Several people / vehicles moving on one camera at once all go into the clip."""
+
+    def setUp(self):
+        self.rec = MotionClipRecorder(ClipConfig(out_dir=tempfile.mkdtemp()))
+        self.cam = "cam-m"
+
+    @staticmethod
+    def ev(kind, at, tid, key, x0, x1, cls="person", gid=""):
+        return {"event": kind, "at": at, "track_id": tid, "motion_key": key, "global_object_id": gid,
+                "class_name": cls, "from_bbox": [x0, 300, x0 + 80, 500], "to_bbox": [x1, 300, x1 + 80, 500]}
+
+    @staticmethod
+    def det(tid, key, x):
+        return {"track_id": tid, "motion_key": key, "motion_state": "moving", "bbox": [x, 300, x + 80, 500]}
+
+    def recording(self):
+        return self.rec._cameras[self.cam].recording
+
+    def test_three_movers_at_once_are_all_kept(self):
+        r = self.rec
+        r.on_motion(self.cam, [], [self.ev("start", 1, 1, "g:GP1", 100, 140),
+                                   self.ev("start", 1, 2, "g:GP2", 1100, 1060),
+                                   self.ev("start", 2, 3, "g:GV3", 600, 640, cls="car")], 2)
+        r.on_motion(self.cam, [self.det(1, "g:GP1", 500), self.det(2, "g:GP2", 600), self.det(3, "g:GV3", 1000)], [], 6)
+        r.on_motion(self.cam, [], [self.ev("stop", 7, 1, "g:GP1", 100, 520), self.ev("stop", 7, 2, "g:GP2", 1100, 580),
+                                   self.ev("stop", 7, 3, "g:GV3", 600, 1010, cls="car")], 7)
+        rec = self.recording()
+        rec.source_size = (1280, 720)
+        self.assertEqual(sorted(mv.key for mv in r.real_movements(rec)), ["g:GP1", "g:GP2", "g:GV3"])
+
+    def test_lasting_id_given_while_walking_keeps_the_movement(self):
+        r = self.rec
+        r.on_motion(self.cam, [], [self.ev("start", 1, 2, "t:2", 1100, 1060)], 1)
+        # The tracker gives the person its lasting ID while it is still walking
+        r.on_motion(self.cam, [self.det(2, "g:GP2", 700)], [], 5)
+        r.on_motion(self.cam, [], [self.ev("stop", 9, 2, "g:GP2", 1100, 500, gid="GP2")], 9)
+        rec = self.recording()
+        self.assertEqual(list(rec.movements), ["g:GP2"])
+        mv = rec.movements["g:GP2"]
+        self.assertFalse(mv.still_moving)
+        self.assertEqual(mv.from_bbox[0], 1100)  # point A kept
+        self.assertEqual(mv.to_bbox[0], 500)     # point B reached
+        self.assertEqual(mv.global_object_id, "GP2")
+
+    def test_walk_pause_walk_is_one_move_from_first_point(self):
+        r = self.rec
+        r.on_motion(self.cam, [], [self.ev("start", 1, 1, "g:GP1", 100, 140)], 1)
+        r.on_motion(self.cam, [], [self.ev("stop", 4, 1, "g:GP1", 100, 160)], 4)
+        r.on_motion(self.cam, [], [self.ev("start", 7, 1, "g:GP1", 160, 200)], 7)
+        r.on_motion(self.cam, [], [self.ev("stop", 10, 1, "g:GP1", 160, 230)], 10)
+        mv = self.recording().movements["g:GP1"]
+        self.assertEqual((mv.from_bbox[0], mv.to_bbox[0]), (100, 230))
+
+    def test_movement_without_stop_event_ends_after_stale_time(self):
+        r = self.rec
+        r.on_motion(self.cam, [], [self.ev("start", 1, 4, "t:4", 100, 300)], 1)
+        rec = self.recording()
+        rec.frames.append((1.0, b""))
+        with r._lock:
+            r._check_camera(self.cam, r._cameras[self.cam], 1 + r.config.moving_stale_sec + 1)
+        self.assertFalse(rec.movements["t:4"].still_moving)
 
 
 class FakeStream:
@@ -341,7 +539,7 @@ class SamplerThreadTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         stream = FakeStream()
         rec = MotionClipRecorder(
-            ClipConfig(fps=20.0, out_dir=tmp), ffmpeg_path=_resolve_ffmpeg_path, frame_sources=lambda: {"cam-1": stream}
+            ClipConfig(fps=20.0, out_dir=tmp, pixel_trigger=False), ffmpeg_path=_resolve_ffmpeg_path, frame_sources=lambda: {"cam-1": stream}
         )
         rec.start()
         try:

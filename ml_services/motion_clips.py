@@ -56,18 +56,24 @@ class ClipConfig:
     max_sec: float = 30.0
     # Wait after a clip ends before a new one may start on that camera (0 = none)
     cooldown_sec: float = 0.0
-    # Real-movement filter: a finished clip is kept only if some object moved at least
-    # this far from A to B (% of the frame diagonal, same measure as the backend's
-    # distance_pct). Small moves (people shifting in a chair) are left out of the log
-    # and a clip with no real move is not written at all. 0 = keep everything.
+    # Only these classes make a movement clip (danger clips are separate). A cup or a
+    # phone picked up from a desk is not a movement from A to B.
+    clip_classes: frozenset[str] = frozenset()  # empty = PERSON_CLASSES | VEHICLE_CLASSES
+    # Real-movement filter: a finished clip is kept only if a person / vehicle went from
+    # A to B: its feet (people) or wheels (vehicles) moved at least this far, as % of
+    # the frame diagonal. Waving a hand, leaning, or sitting down / standing up in the
+    # same place moves the box but not the feet, so it is left out. 0 = keep everything.
     keep_min_pct: float = 5.0
-    keep_person_pct: float = 3.0
-    # Or came this much closer to / farther from the camera (box size ratio)
+    keep_person_pct: float = 5.0
+    # Or came this much closer to / farther from the camera (box size ratio); the feet
+    # must also have moved at least keep_scale_min_pct (standing up grows the box too)
     keep_scale: float = 1.5
-    # People with pose: keep when the body (hips) moved this many torso lengths A → B,
-    # or the posture changed (sat down / stood up). Used instead of keep_person_pct.
+    keep_scale_min_pct: float = 2.0
+    # People with pose: the hips must also have moved this many torso lengths A → B, so a
+    # box stretched by an arm or a wrong box does not count as a walk
     keep_body_shift: float = 1.0
-    keep_posture_change: bool = True
+    # Sitting down / standing up in place counts as a move (off: only A → B counts)
+    keep_posture_change: bool = False
     # Always kept, however small the move
     keep_always_classes: frozenset[str] = frozenset(
         {"weapon", "gun", "pistol", "rifle", "firearm", "knife_weapon", "heavy-weapon"}
@@ -80,6 +86,22 @@ class ClipConfig:
     # A danger object that stays where it was recorded is not recorded again until it
     # moves or has been out of view this long
     danger_rearm_sec: float = 600.0
+    # Pixel-motion trigger: a cheap frame-difference check on every sampled frame starts
+    # the clip at once (live AI sees each camera only every 1-2 s and misses quick passes).
+    # When the clip ends, YOLO runs on its own frames and keeps it only if a person /
+    # vehicle went from A to B (discover_movers).
+    pixel_trigger: bool = True
+    pixel_width: int = 320  # frames are shrunk to this width for the check
+    pixel_diff: int = 25  # grey-level change that counts as a changed pixel
+    pixel_min_blob_pct: float = 0.15  # biggest changed blob, % of the frame (ignores the OSD clock)
+    pixel_light_pct: float = 40.0  # more than this % changed at once = light switched, not motion
+    pixel_frames: int = 2  # consecutive sampled frames with motion before a clip starts
+    # Find every person / vehicle that moved in the clip frames (not only the live movers)
+    discover_movers: bool = True
+    discover_min_frames: int = 3  # sampled frames an object must be seen in
+    # A movement whose object has not been seen moving for this long is ended (no stop
+    # event came); stops one lost track from keeping a camera recording forever
+    moving_stale_sec: float = 20.0
     max_width: int = 1280
     jpeg_quality: int = 80
     crf: int = 28
@@ -105,11 +127,15 @@ class ClipConfig:
             max_sec=max(2.0, _env_float("ML_MOTION_CLIP_MAX_SEC", 30.0)),
             cooldown_sec=max(0.0, _env_float("ML_MOTION_CLIP_COOLDOWN_SEC", 0.0)),
             keep_min_pct=max(0.0, _env_float("ML_MOTION_KEEP_MIN_PCT", 5.0)),
-            keep_person_pct=max(0.0, _env_float("ML_MOTION_KEEP_PERSON_PCT", 3.0)),
+            keep_person_pct=max(0.0, _env_float("ML_MOTION_KEEP_PERSON_PCT", 5.0)),
             keep_scale=max(1.0, _env_float("ML_MOTION_KEEP_SCALE", 1.5)),
+            keep_scale_min_pct=max(0.0, _env_float("ML_MOTION_KEEP_SCALE_MIN_PCT", 2.0)),
             keep_body_shift=max(0.0, _env_float("ML_MOTION_KEEP_BODY_SHIFT", 1.0)),
-            keep_posture_change=os.getenv("ML_MOTION_KEEP_POSTURE_CHANGE", "true").strip().lower()
+            keep_posture_change=os.getenv("ML_MOTION_KEEP_POSTURE_CHANGE", "false").strip().lower()
             in ("true", "1", "yes"),
+            clip_classes=frozenset(
+                c.strip().lower() for c in os.getenv("ML_MOTION_CLIP_CLASSES", "").split(",") if c.strip()
+            ),
             keep_always_classes=frozenset(
                 c.strip().lower()
                 for c in os.getenv(
@@ -127,6 +153,15 @@ class ClipConfig:
                 if c.strip()
             ),
             danger_rearm_sec=max(0.0, _env_float("ML_DANGER_REARM_SEC", 600.0)),
+            moving_stale_sec=max(5.0, _env_float("ML_MOTION_CLIP_STALE_SEC", 20.0)),
+            pixel_trigger=os.getenv("ML_PIXEL_MOTION_ENABLED", "true").strip().lower() in ("true", "1", "yes"),
+            pixel_width=max(80, int(_env_float("ML_PIXEL_MOTION_WIDTH", 320))),
+            pixel_diff=min(200, max(5, int(_env_float("ML_PIXEL_MOTION_DIFF", 25)))),
+            pixel_min_blob_pct=max(0.01, _env_float("ML_PIXEL_MOTION_MIN_BLOB_PCT", 0.15)),
+            pixel_light_pct=min(100.0, max(5.0, _env_float("ML_PIXEL_MOTION_LIGHT_PCT", 40.0))),
+            pixel_frames=max(1, int(_env_float("ML_PIXEL_MOTION_FRAMES", 2))),
+            discover_movers=os.getenv("ML_CLIP_DISCOVER_MOVERS", "true").strip().lower() in ("true", "1", "yes"),
+            discover_min_frames=max(2, int(_env_float("ML_CLIP_DISCOVER_MIN_FRAMES", 3))),
             max_width=max(320, int(_env_float("ML_MOTION_CLIP_WIDTH", 1280))),
             jpeg_quality=min(95, max(40, int(_env_float("ML_MOTION_CLIP_JPEG_QUALITY", 80)))),
             crf=min(40, max(18, int(_env_float("ML_MOTION_CLIP_CRF", 28)))),
@@ -136,7 +171,9 @@ class ClipConfig:
 
 
 PERSON_CLASSES = frozenset({"person", "face"})
-VEHICLE_CLASSES = frozenset({"car", "motorcycle", "bus", "truck", "bicycle", "vehicle"})
+VEHICLE_CLASSES = frozenset(
+    {"car", "motorcycle", "bus", "truck", "bicycle", "vehicle", "microbus", "pickup-van", "van", "rickshaw"}
+)
 VEHICLE_BOX_COLOR = (0, 165, 255)  # orange (BGR)
 
 
@@ -168,12 +205,24 @@ def _rescale_det(det: dict[str, Any], k: float) -> dict[str, Any]:
     return out
 
 
-def move_pct(from_bbox: list[float], to_bbox: list[float], width: int, height: int) -> float | None:
-    """Net move A → B as % of the frame diagonal (None = can't tell)."""
+def _box_foot(b: list[float]) -> tuple[float, float]:
+    """Bottom centre: a person's feet / a vehicle's wheels on the ground."""
+    return (b[0] + b[2]) / 2.0, b[3]
+
+
+def move_pct(
+    from_bbox: list[float], to_bbox: list[float], width: int, height: int, *, foot: bool = False
+) -> float | None:
+    """Net move A → B as % of the frame diagonal (None = can't tell).
+
+    foot=True measures the bottom centre (feet / wheels) instead of the box centre: a
+    raised arm or a lean changes the box centre, not where the object stands.
+    """
     diag = (width * width + height * height) ** 0.5 if width and height else 0.0
     if len(from_bbox) < 4 or len(to_bbox) < 4 or diag <= 0:
         return None
-    (fx, fy), (tx, ty) = _box_center(from_bbox), _box_center(to_bbox)
+    point = _box_foot if foot else _box_center
+    (fx, fy), (tx, ty) = point(from_bbox), point(to_bbox)
     return 100.0 * ((tx - fx) ** 2 + (ty - fy) ** 2) ** 0.5 / diag
 
 
@@ -198,6 +247,8 @@ class _Movement:
     posture_to: str = ""
     # Movement path [x, y, t] (source px) from motion_state: drawn on the clip frames
     path: list = field(default_factory=list)
+    # Path of earlier walks by the same object in this clip (walk, pause, walk again)
+    path_done: list = field(default_factory=list)
     # Clip frames in which YOLO pose found this person (frame-by-frame tracking)
     pose_frames: int = 0
 
@@ -217,6 +268,8 @@ class _Recording:
     last_motion_at: float = 0.0
     source_size: tuple[int, int] = (0, 0)
     clip_size: tuple[int, int] = (0, 0)
+    # Decide in the encoder from the clip frames (pixel trigger / movers the live AI missed)
+    confirm: bool = False
 
     def moving(self) -> list[_Movement]:
         return [m for m in self.movements.values() if m.still_moving]
@@ -234,6 +287,10 @@ class _Camera:
     # danger class → (box where it was recorded, last time seen)
     danger_spots: dict[str, tuple[list[float], float]] = field(default_factory=dict)
     last_ring_at: float = 0.0
+    # Pixel-motion check: running background (small grey image) and motion streak
+    pixel_bg: np.ndarray | None = None
+    pixel_hits: int = 0
+    last_pixel_at: float = 0.0
 
 
 class MotionClipRecorder:
@@ -280,6 +337,7 @@ class MotionClipRecorder:
             "clips_failed": 0,
             "clips_pruned": 0,
             "clips_skipped_small": 0,
+            "clips_discovered_movers": 0,
             "clips_pose_tracked": 0,
             "clips_vehicle_tracked": 0,
         }
@@ -452,15 +510,22 @@ class MotionClipRecorder:
                 rec.last_motion_at = now
             if rec is None:
                 return
-            by_key = {(d.get("motion_key") or int(d["track_id"])): d for d in moving_dets}
+            by_key = {}
+            for d in moving_dets:
+                key = d.get("motion_key") or int(d["track_id"])
+                by_key[key] = d
+                self._movement_for(rec, key, d.get("track_id"))  # local ID → lasting ID
             for mv in rec.moving():
                 if mv.danger:
                     continue
                 det = by_key.get(mv.key)
-                if det and det.get("bbox"):
+                if det is None:
+                    continue
+                mv.last_seen = now
+                if det.get("bbox"):
                     mv.to_bbox = [float(v) for v in det["bbox"][:4]]
-                if det and det.get("motion_path"):
-                    mv.path = det["motion_path"]
+                if det.get("motion_path"):
+                    mv.path = mv.path_done + list(det["motion_path"])
             if rec.moving():
                 rec.last_motion_at = now
 
@@ -478,8 +543,16 @@ class MotionClipRecorder:
         data = jpeg.tobytes()
         with self._lock:
             cam = self._cameras.setdefault(camera_key, _Camera())
+        moved = self.pixel_motion(cam, img) if cfg.pixel_trigger else False
+        with self._lock:
             cam.source_size = (src_w, src_h)
             cam.clip_size = (img.shape[1], img.shape[0])
+            if moved:
+                cam.last_pixel_at = now
+                if cam.recording is None and now >= cam.cooldown_until:
+                    self._new_recording(cam, camera_key, now)
+                if cam.recording is not None:
+                    cam.recording.last_motion_at = now
             cam.ring.append((now, data))
             cam.last_ring_at = now
             while cam.ring and now - cam.ring[0][0] > cfg.preroll_sec:
@@ -493,6 +566,39 @@ class MotionClipRecorder:
                     rec.frames.append((now, data))
                 rec.source_size, rec.clip_size = cam.source_size, cam.clip_size
             self._check_camera(camera_key, cam, now)
+
+    def pixel_motion(self, cam: _Camera, img: np.ndarray) -> bool:
+        """Cheap frame-difference check: something the size of a person changed.
+
+        Only the sampler thread touches cam.pixel_bg / pixel_hits.
+        """
+        cfg = self.config
+        h, w = img.shape[:2]
+        if not w or not h:
+            return False
+        sw = min(cfg.pixel_width, w)
+        small = cv2.resize(img, (sw, max(2, int(h * sw / float(w)))), interpolation=cv2.INTER_AREA)
+        grey = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0).astype(np.float32)
+        bg = cam.pixel_bg
+        if bg is None or bg.shape != grey.shape:
+            cam.pixel_bg, cam.pixel_hits = grey, 0
+            return False
+        mask = (cv2.absdiff(grey, bg) > cfg.pixel_diff).astype(np.uint8)
+        cv2.accumulateWeighted(grey, bg, 0.1)
+        total = mask.size
+        changed = 100.0 * float(mask.sum()) / total
+        if changed >= cfg.pixel_light_pct:
+            # Light switched / camera adjusted exposure: start over from this picture
+            cam.pixel_bg, cam.pixel_hits = grey, 0
+            return False
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        count, _labels, stats, _cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        biggest = int(stats[1:, cv2.CC_STAT_AREA].max()) if count > 1 else 0
+        if 100.0 * biggest / total >= cfg.pixel_min_blob_pct:
+            cam.pixel_hits += 1
+        else:
+            cam.pixel_hits = 0
+        return cam.pixel_hits >= cfg.pixel_frames
 
     def _padded(self, frames: list[tuple[float, bytes]]) -> list[tuple[float, bytes]]:
         """Repeat frames across gaps so the pre-roll (sampled slower) plays at the clip fps."""
@@ -508,6 +614,25 @@ class MotionClipRecorder:
             out.append((ts, data))
         return out
 
+    @staticmethod
+    def _movement_for(rec: _Recording, key: Any, track_id: Any) -> _Movement | None:
+        """This object's movement in the recording, or None. Caller holds self._lock.
+
+        An object starts moving under its local track key ("t:<id>") and may get its
+        lasting ID ("g:GP12") while still walking; its stop event and boxes then come under
+        the new key. The movement is moved to the new key so it keeps its point A.
+        """
+        mv = rec.movements.get(key)
+        if mv is not None or track_id is None:
+            return mv
+        local = f"t:{int(track_id)}"
+        if key == local or local not in rec.movements:
+            return None
+        mv = rec.movements.pop(local)
+        mv.key = key
+        rec.movements[key] = mv
+        return mv
+
     def _apply_event(self, cam: _Camera, camera_key: str, ev: dict[str, Any], now: float) -> _Recording | None:
         """Caller holds self._lock."""
         rec = cam.recording
@@ -515,11 +640,14 @@ class MotionClipRecorder:
         key = ev.get("motion_key") or tid
         kind = ev.get("event")
         if kind == "start":
+            if not self.is_clip_class(str(ev.get("class_name") or "")):
+                return rec  # not a person / vehicle: does not start or join a clip
             if rec is None:
                 if now < cam.cooldown_until:
                     return None
                 rec = self._new_recording(cam, camera_key, now)
-            if key not in rec.movements or not rec.movements[key].still_moving:
+            mv = self._movement_for(rec, key, tid)
+            if mv is None:
                 rec.movements[key] = _Movement(
                     track_id=tid,
                     key=key,
@@ -529,14 +657,24 @@ class MotionClipRecorder:
                     from_bbox=list(ev.get("from_bbox") or []),
                     to_bbox=list(ev.get("to_bbox") or []),
                     posture_from=str(ev.get("posture_from") or ""),
+                    last_seen=now,
                 )
+            elif not mv.still_moving:
+                # Same object walks again after a pause: one movement from the first point A
+                mv.still_moving = True
+                mv.ended_at = None
+                mv.track_id = tid
+                mv.last_seen = now
+                mv.path_done = list(mv.path or [])
+                if ev.get("to_bbox"):
+                    mv.to_bbox = list(ev["to_bbox"])
             rec.last_motion_at = now
-        elif rec is not None and kind in ("stop", "lost") and key in rec.movements:
+        elif rec is not None and kind in ("stop", "lost") and self._movement_for(rec, key, tid) is not None:
             mv = rec.movements[key]
             mv.track_id = tid
             mv.body_shift = ev.get("body_shift")
             mv.posture_to = str(ev.get("posture_to") or "")
-            mv.path = ev.get("path") or mv.path
+            mv.path = (mv.path_done + list(ev["path"])) if ev.get("path") else mv.path
             mv.still_moving = False
             mv.ended_at = float(ev.get("at") or now)
             mv.to_bbox = list(ev.get("to_bbox") or mv.to_bbox)
@@ -562,6 +700,10 @@ class MotionClipRecorder:
             if mv.danger and now - mv.last_seen > cfg.postroll_sec:
                 mv.still_moving = False
                 mv.ended_at = mv.last_seen
+            # No stop event came and the object is no longer seen moving: end it here
+            elif not mv.danger and mv.last_seen and now - mv.last_seen > cfg.moving_stale_sec:
+                mv.still_moving = False
+                mv.ended_at = mv.last_seen
         # Measured from the first frame actually recorded (the ring may be shorter than the pre-roll)
         length = now - rec.frames[0][0]
         capped = length >= cfg.max_sec
@@ -578,7 +720,8 @@ class MotionClipRecorder:
                 mv.still_moving = False
                 mv.ended_at = mv.last_seen
         still = rec.moving()
-        if capped and still:
+        pixel_busy = cfg.pixel_trigger and now - cam.last_pixel_at <= cfg.postroll_sec
+        if capped and (still or pixel_busy):
             # Same movement continues in the next part (no cooldown between parts)
             nxt = _Recording(camera_key=camera_key, started_at=now, part=rec.part + 1, poster_at=now, last_motion_at=now)
             for mv in still:
@@ -596,37 +739,57 @@ class MotionClipRecorder:
             cam.recording = nxt
             cam.cooldown_until = 0.0
         real = self.real_movements(rec)
-        if not real:
-            self.stats["clips_skipped_small"] += 1
-            return
         rec.movements = {mv.key: mv for mv in real}
+        if not real:
+            if not self._can_discover():
+                self.stats["clips_skipped_small"] += 1
+                return
+            rec.confirm = True  # the encoder looks for movers in the clip frames
+        elif self._can_discover():
+            rec.confirm = True  # also pick up movers the live AI missed
         try:
             self._encode.put_nowait(rec)
         except queue.Full:
             self.stats["clips_failed"] += 1
             print(f"[motion-clip] Encode queue full — dropped clip [{camera_key}]")
 
+    def _can_discover(self) -> bool:
+        return self.config.discover_movers and (
+            (self._clip_pose and self._pose_batch is not None)
+            or (self._clip_vehicles and self._vehicle_batch is not None)
+        )
+
+    def is_clip_class(self, class_name: str) -> bool:
+        cls = (class_name or "").strip().lower()
+        return cls in (self.config.clip_classes or (PERSON_CLASSES | VEHICLE_CLASSES))
+
     def is_real_move(self, mv: _Movement, width: int, height: int) -> bool:
+        """A person / vehicle went from point A to point B (not a hand wave or a lean)."""
         cfg = self.config
         cls = (mv.class_name or "").strip().lower()
         if mv.danger or cls in cfg.keep_always_classes:
             return True
-        if cls in PERSON_CLASSES and mv.body_shift is not None:
-            # Pose available: judge by the body, not the box (hands / leaning do not count)
-            if cfg.keep_posture_change and mv.posture_from and mv.posture_to and mv.posture_from != mv.posture_to:
-                return True
-            return float(mv.body_shift) >= cfg.keep_body_shift
-        min_pct = cfg.keep_person_pct if cls in PERSON_CLASSES else cfg.keep_min_pct
+        if not self.is_clip_class(cls):
+            return False
+        person = cls in PERSON_CLASSES
+        if person and cfg.keep_posture_change and mv.posture_from and mv.posture_to and mv.posture_from != mv.posture_to:
+            return True
+        # Pose seen: the hips must have moved too (a box stretched by an arm, or a box
+        # jumping to a neighbour, moves the feet point without the body going anywhere)
+        if person and mv.body_shift is not None and float(mv.body_shift) < cfg.keep_body_shift:
+            return False
+        min_pct = cfg.keep_person_pct if person else cfg.keep_min_pct
         if min_pct <= 0:
             return True
-        pct = move_pct(mv.from_bbox, mv.to_bbox, width, height)
+        pct = move_pct(mv.from_bbox, mv.to_bbox, width, height, foot=True)
         if pct is None:
-            return True  # can't measure → keep rather than lose evidence
+            return True  # can't measure, keep rather than lose evidence
         if pct >= min_pct:
             return True
-        # Walked toward / away from the camera: little shift on screen, big size change
+        # Walked / drove toward or away from the camera: little shift on screen, big size
+        # change, and the feet / wheels still moved (standing up grows the box in place)
         grow = _box_size(mv.to_bbox) / _box_size(mv.from_bbox)
-        return grow >= cfg.keep_scale or grow <= 1.0 / cfg.keep_scale
+        return (grow >= cfg.keep_scale or grow <= 1.0 / cfg.keep_scale) and pct >= cfg.keep_scale_min_pct
 
     def real_movements(self, rec: _Recording) -> list[_Movement]:
         """Movements in a finished recording that pass the real-movement filter."""
@@ -657,7 +820,7 @@ class MotionClipRecorder:
         Paths grow with time: A at the start, arrow at the current position.
         """
         moves = [mv for mv in rec.movements.values() if not mv.danger]
-        if not moves or not rec.source_size[0] or not rec.clip_size[0]:
+        if (not moves and not rec.confirm) or not rec.source_size[0] or not rec.clip_size[0]:
             return frames
         scale = rec.clip_size[0] / float(rec.source_size[0])
         thickness = max(2, int(round(rec.clip_size[1] / 240)))
@@ -689,7 +852,7 @@ class MotionClipRecorder:
         )
         for kind, classes, batch_fn in groups:
             group = [mv for mv in moves if (mv.class_name or "").lower() in classes and len(mv.from_bbox) >= 4]
-            if not group or batch_fn is None:
+            if (not group and not rec.confirm) or batch_fn is None:
                 continue
             try:
                 found = self._detect_sampled(frames, sample_idx, batch_fn)
@@ -707,6 +870,17 @@ class MotionClipRecorder:
                         tracked_any = True
                         mv.pose_frames = sum(1 for fi in range(n) if track[sample_of[fi]] is not None)
                         # Dense path in source pixels replaces the sparse live one
+                        mv.path = [[round(x / scale, 1), round(y / scale, 1), t] for x, y, t in path]
+                if rec.confirm:
+                    for mv, track in self._discover(rec, kind, found, sample_times, scale, taken):
+                        self.stats["clips_discovered_movers"] += 1
+                        path = smooth_path(dense_path(track, mv.started_at))
+                        rec.movements[mv.key] = mv
+                        tracks.append((kind, track))
+                        drawn_paths.append((path, 1.0))
+                        handled.add(id(mv))
+                        tracked_any = True
+                        mv.pose_frames = sum(1 for fi in range(n) if track[sample_of[fi]] is not None)
                         mv.path = [[round(x / scale, 1), round(y / scale, 1), t] for x, y, t in path]
                 if tracked_any:
                     self.stats["clips_pose_tracked" if kind == "pose" else "clips_vehicle_tracked"] += 1
@@ -738,6 +912,50 @@ class MotionClipRecorder:
                     cv2.rectangle(img, (x1, y1), (x2, y2), VEHICLE_BOX_COLOR, max(1, thickness - 1), cv2.LINE_AA)
             ok, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self.config.jpeg_quality])
             out.append((ts, jpeg.tobytes() if ok else data))
+        return out
+
+    def _discover(self, rec: _Recording, kind: str, found: list, times: list[float], scale: float,
+                  taken: list[set[int]]) -> list[tuple[_Movement, list]]:
+        """Every person (pose) / vehicle (box) in the clip frames that went from A to B.
+
+        Objects already given to a live movement are in `taken` and are skipped. Each one is
+        followed frame by frame from its first sighting; a track seen in too few frames or
+        that did not really move is dropped (but stays taken, so it is not tried again).
+        """
+        from motion_state import torso_length
+
+        out: list[tuple[_Movement, list]] = []
+        w, h = rec.source_size
+        cls = "person" if kind == "pose" else "vehicle"
+        for f in range(len(found)):
+            for j in range(len(found[f])):
+                if j in taken[f]:
+                    continue
+                track = track_from_seed(found, times, f, j, taken=taken)
+                items = [it for it in track if it is not None]
+                if len(items) < self.config.discover_min_frames:
+                    continue
+                first, last = items[0], items[-1]
+                body_shift = None
+                if kind == "pose" and first["pose"].get("keypoints") and last["pose"].get("keypoints"):
+                    torso = torso_length(first["pose"]["keypoints"], first["pose"]["bbox"])
+                    if torso > 0:
+                        (ax, ay), (bx, by) = first["point"], last["point"]
+                        body_shift = round(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / torso, 2)
+                mv = _Movement(
+                    track_id=0,
+                    key=f"clip:{kind}:{f}:{j}",
+                    global_object_id="",
+                    class_name=cls,
+                    started_at=float(first["t"]),
+                    from_bbox=[v / scale for v in first["pose"]["bbox"][:4]],
+                    to_bbox=[v / scale for v in last["pose"]["bbox"][:4]],
+                    ended_at=float(last["t"]),
+                    still_moving=False,
+                    body_shift=body_shift,
+                )
+                if self.is_real_move(mv, w, h):
+                    out.append((mv, track))
         return out
 
     def _detect_sampled(
@@ -792,6 +1010,10 @@ class MotionClipRecorder:
         if len(frames) < 2:
             return
         frames = self._with_paths(rec, frames)
+        if not rec.movements:
+            # Pixel motion only (a hand, a screen, a shadow): no person / vehicle went A → B
+            self.stats["clips_skipped_small"] += 1
+            return
         ffmpeg = self._ffmpeg_path()
         if not ffmpeg:
             raise RuntimeError("ffmpeg not found")

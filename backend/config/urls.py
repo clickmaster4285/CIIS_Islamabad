@@ -7,6 +7,7 @@ The `urlpatterns` list routes URLs to views. For more information please see:
 from django.contrib import admin
 from django.urls import include, path, re_path
 
+from config.dashboard_views import DashboardGlanceAPIView
 from config.media_views import protected_media
 
 import os
@@ -19,6 +20,7 @@ _ADMIN_ENABLED = settings.DEBUG or os.getenv("DJANGO_ADMIN_ENABLED", "").strip()
 _ADMIN_PATH = (os.getenv("DJANGO_ADMIN_PATH", "admin").strip().strip("/") or "admin") + "/"
 
 urlpatterns = [
+    path("api/dashboard/glance/", DashboardGlanceAPIView.as_view(), name="dashboard-glance"),
     path("api/", include("users.urls")),
     path("api/", include("visitors.urls")),
     path("api/", include("logs.urls")),
