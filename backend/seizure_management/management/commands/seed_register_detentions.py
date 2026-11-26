@@ -372,6 +372,8 @@ class Command(BaseCommand):
         add_guard_argument(parser)
 
     def handle(self, *args, **options):
+        # Islamabad deployment: this is the Peshawar DA register, so the seed is disabled.
+        raise CommandError("Disabled: this is the Peshawar DA register; this server is the Islamabad deployment.")
         check_seed_allowed(options)
         path = Path(options["file"])
         if not path.is_file():

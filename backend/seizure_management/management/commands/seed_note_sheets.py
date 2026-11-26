@@ -20,14 +20,15 @@ SITE_PROFILES = {
         "collectorate": "MCC D.I Khan",
         "code": "DIK",
     },
-    "peshawar": {
-        "office": "Model Customs Collectorate, Peshawar",
-        "place": "Torkham / Customs House Examination Area, Peshawar",
-        "warehouse": "Bonded Godown A, Customs House Peshawar",
-        "gps": "34.0151, 71.5249",
-        "collectorate": "MCC Peshawar",
-        "code": "PSH",
-    },
+    # Islamabad deployment: Peshawar profile disabled.
+    # "peshawar": {
+    #     "office": "Model Customs Collectorate, Peshawar",
+    #     "place": "Torkham / Customs House Examination Area, Peshawar",
+    #     "warehouse": "Bonded Godown A, Customs House Peshawar",
+    #     "gps": "34.0151, 71.5249",
+    #     "collectorate": "MCC Peshawar",
+    #     "code": "PSH",
+    # },
     "thakot": {
         "office": "Model Customs Collectorate, Thakot",
         "place": "Thakot Border Crossing Examination Shed",
@@ -41,8 +42,8 @@ SITE_PROFILES = {
 
 def _default_site() -> str:
     text = str(Path(__file__).resolve()).lower()
-    if "peshawar" in text:
-        return "peshawar"
+    # if "peshawar" in text:  # Islamabad deployment
+    #     return "peshawar"
     if "thakot" in text:
         return "thakot"
     return "dikhan"

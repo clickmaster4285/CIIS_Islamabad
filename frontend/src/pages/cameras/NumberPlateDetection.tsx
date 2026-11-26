@@ -39,8 +39,9 @@ import {
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const
 const DEFAULT_PAGE_SIZE = 25
 
-/** Prefer Peshawar site when present; otherwise use first configured site. */
-const SITE_CODE = "PESHAWAR"
+/** Prefer the Islamabad site when present; otherwise use first configured site. (Was Peshawar.) */
+const SITE_CODE = "ISLAMABAD"
+// const SITE_CODE = "PESHAWAR"
 
 /** Allowed vehicle classes for this panel (must match backend vehicle_only). */
 const VEHICLE_CLASSES = new Set([
@@ -82,8 +83,8 @@ function resolveSiteCode(sites: SiteRecord[]): string {
   const match = sites.find(
     (s) =>
       s.code?.toUpperCase() === SITE_CODE ||
-      s.name?.toLowerCase().includes("peshawar") ||
-      s.code?.toLowerCase().includes("peshawar")
+      s.name?.toLowerCase().includes("islamabad") ||
+      s.code?.toLowerCase().includes("islamabad")
   )
   return match?.code || sites[0]?.code || SITE_CODE
 }
@@ -181,8 +182,8 @@ export default function NumberPlateDetectionPage() {
       (c) =>
         c.site_code?.toLowerCase() === code ||
         c.location?.toLowerCase() === code ||
-        c.site_code?.toLowerCase().includes("peshawar") ||
-        c.location?.toLowerCase().includes("peshawar")
+        c.site_code?.toLowerCase().includes("islamabad") ||
+        c.location?.toLowerCase().includes("islamabad")
     )
     return filtered.length > 0 ? filtered : cameras
   }, [cameras, siteCode])

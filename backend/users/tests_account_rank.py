@@ -16,7 +16,7 @@ User = get_user_model()
 PASSWORD = "S3cure-pass-123"
 
 
-def _user(username, role, location="PESHAWAR", **extra):
+def _user(username, role, location="ISLAMABAD", **extra):
     user = User(username=username, role=role, location=location, is_active=True, phone="0300", **extra)
     user.set_password(PASSWORD)
     user.save()
@@ -35,7 +35,7 @@ class RoleAllowListTests(TestCase):
         return self.client.post(
             "/api/users/",
             {"username": f"new_{role.lower()}_{actor.username}", "password": PASSWORD, "full_name": "New Person",
-             "role": role, "phone": "0300", "location": "PESHAWAR"},
+             "role": role, "phone": "0300", "location": "ISLAMABAD"},
             format="json",
         )
 

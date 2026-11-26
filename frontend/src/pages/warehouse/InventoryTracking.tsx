@@ -41,11 +41,11 @@ type InventoryRow = {
 }
 
 const defaultRows: InventoryRow[] = [
-  { id: "1", QR_Code: "QR_Code-7821", product: "Electronics - Category A", wh: "Peshawar", loc: "Z-C03-A-12-04", qty: 450, status: "In Stock" },
-  { id: "2", QR_Code: "QR_Code-9103", product: "Textiles - Bulk", wh: "Peshawar", loc: "Z-B02-B-08-01", qty: 1200, status: "In Stock" },
+  { id: "1", QR_Code: "QR_Code-7821", product: "Electronics - Category A", wh: "Islamabad", loc: "Z-C03-A-12-04", qty: 450, status: "In Stock" },
+  { id: "2", QR_Code: "QR_Code-9103", product: "Textiles - Bulk", wh: "Islamabad", loc: "Z-B02-B-08-01", qty: 1200, status: "In Stock" },
   { id: "3", QR_Code: "QR_Code-4452", product: "Pharma - Temp Control", wh: "DI Khan", loc: "Z-CLD-01-02", qty: 85, status: "Low Stock" },
   { id: "4", QR_Code: "QR_Code-2298", product: "General Merchandise", wh: "Yarik", loc: "Z-A01-N-05-03", qty: 320, status: "In Stock" },
-  { id: "5", QR_Code: "QR_Code-6671", product: "Automotive Parts", wh: "Peshawar", loc: "Z-B02-C-15-02", qty: 12, status: "Reorder" },
+  { id: "5", QR_Code: "QR_Code-6671", product: "Automotive Parts", wh: "Islamabad", loc: "Z-B02-C-15-02", qty: 12, status: "Reorder" },
 ]
 
 function loadRows(): InventoryRow[] {
@@ -68,14 +68,14 @@ const STATUSES = ["In Stock", "Low Stock", "Reorder"]
 export default function InventoryTrackingPage() {
   const [rows, setRows] = useState<InventoryRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ QR_Code: "", product: "", wh: "Peshawar", loc: "", qty: 0, status: "In Stock" })
+  const [form, setForm] = useState({ QR_Code: "", product: "", wh: "Islamabad", loc: "", qty: 0, status: "In Stock" })
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)
   }, [rows])
 
   const openAdd = () => {
-    setForm({ QR_Code: "", product: "", wh: "Peshawar", loc: "", qty: 0, status: "In Stock" })
+    setForm({ QR_Code: "", product: "", wh: "Islamabad", loc: "", qty: 0, status: "In Stock" })
     setOpen(true)
   }
 
@@ -222,7 +222,7 @@ export default function InventoryTrackingPage() {
             </div>
             <div className="grid gap-2">
               <Label>Warehouse</Label>
-              <Input value={form.wh} onChange={(e) => setForm((f) => ({ ...f, wh: e.target.value }))} placeholder="Peshawar" />
+              <Input value={form.wh} onChange={(e) => setForm((f) => ({ ...f, wh: e.target.value }))} placeholder="Islamabad" />
             </div>
             <div className="grid gap-2">
               <Label>Location</Label>

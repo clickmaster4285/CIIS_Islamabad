@@ -348,8 +348,8 @@ const DEFAULT_STAFF: StaffRecord[] = [
     emergency_contact_name: "Salma Khan",
     emergency_contact_relationship: "Wife",
     emergency_contact_phone: "0300-1112233",
-    emergency_contact_address: "House #45, Peshawar",
-    transferred_from: "HQ (Peshawar)",
+    emergency_contact_address: "House #45, Islamabad",
+    transferred_from: "HQ (Islamabad)",
     transferred_to: "AC ASD, Nowshera",
     created_at: new Date().toISOString()
   },
@@ -403,7 +403,7 @@ const DEFAULT_STAFF: StaffRecord[] = [
     emergency_contact_relationship: "Sister",
     emergency_contact_phone: "0302-5566778",
     emergency_contact_address: "Block B, Karachi",
-    transferred_from: "SWH, Peshawar (HQ)",
+    transferred_from: "SWH, Islamabad (HQ)",
     transferred_to: "AC ASD, D.I. Khan-I",
     created_at: new Date().toISOString()
   },
@@ -430,7 +430,7 @@ const DEFAULT_STAFF: StaffRecord[] = [
     emergency_contact_relationship: "Mother",
     emergency_contact_phone: "0303-6677889",
     emergency_contact_address: "Street 5, Islamabad",
-    transferred_from: "DC ASD, Peshawar/Kohat & Bannu",
+    transferred_from: "DC ASD, Islamabad/Kohat & Bannu",
     transferred_to: "AC ASD, Hazara",
     created_at: new Date().toISOString()
   },

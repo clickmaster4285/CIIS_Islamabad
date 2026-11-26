@@ -170,7 +170,8 @@ export const ROLE_OPTIONS = [
 ] as const;
 
 export const COLLECTORATE_OPTIONS = [
-  { value: "Peshawar", label: "Peshawar" },
+  { value: "Islamabad", label: "Islamabad" },
+  // { value: "Peshawar", label: "Peshawar" },  // Islamabad deployment
   { value: "Kohat", label: "Kohat" },
   { value: "Nowshera", label: "Nowshera" },
   { value: "Mardan", label: "Mardan" },

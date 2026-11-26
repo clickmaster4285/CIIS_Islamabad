@@ -211,20 +211,29 @@ const designationOptions = [
 // Collectorate options (single select)
 const collectorateOptions = [
   {
-    value: "Collectorate of Customs (Enforcement), Peshawar",
-    label: "Collectorate of Customs (Enforcement), Peshawar",
+    value: "Collectorate of Customs (Enforcement), Islamabad",
+    label: "Collectorate of Customs (Enforcement), Islamabad",
   },
   {
-    value: "Collectorate of Customs (Appraisement), Peshawar",
-    label: "Collectorate of Customs (Appraisement), Peshawar",
+    value: "Collectorate of Customs (Appraisement), Islamabad",
+    label: "Collectorate of Customs (Appraisement), Islamabad",
   },
+  // Islamabad deployment: Peshawar collectorates disabled.
+  // {
+  //   value: "Collectorate of Customs (Enforcement), Peshawar",
+  //   label: "Collectorate of Customs (Enforcement), Peshawar",
+  // },
+  // {
+  //   value: "Collectorate of Customs (Appraisement), Peshawar",
+  //   label: "Collectorate of Customs (Appraisement), Peshawar",
+  // },
 ]
 
 // Current Place of Posting options from the provided data
 const currentPostingOptions = [
   { value: "Collector", label: "Collector" },
   { value: "Addiitional Collector (HQ)", label: "Addiitional Collector (HQ)" },
-  { value: "DC ASD, Peshawar/Kohat & Bannu", label: "DC ASD, Peshawar/Kohat & Bannu" },
+  // { value: "DC ASD, Peshawar/Kohat & Bannu", label: "DC ASD, Peshawar/Kohat & Bannu" },  // Islamabad deployment
   { value: "AC ASD, Hazara", label: "AC ASD, Hazara" },
   { value: "AC (HQ-I)", label: "AC (HQ-I)" },
   { value: "AC ASD, Nowshera & Mardan", label: "AC ASD, Nowshera & Mardan" },
@@ -236,8 +245,8 @@ const currentPostingOptions = [
   { value: "ASD, Hazara", label: "ASD, Hazara" },
   { value: "ASD, D.I. Khan", label: "ASD, D.I. Khan" },
   { value: "ASD, D.I. Khan-I/II", label: "ASD, D.I. Khan-I/II" },
-  { value: "SWH, Peshawar (HQ)", label: "SWH, Peshawar (HQ)" },
-  { value: "Central Enforcement Cell/ASD, Peshawar & HQ: Auction Cell, Refund (w.e. from 06.11.2025)", label: "Central Enforcement Cell/ASD, Peshawar & HQ: Auction Cell, Refund (w.e. from 06.11.2025)" },
+  // { value: "SWH, Peshawar (HQ)", label: "SWH, Peshawar (HQ)" },  // Islamabad deployment
+  // { value: "Central Enforcement Cell/ASD, Peshawar & HQ: Auction Cell, Refund (w.e. from 06.11.2025)", label: "Central Enforcement Cell/ASD, Peshawar & HQ: Auction Cell, Refund (w.e. from 06.11.2025)" },  // Islamabad deployment
   { value: "HQ: Refund/Recovery/BG Cell, Project and Reward Cell", label: "HQ: Refund/Recovery/BG Cell, Project and Reward Cell" },
   { value: "ASD, Kohat", label: "ASD, Kohat" },
   { value: "ASD, Mardan & HQ: I&P", label: "ASD, Mardan & HQ: I&P" },
@@ -247,13 +256,13 @@ const currentPostingOptions = [
   { value: "DES, Swabi (on attachment)", label: "DES, Swabi (on attachment)" },
   { value: "I&SCS & DR CAT Double Bench", label: "I&SCS & DR CAT Double Bench" },
   { value: "ASD, Mardan", label: "ASD, Mardan" },
-  { value: "ASD, Peshawar", label: "ASD, Peshawar" },
-  { value: "JCP M1 Peshawar", label: "JCP M1 Peshawar" },
+  // { value: "ASD, Peshawar", label: "ASD, Peshawar" },  // Islamabad deployment
+  // { value: "JCP M1 Peshawar", label: "JCP M1 Peshawar" },  // Islamabad deployment
   { value: "Anti-Smuggling Division, Hazara", label: "Anti-Smuggling Division, Hazara" },
   { value: "ASD, D.I. Khan-I (CCP Chashma)", label: "ASD, D.I. Khan-I (CCP Chashma)" },
-  { value: "ASD, Peshawar (Auction Cell in addition) w.e. from 04.02.2026", label: "ASD, Peshawar (Auction Cell in addition) w.e. from 04.02.2026" },
+  // { value: "ASD, Peshawar (Auction Cell in addition) w.e. from 04.02.2026", label: "ASD, Peshawar (Auction Cell in addition) w.e. from 04.02.2026" },  // Islamabad deployment
   { value: "ASD, D.I. Khan-II", label: "ASD, D.I. Khan-II" },
-  { value: "ASD, Peshawar ( in adttion HQ: Law/Legal Branch and Central Armory)", label: "ASD, Peshawar ( in adttion HQ: Law/Legal Branch and Central Armory)" },
+  // { value: "ASD, Peshawar ( in adttion HQ: Law/Legal Branch and Central Armory)", label: "ASD, Peshawar ( in adttion HQ: Law/Legal Branch and Central Armory)" },  // Islamabad deployment
   { value: "HQ: Audit (Internal/External) FTO Cell and HQ: CPF", label: "HQ: Audit (Internal/External) FTO Cell and HQ: CPF" },
   { value: "HQ: I&P/Refund/Project/Monitoring of Clearance of DP w.e. from 06.05.2025,", label: "HQ: I&P/Refund/Project/Monitoring of Clearance of DP w.e. from 06.05.2025," },
   { value: "HQ: Pension Cell/Refund", label: "HQ: Pension Cell/Refund" },
@@ -263,9 +272,9 @@ const currentPostingOptions = [
   { value: "HQ: General Branch & QRF in additional to her own duties w.e. from 04/09/2025", label: "HQ: General Branch & QRF in additional to her own duties w.e. from 04/09/2025" },
   { value: "I&SCS & DR CAT Single Bench", label: "I&SCS & DR CAT Single Bench" },
   { value: "HQ: Assessment Cell", label: "HQ: Assessment Cell" },
-  { value: "Anti-Smuggling Division, Peshawar /I&I SWH, Peshawar (Vehicle) w.e. from 04/09/2025", label: "Anti-Smuggling Division, Peshawar /I&I SWH, Peshawar (Vehicle) w.e. from 04/09/2025" },
-  { value: "ASD, Peshawar and DR at PHC", label: "ASD, Peshawar and DR at PHC" },
-  { value: "DR Coordinator at Customs Appellate Tribunal, Peshawar", label: "DR Coordinator at Customs Appellate Tribunal, Peshawar" },
+  // { value: "Anti-Smuggling Division, Peshawar /I&I SWH, Peshawar (Vehicle) w.e. from 04/09/2025", label: "Anti-Smuggling Division, Peshawar /I&I SWH, Peshawar (Vehicle) w.e. from 04/09/2025" },  // Islamabad deployment
+  // { value: "ASD, Peshawar and DR at PHC", label: "ASD, Peshawar and DR at PHC" },  // Islamabad deployment
+  // { value: "DR Coordinator at Customs Appellate Tribunal, Peshawar", label: "DR Coordinator at Customs Appellate Tribunal, Peshawar" },  // Islamabad deployment
   { value: "Anti-Smuggling Division Office, Kohat", label: "Anti-Smuggling Division Office, Kohat" },
   { value: "ASD, Nowshera (JCP Kund) (FATA/PATA Escorting) in addition w.e. from 04/02/2026)", label: "ASD, Nowshera (JCP Kund) (FATA/PATA Escorting) in addition w.e. from 04/02/2026)" },
   { value: "HQ: State Warehouse E (Vehicles)", label: "HQ: State Warehouse E (Vehicles)" },
@@ -274,14 +283,14 @@ const currentPostingOptions = [
   { value: "HQ R&S", label: "HQ R&S" },
   { value: "ASD, Nowshera (JCP Kund)", label: "ASD, Nowshera (JCP Kund)" },
   { value: "HQ: Project Branch", label: "HQ: Project Branch" },
-  { value: "ASD, Peshawar (Phase-3 Chowk and University Road upto Karkhano)", label: "ASD, Peshawar (Phase-3 Chowk and University Road upto Karkhano)" },
-  { value: "ASD, Peshawar (AS Operations on GT Road, Peshawar upto Nowshera)", label: "ASD, Peshawar (AS Operations on GT Road, Peshawar upto Nowshera)" },
+  // { value: "ASD, Peshawar (Phase-3 Chowk and University Road upto Karkhano)", label: "ASD, Peshawar (Phase-3 Chowk and University Road upto Karkhano)" },  // Islamabad deployment
+  // { value: "ASD, Peshawar (AS Operations on GT Road, Peshawar upto Nowshera)", label: "ASD, Peshawar (AS Operations on GT Road, Peshawar upto Nowshera)" },  // Islamabad deployment
   { value: "SWH-I&I Building/Admn Branch", label: "SWH-I&I Building/Admn Branch" },
   { value: "HQ: BG & Recovery Cell", label: "HQ: BG & Recovery Cell" },
   { value: "ASD, Nowshera", label: "ASD, Nowshera" },
   { value: "HQ: Collector Office", label: "HQ: Collector Office" },
   { value: "HQ: CHO & Caretaker Mess", label: "HQ: CHO & Caretaker Mess" },
-  { value: "HQ: Law/legal Branch/FTO/ASD, Peshawar in addition w.e. from 07/08/2025", label: "HQ: Law/legal Branch/FTO/ASD, Peshawar in addition w.e. from 07/08/2025" },
+  // { value: "HQ: Law/legal Branch/FTO/ASD, Peshawar in addition w.e. from 07/08/2025", label: "HQ: Law/legal Branch/FTO/ASD, Peshawar in addition w.e. from 07/08/2025" },  // Islamabad deployment
   { value: "PA to ADC HQ", label: "PA to ADC HQ" },
   { value: "on attchment with Adjudication/Appeals Office", label: "on attchment with Adjudication/Appeals Office" },
   { value: "HQ: General Branch", label: "HQ: General Branch" },
@@ -302,26 +311,26 @@ const currentPostingOptions = [
   { value: "HQ: Internal/External Audit", label: "HQ: Internal/External Audit" },
   { value: "HQ: Office (Admn Pool)", label: "HQ: Office (Admn Pool)" },
   { value: "HQ: Pay Branch (South Division)", label: "HQ: Pay Branch (South Division)" },
-  { value: "Anti-Smuggling Division, Peshawar", label: "Anti-Smuggling Division, Peshawar" },
+  // { value: "Anti-Smuggling Division, Peshawar", label: "Anti-Smuggling Division, Peshawar" },  // Islamabad deployment
   { value: "HQ: Statistics Branch also attached with Collector Appeal vide order dated 14.10.2024", label: "HQ: Statistics Branch also attached with Collector Appeal vide order dated 14.10.2024" },
   { value: "HQ: I&P Branch", label: "HQ: I&P Branch" },
   { value: "HQ: BG Cel", label: "HQ: BG Cel" },
   { value: "HQ: Law/Legal and DR Branch", label: "HQ: Law/Legal and DR Branch" },
   { value: "HQ: Technical Branch", label: "HQ: Technical Branch" },
-  { value: "HQ: Accounts Branch/Control Room I&SCS in addition w.e. from 28/04/2025 and ASD, Peshawar in addition w.e. from 18.09.2025", label: "HQ: Accounts Branch/Control Room I&SCS in addition w.e. from 28/04/2025 and ASD, Peshawar in addition w.e. from 18.09.2025" },
+  // { value: "HQ: Accounts Branch/Control Room I&SCS in addition w.e. from 28/04/2025 and ASD, Peshawar in addition w.e. from 18.09.2025", label: "HQ: Accounts Branch/Control Room I&SCS in addition w.e. from 28/04/2025 and ASD, Peshawar in addition w.e. from 18.09.2025" },  // Islamabad deployment
   { value: "On attachment with Dte: of DNFBPs", label: "On attachment with Dte: of DNFBPs" },
   { value: "ASD, Bannu", label: "ASD, Bannu" },
   { value: "ASD, D.I. Khan-I in addition to his own duties (HQ:)", label: "ASD, D.I. Khan-I in addition to his own duties (HQ:)" },
   { value: "ASD, D.I. Khan-II in addition to his own duties (HQ:)", label: "ASD, D.I. Khan-II in addition to his own duties (HQ:)" },
   { value: "ASD, Mardan (Court Duty)", label: "ASD, Mardan (Court Duty)" },
-  { value: "ASD, Peshawar in addition (HQ:)", label: "ASD, Peshawar in addition (HQ:)" },
+  // { value: "ASD, Peshawar in addition (HQ:)", label: "ASD, Peshawar in addition (HQ:)" },  // Islamabad deployment
   { value: "Attachement with I&I for a period of three months", label: "Attachement with I&I for a period of three months" },
   { value: "Attachment with I&I for a period of three months", label: "Attachment with I&I for a period of three months" },
   { value: "Collector Office", label: "Collector Office" },
-  { value: "DC (HQ) Office/ASD, Peshawar in addition", label: "DC (HQ) Office/ASD, Peshawar in addition" },
+  // { value: "DC (HQ) Office/ASD, Peshawar in addition", label: "DC (HQ) Office/ASD, Peshawar in addition" },  // Islamabad deployment
   { value: "DC ASD, Pehsawar, Office (HQ)", label: "DC ASD, Pehsawar, Office (HQ)" },
-  { value: "DC ASD, Peshawar Office (HQ)", label: "DC ASD, Peshawar Office (HQ)" },
-  { value: "DC ASD, Peshawar Office", label: "DC ASD, Peshawar Office" },
+  // { value: "DC ASD, Peshawar Office (HQ)", label: "DC ASD, Peshawar Office (HQ)" },  // Islamabad deployment
+  // { value: "DC ASD, Peshawar Office", label: "DC ASD, Peshawar Office" },  // Islamabad deployment
   { value: "DC D.I. Khan Divisional Office", label: "DC D.I. Khan Divisional Office" },
   { value: "DES Swabi", label: "DES Swabi" },
   { value: "DNFBPs On attachment", label: "DNFBPs On attachment" },
@@ -341,18 +350,18 @@ const currentPostingOptions = [
   { value: "HQ: office", label: "HQ: office" },
   { value: "HQ: Receipt & Dispatch Section", label: "HQ: Receipt & Dispatch Section" },
   { value: "I&SCS", label: "I&SCS" },
-  { value: "JCP M1, Peshawar", label: "JCP M1, Peshawar" },
-  { value: "JCP M1, Peshawar in addition to his own duties (HQ:)", label: "JCP M1, Peshawar in addition to his own duties (HQ:)" },
+  // { value: "JCP M1, Peshawar", label: "JCP M1, Peshawar" },  // Islamabad deployment
+  // { value: "JCP M1, Peshawar in addition to his own duties (HQ:)", label: "JCP M1, Peshawar in addition to his own duties (HQ:)" },  // Islamabad deployment
   { value: "JCP Michini", label: "JCP Michini" },
   { value: "JCP Michini in addition (HQ:)", label: "JCP Michini in addition (HQ:)" },
   { value: "Naib Court at Jamrud Court", label: "Naib Court at Jamrud Court" },
-  { value: "QRF, Peshawar", label: "QRF, Peshawar" },
-  { value: "QRF, Peshawar in addition to his own duties", label: "QRF, Peshawar in addition to his own duties" },
+  // { value: "QRF, Peshawar", label: "QRF, Peshawar" },  // Islamabad deployment
+  // { value: "QRF, Peshawar in addition to his own duties", label: "QRF, Peshawar in addition to his own duties" },  // Islamabad deployment
   { value: "QRF, Peshazwar", label: "QRF, Peshazwar" },
   { value: "QRF, Peshhawar", label: "QRF, Peshhawar" },
-  { value: "SWHs, Peshawar", label: "SWHs, Peshawar" },
+  // { value: "SWHs, Peshawar", label: "SWHs, Peshawar" },  // Islamabad deployment
   { value: "Special Judge Customs", label: "Special Judge Customs" },
-  { value: "ASD, Peshawar (STF)", label: "ASD, Peshawar (STF)" },
+  // { value: "ASD, Peshawar (STF)", label: "ASD, Peshawar (STF)" },  // Islamabad deployment
   { value: "Collector's Office", label: "Collector's Office" },
   { value: "Anti-Smuggling Division, Nowshera", label: "Anti-Smuggling Division, Nowshera" },
   { value: "Attached with Member Customs", label: "Attached with Member Customs" },
@@ -360,7 +369,7 @@ const currentPostingOptions = [
   { value: "HQ: Incharge Malis", label: "HQ: Incharge Malis" },
   { value: "ASU Central", label: "ASU Central" },
   { value: "AC-I HQ: Office", label: "AC-I HQ: Office" },
-  { value: "Custom House, Peshawar", label: "Custom House, Peshawar" },
+  // { value: "Custom House, Peshawar", label: "Custom House, Peshawar" },  // Islamabad deployment
 ]
 
 // Flatten options for React Select while preserving group structure

@@ -30,7 +30,7 @@ COORD_DECIMALS = 4
 CACHE_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 days
 CACHE_PREFIX = "gps:revgeo:v2:"
 MAX_POINTS_PER_REQUEST = 80
-USER_AGENT = "CIIS-Peshawar-GPS/1.0 (customs enforcement; contact=ops)"
+USER_AGENT = "CIIS-Islamabad-GPS/1.0 (customs enforcement; contact=ops)"  # was CIIS-Peshawar-GPS
 # Lookups that found nothing (or failed) are remembered this long before trying again.
 NEGATIVE_CACHE_TTL_SECONDS = 60 * 60
 _NEGATIVE = "\x00none"

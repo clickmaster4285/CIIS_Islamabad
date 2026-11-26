@@ -104,9 +104,9 @@ export const CITY_CONTROL_KPIS: CityControlKpi[] = [
 
 export const CITY_CONTROL_ROWS: CityControlRow[] = [
   {
-    id: "peshawar",
+    id: "islamabad",  // Islamabad deployment (was peshawar)
     rank: 1,
-    city: "Peshawar",
+    city: "Islamabad",
     isHq: true,
     status: "Online",
     camerasOnline: 75,
@@ -216,11 +216,12 @@ export const CITY_CONTROL_ALERTS: CityControlAlert[] = [
   { id: "a2", time: "15:47", city: "Abbottabad", title: "Camera offline", severity: "Critical" },
   { id: "a3", time: "15:22", city: "Swat", title: "Low connectivity", severity: "Medium" },
   { id: "a4", time: "14:56", city: "Mardan", title: "Seizure recorded", severity: "Info" },
-  { id: "a5", time: "13:18", city: "Peshawar", title: "New license plate detected", severity: "Info" },
+  { id: "a5", time: "13:18", city: "Islamabad", title: "New license plate detected", severity: "Info" },
 ]
 
 export const CITY_MAP_MARKERS: { id: string; city: string; status: CityStatus; x: number; y: number }[] = [
-  { id: "peshawar", city: "Peshawar", status: "Online", x: 38, y: 58 },
+  { id: "islamabad", city: "Islamabad", status: "Online", x: 62, y: 62 },
+  // { id: "peshawar", city: "Peshawar", status: "Online", x: 38, y: 58 },
   { id: "mardan", city: "Mardan", status: "Online", x: 48, y: 42 },
   { id: "kohat", city: "Kohat", status: "Online", x: 42, y: 72 },
   { id: "di-khan", city: "DI Khan", status: "Online", x: 52, y: 88 },

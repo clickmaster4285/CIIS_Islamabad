@@ -467,7 +467,7 @@ export function CameraManagementContent({
                     <Input
                       value={siteForm.code}
                       onChange={(e) => setSiteForm((p) => ({ ...p, code: e.target.value.toUpperCase() }))}
-                      placeholder="PESHAWAR"
+                      placeholder="ISLAMABAD"
                       required
                       disabled={Boolean(editingSiteId)}
                     />
@@ -477,7 +477,7 @@ export function CameraManagementContent({
                     <Input
                       value={siteForm.name}
                       onChange={(e) => setSiteForm((p) => ({ ...p, name: e.target.value }))}
-                      placeholder="Peshawar Head Office"
+                      placeholder="Islamabad Head Office"
                       required
                     />
                   </div>

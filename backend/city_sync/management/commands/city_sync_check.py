@@ -20,7 +20,7 @@ from city_sync.identity import allowed_location_codes, is_city, location_code, s
 
 
 class Command(BaseCommand):
-    help = "Check that this city server is ready to sync with Peshawar HQ (changes nothing)."
+    help = "Check that this city server is ready to sync with Islamabad HQ (changes nothing)."
 
     def handle(self, *args, **options):
         self.failed = 0
@@ -56,7 +56,7 @@ class Command(BaseCommand):
         elif self.warned:
             self.stdout.write(self.style.WARNING(f"READY with {self.warned} warning(s)."))
         else:
-            self.stdout.write(self.style.SUCCESS("READY: this city can sync with Peshawar."))
+            self.stdout.write(self.style.SUCCESS("READY: this city can sync with Islamabad."))
 
     # -- checks -----------------------------------------------------------
 
@@ -68,18 +68,18 @@ class Command(BaseCommand):
         self.ok("SYSTEM_ROLE=city")
         loc = location_code()
         if not loc:
-            self.fail("LOCATION_CODE is empty", "copy the .env lines from Peshawar's Locations & Sync page")
+            self.fail("LOCATION_CODE is empty", "copy the .env lines from Islamabad's Locations & Sync page")
             return False
         if loc not in allowed_location_codes():
             self.fail(f"LOCATION_CODE={loc} is not in ALLOWED_LOCATION_CODES", "check the spelling, e.g. ABBOTTABAD")
             return False
         self.ok(f"LOCATION_CODE={loc}")
         if not getattr(settings, "NODE_ID", ""):
-            self.fail("NODE_ID is empty", "copy the .env lines from Peshawar's Locations & Sync page")
+            self.fail("NODE_ID is empty", "copy the .env lines from Islamabad's Locations & Sync page")
             return False
         self.ok(f"NODE_ID={settings.NODE_ID}")
         if not getattr(settings, "HQ_SYNC_URL", ""):
-            self.fail("HQ_SYNC_URL is empty", "copy the .env lines from Peshawar's Locations & Sync page")
+            self.fail("HQ_SYNC_URL is empty", "copy the .env lines from Islamabad's Locations & Sync page")
             return False
         self.ok(f"HQ_SYNC_URL={settings.HQ_SYNC_URL}")
         from city_sync.worker import _load_api_key
@@ -90,7 +90,7 @@ class Command(BaseCommand):
             self.fail(str(exc))
             return False
         if not has_key:
-            self.fail("SYNC_API_KEY is empty", "on Peshawar's Locations & Sync page use 'New key' and copy it here")
+            self.fail("SYNC_API_KEY is empty", "on Islamabad's Locations & Sync page use 'New key' and copy it here")
             return False
         self.ok("SYNC_API_KEY is set")
         return True
@@ -114,10 +114,10 @@ class Command(BaseCommand):
             default_storage.delete(saved)
             self.ok(f"media folder is writable ({settings.MEDIA_ROOT})")
         except Exception as exc:  # noqa: BLE001
-            self.fail(f"cannot write to the media folder: {exc}", "photos from Peshawar are saved here")
+            self.fail(f"cannot write to the media folder: {exc}", "photos from Islamabad are saved here")
 
     def _check_hq(self) -> bool:
-        self.stdout.write("\nPeshawar HQ")
+        self.stdout.write("\nIslamabad HQ")
         url = f"{settings.HQ_SYNC_URL}/identity/"
         try:
             resp = requests.get(url, timeout=10)
@@ -135,7 +135,7 @@ class Command(BaseCommand):
         if ident.get("system_role") != "hq":
             self.fail(
                 f"that server is '{ident.get('system_role')}' ({ident.get('location_code')}), not the head office",
-                "point HQ_SYNC_URL at Peshawar",
+                "point HQ_SYNC_URL at Islamabad",
             )
             return False
         self.ok(f"reached HQ {ident.get('location_code')} ({ident.get('node_id', '')})")
@@ -148,9 +148,9 @@ class Command(BaseCommand):
                 drift = None
             limit = max(float(getattr(settings, "SYNC_MAX_CLOCK_DRIFT_SECONDS", 5)), 60)
             if drift is not None and drift > limit:
-                self.warn(f"this clock is {int(drift)}s off from Peshawar", "fix the server time (attendance times depend on it)")
+                self.warn(f"this clock is {int(drift)}s off from Islamabad", "fix the server time (attendance times depend on it)")
             elif drift is not None:
-                self.ok(f"clock matches Peshawar ({int(drift)}s difference)")
+                self.ok(f"clock matches Islamabad ({int(drift)}s difference)")
         return True
 
     def _check_key(self) -> None:
@@ -175,17 +175,17 @@ class Command(BaseCommand):
             except ValueError:
                 pass
             self.fail(
-                f"Peshawar rejected the key ({detail or resp.status_code})",
+                f"Islamabad rejected the key ({detail or resp.status_code})",
                 f"add {location_code()} on Locations & Sync (or 'New key') and copy the .env lines again",
             )
             return
         if not resp.ok:
-            self.fail(f"Peshawar answered HTTP {resp.status_code} to the key check", "update Peshawar to the same code version")
+            self.fail(f"Islamabad answered HTTP {resp.status_code} to the key check", "update Islamabad to the same code version")
             return
         waiting = (resp.json() or {}).get("count", 0)
-        self.ok("Peshawar accepts this server's key")
+        self.ok("Islamabad accepts this server's key")
         if waiting:
-            self.warn(f"{waiting} change(s) from Peshawar not applied here yet", "start run_sync_heartbeat; they apply on the next heartbeat")
+            self.warn(f"{waiting} change(s) from Islamabad not applied here yet", "start run_sync_heartbeat; they apply on the next heartbeat")
 
     def _check_workers(self) -> None:
         from city_sync.models import CityControlState, SyncOutbox
@@ -195,13 +195,13 @@ class Command(BaseCommand):
         last = state.last_hq_contact_at
         interval = float(getattr(settings, "SYNC_HEARTBEAT_INTERVAL", 30))
         if last is None:
-            self.warn("no heartbeat has reached Peshawar yet", "start: python manage.py run_sync_heartbeat")
+            self.warn("no heartbeat has reached Islamabad yet", "start: python manage.py run_sync_heartbeat")
         elif timezone.now() - last > timedelta(seconds=max(interval * 4, 120)):
             self.warn(f"last heartbeat {timezone.localtime(last):%Y-%m-%d %H:%M}", "is run_sync_heartbeat running?")
         else:
             self.ok(f"heartbeat running (last {timezone.localtime(last):%H:%M:%S})")
         if state.is_paused:
-            self.warn("Peshawar has paused this location", "resume it on the Locations & Sync page")
+            self.warn("Islamabad has paused this location", "resume it on the Locations & Sync page")
 
         loc = location_code()
         rows = SyncOutbox.objects.filter(location_code=loc)
@@ -215,4 +215,4 @@ class Command(BaseCommand):
         else:
             self.ok("records are not piling up")
         if dead:
-            self.warn(f"{dead} record(s) failed for good", "see the Sync Monitor; Peshawar shows the reason")
+            self.warn(f"{dead} record(s) failed for good", "see the Sync Monitor; Islamabad shows the reason")

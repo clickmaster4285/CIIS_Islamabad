@@ -133,7 +133,7 @@ class LogoutCancelsTokenTests(TestCase):
         self.assertEqual(self.client.get("/api/detention-memos/list/").status_code, 401)
 
 
-def _user_with_role(username, role, location="PESHAWAR"):
+def _user_with_role(username, role, location="ISLAMABAD"):
     user = User(username=username, role=role, location=location, is_active=True, phone="0300")
     user.set_password("S3cure-pass-123")
     user.save()
@@ -153,7 +153,7 @@ class RoleEscalationTests(TestCase):
         return self.client.post(
             "/api/users/",
             {"username": f"new_{role.lower()}", "password": "S3cure-pass-123",
-             "full_name": "New Person", "role": role, "phone": "0300", "location": "PESHAWAR"},
+             "full_name": "New Person", "role": role, "phone": "0300", "location": "ISLAMABAD"},
             format="json",
         )
 
@@ -182,7 +182,7 @@ class NvrPasswordNotLeakedTests(TestCase):
     def setUp(self):
         from cameras.models import Camera, Nvr, Site
 
-        site = Site.objects.create(code="PESHAWAR", name="Peshawar")
+        site = Site.objects.create(code="ISLAMABAD", name="Islamabad")
         nvr = Nvr.objects.create(site=site, name="NVR 1", ip_address="10.0.0.5", password="nvr-secret")
         Camera.objects.create(nvr=nvr, channel=1, name="Gate")
         self.client = APIClient()
@@ -250,7 +250,7 @@ class StrongPasswordTests(TestCase):
         return self.client.post(
             "/api/users/",
             {"username": "newbie", "password": password, "full_name": "New Person",
-             "role": "GUARD", "phone": "0300", "location": "PESHAWAR"},
+             "role": "GUARD", "phone": "0300", "location": "ISLAMABAD"},
             format="json",
         )
 

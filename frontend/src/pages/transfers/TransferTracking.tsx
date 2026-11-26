@@ -7,8 +7,8 @@ import { Badge } from "@/components/ui/badge"
 
 export default function TransferTrackingPage() {
   const transferRows = [
-    { ref: "TR-2024-0841", from: "Yarik", to: "Peshawar", status: "In Transit", eta: "2024-02-06" },
-    { ref: "TR-2024-0840", from: "Peshawar", to: "Yarik", status: "Received", eta: "—" },
+    { ref: "TR-2024-0841", from: "Yarik", to: "Islamabad", status: "In Transit", eta: "2024-02-06" },
+    { ref: "TR-2024-0840", from: "Islamabad", to: "Yarik", status: "Received", eta: "—" },
   ]
 
   return (

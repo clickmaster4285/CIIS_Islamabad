@@ -1,15 +1,17 @@
 /** Customs station / office locations for user assignment and registration scoping. */
 export const LOCATION_OPTIONS = [
-  { value: "PESHAWAR", label: "Peshawar (Head Office)" },
-  { value: "ABBOTTABAD", label: "Abbottabad" },
-  { value: "DI_KHAN", label: "DI Khan" },
-  { value: "DDK", label: "DDK" },
-  { value: "THAKOT", label: "Thakot" },
-  { value: "HAYATABAD", label: "Hayatabad" },
-  { value: "MARDAN", label: "Mardan" },
-  { value: "NOWSHERA", label: "Nowshera" },
-  { value: "KOHAT", label: "Kohat" },
-  { value: "SWH_RATTA_KULACHI", label: "SWH Ratta Kulachi" },
+  { value: "ISLAMABAD", label: "Islamabad (Head Office)" },
+  // Islamabad deployment: Islamabad is the only location.
+  // { value: "PESHAWAR", label: "Peshawar (Head Office)" },
+  // { value: "ABBOTTABAD", label: "Abbottabad" },
+  // { value: "DI_KHAN", label: "DI Khan" },
+  // { value: "DDK", label: "DDK" },
+  // { value: "THAKOT", label: "Thakot" },
+  // { value: "HAYATABAD", label: "Hayatabad" },
+  // { value: "MARDAN", label: "Mardan" },
+  // { value: "NOWSHERA", label: "Nowshera" },
+  // { value: "KOHAT", label: "Kohat" },
+  // { value: "SWH_RATTA_KULACHI", label: "SWH Ratta Kulachi" },
 ] as const;
 
 export type LocationCode = (typeof LOCATION_OPTIONS)[number]["value"];

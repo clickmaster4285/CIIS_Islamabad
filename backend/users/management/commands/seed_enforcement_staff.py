@@ -159,6 +159,8 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        # Islamabad deployment: this roster is Peshawar HQ staff, so the seed is disabled.
+        raise CommandError("Disabled: this is the Peshawar staff roster; this server is the Islamabad deployment.")
         path = Path(options["file"])
         if not path.is_file():
             raise CommandError(f"Seed file not found: {path}")

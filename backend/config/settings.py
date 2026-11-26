@@ -668,7 +668,8 @@ APP_VERSION = os.getenv("APP_VERSION", "1.0.0").strip()
 SYNC_SCHEMA_VERSION = int(os.getenv("SYNC_SCHEMA_VERSION", "1"))
 ALLOWED_LOCATION_CODES = _env_list(
     "ALLOWED_LOCATION_CODES",
-    "PESHAWAR,ABBOTTABAD,DI_KHAN,DDK,THAKOT,MARDAN,NOWSHERA,KOHAT,HAYATABAD,SWH_RATTA_KULACHI",
+    # Islamabad is the only site in this deployment.
+    "ISLAMABAD",
 )
 HQ_SYNC_URL = os.getenv("HQ_SYNC_URL", "").strip().rstrip("/")
 # HQ only: address cities use to reach this server (shown in the Locations page .env snippet).

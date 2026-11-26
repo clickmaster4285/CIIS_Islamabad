@@ -4,16 +4,17 @@ from warehouse.zone_catalog import CUSTOMS_WAREHOUSE_ZONES, sync_fixed_zone_fiel
 
 
 class Command(BaseCommand):
-    help = "Seed warehouses and zones for all Peshawar customs locations."
+    help = "Seed warehouses and zones for the customs locations (Islamabad deployment: Peshawar disabled)."
 
     def handle(self, *args, **options):
         # Define warehouses per location
         warehouses_data = [
-            {
-                "location_code": "PESHAWAR",
-                "code": "WH-PSH-01",
-                "name": "Peshawar Customs Warehouse",
-            },
+            # Islamabad deployment: Peshawar warehouse disabled.
+            # {
+            #     "location_code": "PESHAWAR",
+            #     "code": "WH-PSH-01",
+            #     "name": "Peshawar Customs Warehouse",
+            # },
             {
                 "location_code": "KOHAT",
                 "code": "WH-KHT-01",

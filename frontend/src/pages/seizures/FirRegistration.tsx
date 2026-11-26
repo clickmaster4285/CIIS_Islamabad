@@ -44,7 +44,7 @@ function emptyForm(): FirRegistrationForm {
     firNumber: "",
     registrationDate: new Date().toISOString().slice(0, 10),
     registrationTime: new Date().toTimeString().slice(0, 5),
-    customsOfficeStation: "Customs Peshawer",
+    customsOfficeStation: "Customs Islamabad",
     stationCode: "",
     districtRegion: "",
     complainantName: "",
@@ -112,7 +112,7 @@ function ensureFirShape(r: Record<string, unknown>): StoredFir {
 
 const defaultRows: StoredFir[] = [
   { ...emptyForm(), id: "fir-1", firNumber: "FIR-2024-0841", registrationDate: "2024-02-04", customsOfficeStation: "Kohat", complainantName: "Customs Dept", accusedName: "Accused A", placeOfOccurrence: "Port Qasim", sectionOfLaw: "Customs Act S.2", investigationOfficerName: "IO Khan", seizureReference: "SZ-2024-001", status: "Registered" },
-  { ...emptyForm(), id: "fir-2", firNumber: "FIR-2024-0840", registrationDate: "2024-02-03", customsOfficeStation: "Mardan", complainantName: "Customs Dept", accusedName: "Accused B", placeOfOccurrence: "Peshawar", sectionOfLaw: "Customs Act", investigationOfficerName: "IO Ahmed", status: "Under Investigation" },
+  { ...emptyForm(), id: "fir-2", firNumber: "FIR-2024-0840", registrationDate: "2024-02-03", customsOfficeStation: "Mardan", complainantName: "Customs Dept", accusedName: "Accused B", placeOfOccurrence: "Islamabad", sectionOfLaw: "Customs Act", investigationOfficerName: "IO Ahmed", status: "Under Investigation" },
 ]
 
 function loadRows(): StoredFir[] {

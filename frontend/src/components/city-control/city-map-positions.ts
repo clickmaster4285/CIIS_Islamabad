@@ -2,11 +2,12 @@ import { GPS_DEFAULT_CENTER } from "@/components/gps/officer-gps-map"
 
 /**
  * Where each location sits on the City Status Map when no office pin is set on
- * Locations & Sync: the city centre as Google Maps shows it. Peshawar is the
- * Customs office itself. Set the exact office pin per location on Locations & Sync.
+ * Locations & Sync: the city centre as Google Maps shows it. Islamabad (head
+ * office) uses the GPS default centre. Set the exact office pin per location on Locations & Sync.
  */
 export const CITY_CENTRES: Record<string, [number, number]> = {
-  PESHAWAR: GPS_DEFAULT_CENTER,
+  ISLAMABAD: GPS_DEFAULT_CENTER,
+  // PESHAWAR: [34.008, 71.5789],  // Islamabad deployment
   HAYATABAD: [33.9948, 71.4363],
   MARDAN: [34.1986, 72.0404],
   NOWSHERA: [34.0159, 71.9747],

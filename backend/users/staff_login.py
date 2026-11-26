@@ -115,7 +115,7 @@ def generate_staff_login_password(length: int = 12) -> str:
 def staff_login_preview(staff: Staff) -> dict:
     login_id = unique_employee_login_id(staff)
     role = infer_staff_role(staff)
-    location = infer_staff_location(staff) or "PESHAWAR"
+    location = infer_staff_location(staff) or "ISLAMABAD"
     email = (staff.email or "").strip() or f"{login_id}@ciis.local"
     return {
         "staff_id": staff.pk,

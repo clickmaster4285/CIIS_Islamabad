@@ -129,7 +129,7 @@ export default function EmployeesPage() {
   return (
     <ModulePageLayout
       title="Employees"
-      description="Staff directory for Collectorate of Customs (Enforcement), Peshawar."
+      description="Staff directory for Collectorate of Customs (Enforcement), Islamabad."
       breadcrumbs={[{ label: "HR" }, { label: "Employees" }]}
     >
       <div className="grid gap-6">

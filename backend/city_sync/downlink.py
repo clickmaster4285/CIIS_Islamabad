@@ -1,9 +1,9 @@
 """HQ -> city HR changes (Stage 4).
 
-Peshawar enrolls staff (and their faces) for a city, edits city staff, transfers staff
+Islamabad enrolls staff (and their faces) for a city, edits city staff, transfers staff
 between cities, corrects attendance and files leave. Each change becomes an HqDownlink
 row for the target city. The heartbeat tells the city the newest seq; the city pulls
-everything after its cursor, applies it in order (Peshawar wins), downloads the photo
+everything after its cursor, applies it in order (Islamabad wins), downloads the photo
 files and acks. Applied rows are saved normally at the city, so the city's Outbox echoes
 them back and HQ links the echo to its own row (same entity_id).
 

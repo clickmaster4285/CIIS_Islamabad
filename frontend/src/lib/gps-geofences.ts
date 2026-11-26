@@ -21,13 +21,22 @@ export const STATION_GEOFENCES: GpsGeofence[] = [
     radiusM: 450,
   },
   {
-    id: "peshawar-office",
-    name: "Peshawar Customs Office",
-    location: "PESHAWAR",
-    latitude: 34.008,
-    longitude: 71.5789,
+    // Islamabad deployment: approximate centre; adjust to the exact office.
+    id: "islamabad-office",
+    name: "Islamabad Customs Office",
+    location: "ISLAMABAD",
+    latitude: 33.6844,
+    longitude: 73.0479,
     radiusM: 600,
   },
+  // {
+  //   id: "peshawar-office",
+  //   name: "Peshawar Customs Office",
+  //   location: "PESHAWAR",
+  //   latitude: 34.008,
+  //   longitude: 71.5789,
+  //   radiusM: 600,
+  // },
   {
     id: "kohat-office",
     name: "Kohat Customs Office",
@@ -99,9 +108,9 @@ export function stationCenter(station: string | "all"): [number, number] {
     const fence = STATION_GEOFENCES.find((g) => g.location === station)
     if (fence) return [fence.latitude, fence.longitude]
   }
-  // Default map pin: Customs Peshawar (Head Office)
-  const peshawar = STATION_GEOFENCES.find((g) => g.location === "PESHAWAR")
-  return [peshawar?.latitude ?? 34.008, peshawar?.longitude ?? 71.5789]
+  // Default map pin: Islamabad (Head Office); was Customs Peshawar
+  const hq = STATION_GEOFENCES.find((g) => g.location === "ISLAMABAD")
+  return [hq?.latitude ?? 33.6844, hq?.longitude ?? 73.0479]
 }
 
 export function geofencesForStation(station: string | "all"): GpsGeofence[] {

@@ -18,7 +18,8 @@ from .client import (
 from .models import ConnectionMode, RemoteServer
 
 KNOWN_LOCATION_CODES = (
-    "PESHAWAR",
+    "ISLAMABAD",
+    # "PESHAWAR",  # Islamabad deployment: Peshawar is not a site here
     "KOHAT",
     "NOWSHERA",
     "MARDAN",
@@ -32,7 +33,8 @@ KNOWN_LOCATION_CODES = (
 )
 
 DISPLAY_NAMES = {
-    "PESHAWAR": "Peshawar",
+    "ISLAMABAD": "Islamabad",
+    # "PESHAWAR": "Peshawar",
     "KOHAT": "Kohat",
     "NOWSHERA": "Nowshera",
     "MARDAN": "Mardan",
@@ -239,7 +241,7 @@ def build_city_control_board(*, request_user, overall_timeout: float = 12.0) -> 
         last_seen = None
         server_ids: list[int] = []
         display_name = display_city_name(key, members[0].name if members else key)
-        is_hq = key == "PESHAWAR"
+        is_hq = key == "ISLAMABAD"  # was "PESHAWAR"
         modes = set()
         errors: list[str] = []
 

@@ -49,7 +49,8 @@ const WAREHOUSE_OPTIONS = [
   "Bonded Godown A",
   "Bonded Godown B",
   "Transit Shed",
-  "Customs House Peshawar",
+  "Customs House Islamabad",
+  // "Customs House Peshawar",  // Islamabad deployment
   "Customs House Yarik",
 ]
 

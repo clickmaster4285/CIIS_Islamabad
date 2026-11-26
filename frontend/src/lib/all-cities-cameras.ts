@@ -10,8 +10,11 @@ export type AllCitiesStreamsCache = {
   fetchedAt: number
 }
 
-const HEAD_OFFICE_LOCATION = "PESHAWAR"
-const THIS_SITE_LOCATION = "PESHAWAR"
+// Islamabad deployment: Islamabad is the head office (was PESHAWAR).
+const HEAD_OFFICE_LOCATION = "ISLAMABAD"
+const THIS_SITE_LOCATION = "ISLAMABAD"
+// const HEAD_OFFICE_LOCATION = "PESHAWAR"
+// const THIS_SITE_LOCATION = "PESHAWAR"
 
 /** Roles that can open the live camera wall in the header. */
 const CAMERA_WALL_VIEWER_ROLES = new Set([
@@ -35,7 +38,7 @@ export function canViewAllCitiesCameras(role: string | undefined | null): boolea
   return Boolean(normalized && CAMERA_WALL_VIEWER_ROLES.has(normalized))
 }
 
-/** Peshawar Super Admin, IT Super Admin, Peshawar admin, and Peshawar collectors see every city. */
+/** Head-office (Islamabad) Super Admin, IT Super Admin, admin and collectors see every city. */
 export function canSeeAllCitiesCameras(
   role: string | undefined | null,
   location: string | undefined | null,

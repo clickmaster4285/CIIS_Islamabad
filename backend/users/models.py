@@ -50,16 +50,7 @@ class User(AbstractUser):
     ]
 
     LOCATION_CHOICES = [
-        ("PESHAWAR", "Peshawar (Head Office)"),
-        ("KOHAT", "Kohat"),
-        ("NOWSHERA", "Nowshera"),
-        ("MARDAN", "Mardan"),
-        ("DI_KHAN", "DI Khan"),
-        ("SWH_RATTA_KULACHI", "SWH Ratta Kulachi"),
-        ("ABBOTTABAD", "Abbottabad"),
-        ("DDK", "DDK"),
-        ("THAKOT", "Thakot"),
-        ("HAYATABAD", "Hayatabad"),
+        ("ISLAMABAD", "Islamabad (Head Office)"),
     ]
 
     role = models.CharField(max_length=30, choices=ROLE_CHOICES)

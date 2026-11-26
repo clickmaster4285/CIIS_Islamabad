@@ -136,7 +136,7 @@ export default function CityCamerasPage() {
           </h1>
           {view && (
             <p className="text-[12px] text-[#607DA5]">
-              Video comes directly from {view.base_url}. Nothing streams through Peshawar.
+              Video comes directly from {view.base_url}. Nothing streams through Islamabad.
             </p>
           )}
         </div>
@@ -158,7 +158,7 @@ export default function CityCamerasPage() {
           <span>
             {error ||
               (blockedByHttps
-                ? "This page is open over https but the city server uses http, so the browser blocks its video. Open Peshawar over http, or give the city https."
+                ? "This page is open over https but the city server uses http, so the browser blocks its video. Open Islamabad over http, or give the city https."
                 : "The city has not sent a heartbeat recently. Its cameras may not answer.")}
           </span>
         </div>

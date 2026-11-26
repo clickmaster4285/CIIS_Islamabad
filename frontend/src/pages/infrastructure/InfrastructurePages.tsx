@@ -368,7 +368,7 @@ export default function InfrastructureOverview() {
               <CardContent className="pt-4">
                 {sites.length === 0 ? (
                   <p className="py-6 text-center text-sm text-muted-foreground">
-                    No sites yet. Create a site (e.g. Peshawar HQ) before assigning devices.
+                    No sites yet. Create a site (e.g. Islamabad HQ) before assigning devices.
                   </p>
                 ) : (
                   <Table>
@@ -462,7 +462,7 @@ export default function InfrastructureOverview() {
               <Input
                 value={siteForm.code}
                 onChange={(e) => setSiteForm((f) => ({ ...f, code: e.target.value }))}
-                placeholder="PESHAWAR"
+                placeholder="ISLAMABAD"
               />
             </div>
             <div className="space-y-2">

@@ -17,7 +17,7 @@ def _resp(status_code=200, data=None):
     return resp
 
 
-HQ_IDENTITY = _resp(data={"system_role": "hq", "location_code": "PESHAWAR", "node_id": "pew-app-01"})
+HQ_IDENTITY = _resp(data={"system_role": "hq", "location_code": "ISLAMABAD", "node_id": "pew-app-01"})
 
 
 def run_check() -> str:
@@ -32,7 +32,7 @@ class CitySyncCheckTests(TestCase):
     def test_ready_when_hq_accepts_the_key(self, get):
         get.side_effect = [HQ_IDENTITY, _resp(data={"items": [], "count": 0})]
         out = run_check()
-        self.assertIn("Peshawar accepts this server's key", out)
+        self.assertIn("Islamabad accepts this server's key", out)
         self.assertNotIn("FAIL", out)
         self.assertEqual(get.call_args_list[1].kwargs["headers"], {"Authorization": "Bearer k"})
 
@@ -40,7 +40,7 @@ class CitySyncCheckTests(TestCase):
     def test_rejected_key_is_not_ready(self, get):
         get.side_effect = [HQ_IDENTITY, _resp(401, {"detail": "Invalid API key"})]
         out = run_check()
-        self.assertIn("Peshawar rejected the key (Invalid API key)", out)
+        self.assertIn("Islamabad rejected the key (Invalid API key)", out)
         self.assertIn("NOT READY", out)
 
     @mock.patch("city_sync.management.commands.city_sync_check.requests.get")
@@ -54,7 +54,7 @@ class CitySyncCheckTests(TestCase):
     def test_missing_key_stops_early(self):
         out = run_check()
         self.assertIn("SYNC_API_KEY is empty", out)
-        self.assertNotIn("Peshawar HQ", out)
+        self.assertNotIn("Islamabad HQ", out)
 
 
 @override_settings(**HQ)

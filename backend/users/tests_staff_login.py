@@ -51,7 +51,7 @@ class StaffLoginLinkTests(TestCase):
         staff = _staff(
             personal_number="EMP9001",
             role_access_level="INSPECTOR",
-            branch_location="PESHAWAR",
+            branch_location="ISLAMABAD",
         )
         preview = self.client.get(f"/api/staff/{staff.id}/login-preview/")
         self.assertEqual(preview.status_code, 200, preview.content)
@@ -72,7 +72,7 @@ class StaffLoginLinkTests(TestCase):
         staff.refresh_from_db()
         self.assertEqual(staff.user.username, "ahmed.khan")
         self.assertEqual(staff.user.role, "INSPECTOR")
-        self.assertEqual(staff.user.location, "PESHAWAR")
+        self.assertEqual(staff.user.location, "ISLAMABAD")
 
     def test_create_user_requires_role_when_missing(self):
         staff = _staff(designation="Officer", personal_number="EMP9002")
@@ -98,7 +98,7 @@ class StaffLoginLinkTests(TestCase):
         staff = _staff(
             full_name="Umar Farooq",
             role_access_level="PRAL",
-            branch_location="PESHAWAR",
+            branch_location="ISLAMABAD",
         )
         created = self.client.post(
             f"/api/staff/{staff.id}/create_user/",
@@ -116,7 +116,7 @@ class StaffLoginLinkTests(TestCase):
             phone="03001111111",
             role="INSPECTOR",
             full_name="Linked",
-            location="PESHAWAR",
+            location="ISLAMABAD",
         )
         _staff(full_name="Linked Officer", cnic="11111-1111111-1", user=linked_user)
         open_staff = _staff(full_name="Open Officer", cnic="22222-2222222-2", personal_number="OPEN1")

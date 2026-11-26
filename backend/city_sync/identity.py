@@ -17,25 +17,11 @@ ROLE_HQ = "hq"
 ALLOWED_ROLES = frozenset({ROLE_CITY, ROLE_HQ})
 LOCATION_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 
-# Canonical location codes (guide + existing Ops Central keys).
+# Islamabad is the only site in this deployment.
 DEFAULT_ALLOWED_LOCATION_CODES = frozenset(
     {
-        "PESHAWAR",
-        "ABBOTTABAD",
-        "DI_KHAN",
-        "MARDAN",
-        "NOWSHERA",
-        "KOHAT",
-        "SWH_RATTA_KULACHI",
-        "DDK",
-        "THAKOT",
-        "HAYATABAD",
-        "PEW",
-        "ABT",
-        "DIK",
-        "MRD",
-        "NOW",
-        "KHT",
+        "ISLAMABAD",
+        "ISB",
     }
 )
 
@@ -124,7 +110,7 @@ def validate_node_identity() -> None:
             "Set SYSTEM_ROLE in backend/.env."
         )
     if not code:
-        raise ImproperlyConfigured("LOCATION_CODE is required (e.g. ABBOTTABAD, PESHAWAR, DI_KHAN).")
+        raise ImproperlyConfigured("LOCATION_CODE is required (e.g. ISLAMABAD, ABBOTTABAD, DI_KHAN).")
     # New cities are added from the HQ Locations page, so any well-formed code is
     # accepted; HQ only takes data from codes it has issued a key for.
     if code not in allowed_location_codes() and not LOCATION_CODE_RE.match(code):
@@ -138,7 +124,7 @@ def validate_node_identity() -> None:
     if role == ROLE_HQ and getattr(settings, "SYNC_HQ_ACCEPTS_CITY_WRITES", False):
         raise ImproperlyConfigured(
             "SYSTEM_ROLE=hq cannot enable SYNC_HQ_ACCEPTS_CITY_WRITES. "
-            "Run Peshawar-as-branch as a separate city deployment."
+            "Run Islamabad-as-branch as a separate city deployment."
         )
 
     _check_ntp_drift()

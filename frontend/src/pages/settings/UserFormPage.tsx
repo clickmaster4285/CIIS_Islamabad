@@ -98,9 +98,10 @@ function displayPhone(phone: string | undefined): string {
 
 function resolveLocation(code: string | undefined, role: string): string {
   if (role === "ADMIN") return ""
-  if (!code) return "PESHAWAR"
+  // Islamabad deployment: default location is ISLAMABAD (was PESHAWAR).
+  if (!code) return "ISLAMABAD"
   if (LOCATION_OPTIONS.some((o) => o.value === code)) return code
-  return "PESHAWAR"
+  return "ISLAMABAD"
 }
 
 function resolveRole(role: string | undefined): string {
@@ -704,7 +705,7 @@ export default function UserFormPage() {
                   if (v === "ADMIN") {
                     set("location", "")
                   } else if (!form.location) {
-                    set("location", actor?.location || "PESHAWAR")
+                    set("location", actor?.location || "ISLAMABAD")
                   }
                 }}
               >

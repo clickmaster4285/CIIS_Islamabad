@@ -237,7 +237,7 @@ export type NoteSheetRecord = {
   timeline: NoteSheetTimelineStep[]
   createdAt: string
   updatedAt: string
-  /** Location code of preparing officer (PESHAWAR, KOHAT, …). */
+  /** Location code of preparing officer (ISLAMABAD, KOHAT, …). */
   submitterLocation?: string
   /** Server-side: current user may Approve/Reject this submitted sheet. */
   canApprove?: boolean

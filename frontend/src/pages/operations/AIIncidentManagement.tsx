@@ -129,7 +129,7 @@ const LOCATIONS = [
   "Lahore Dry Port",
   "Multan Dry Port",
   "Quetta Dry Port",
-  "Peshawar Dry Port",
+  // "Peshawar Dry Port",  // Islamabad deployment
   "Gwadar Port - Container Terminal",
   "KPT - East Wharf",
   "KPT - West Wharf",

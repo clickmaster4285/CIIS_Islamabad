@@ -115,7 +115,7 @@ export default function AnalyticsDashboardPage() {
   return (
     <ModulePageLayout
       title="Analytics Dashboard"
-      description="Live overview of cameras, AI detections and alerts across Peshawar and every connected city."
+      description="Live overview of cameras, AI detections and alerts across Islamabad and every connected city."
       breadcrumbs={[{ label: "AI Analytics" }, { label: "Analytics Dashboard" }]}
     >
       <div className="mb-6 flex flex-col gap-4">

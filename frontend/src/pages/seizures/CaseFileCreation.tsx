@@ -95,7 +95,7 @@ function ensureCaseShape(r: Record<string, unknown>): StoredCase {
 
 const defaultRows: StoredCase[] = [
   { ...emptyForm(), id: "cf-1", caseId: "CF-2024-0841", caseNumber: "CN-2024-0841", firReference: "FIR-2024-0841", seizureId: "SZ-2024-001", caseOpeningDate: "2024-02-04", accusedName: "Accused A", primaryCharge: "Customs Act S.2", courtName: "Customs Court Yarik", nextHearingDate: "2024-03-01", caseStatus: "In Court" },
-  { ...emptyForm(), id: "cf-2", caseId: "CF-2024-0840", caseNumber: "CN-2024-0840", firReference: "FIR-2024-0840", seizureId: "SZ-2024-002", caseOpeningDate: "2024-02-03", accusedName: "Accused B", primaryCharge: "Tax Evasion", courtName: "Peshawar High Court", caseStatus: "Investigation" },
+  { ...emptyForm(), id: "cf-2", caseId: "CF-2024-0840", caseNumber: "CN-2024-0840", firReference: "FIR-2024-0840", seizureId: "SZ-2024-002", caseOpeningDate: "2024-02-03", accusedName: "Accused B", primaryCharge: "Tax Evasion", courtName: "Islamabad High Court", caseStatus: "Investigation" },
 ]
 
 function loadRows(): StoredCase[] {

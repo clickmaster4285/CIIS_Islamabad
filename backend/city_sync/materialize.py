@@ -8,7 +8,7 @@ Rules:
 - Rows are written with bulk_create / queryset.update, so no business signals run
   (no outbox, no ML push, no notifications) for copied city data.
 - A city row that matches a row HQ already owns (same entity_id, or same CNIC for
-  staff) is linked, never overwritten: Peshawar wins.
+  staff) is linked, never overwritten: Islamabad wins.
 - City foreign keys are city pks; they are resolved through HqEntityMap. A parent
   that has not arrived yet becomes an HqPendingLink and is filled in later. When the
   link is required (NOT NULL), the whole row waits and is copied when the parent arrives.
@@ -74,7 +74,7 @@ class Materializer:
         return out
 
     def find_hq_owned(self, values: dict) -> Any | None:
-        """An existing HQ row that is the same real-world record (Peshawar wins)."""
+        """An existing HQ row that is the same real-world record (Islamabad wins)."""
         return None
 
     def adjust(self, values: dict, payload: dict, loc: str) -> None:
@@ -85,7 +85,7 @@ class StaffMaterializer(Materializer):
     entity_type = "staff"
     overrides = {
         "user": None,
-        # City face vectors must not enter Peshawar's recognition / ML matching.
+        # City face vectors must not enter Islamabad's recognition / ML matching.
         "face_embedding": None,
         "face_embeddings": [],
         "face_embedding_dim": 0,
@@ -106,7 +106,7 @@ class StaffMaterializer(Materializer):
     clear_on_clash = ("employee_id", "cnic")
 
     def find_hq_owned(self, values: dict):
-        """Same CNIC as a staff member Peshawar itself owns (not another city's copy)."""
+        """Same CNIC as a staff member Islamabad itself owns (not another city's copy)."""
         from city_sync.identity import local_rows_q
 
         cnic = (values.get("cnic") or "").strip()
@@ -549,7 +549,7 @@ def materialize_event(
         ).first()
 
     if link is not None and link.hq_owned:
-        return "linked"  # Peshawar wins
+        return "linked"  # Islamabad wins
 
     if link is not None:
         # HQ moved this record to another location (e.g. a staff transfer): the old city no

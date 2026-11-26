@@ -3,8 +3,8 @@ import { MapPin } from "lucide-react"
 import { GPS_DEFAULT_CENTER, loadLeaflet } from "@/components/gps/officer-gps-map"
 import { cn } from "@/lib/utils"
 
-/** Peshawar Customs Office — primary HQ pin (same as GPS default center). */
-const PESHAWAR_CUSTOMS = {
+/** Islamabad head office — primary HQ pin (same as GPS default center). Was Peshawar Customs Office. */
+const ISLAMABAD_HQ = {
   lat: GPS_DEFAULT_CENTER[0],
   lng: GPS_DEFAULT_CENTER[1],
   zoom: 15,
@@ -12,7 +12,8 @@ const PESHAWAR_CUSTOMS = {
 
 /** City centers for HQ read-only overview pins. */
 export const CITY_COORDINATES: Record<string, { lat: number; lng: number; zoom?: number }> = {
-  peshawar: { ...PESHAWAR_CUSTOMS },
+  islamabad: { ...ISLAMABAD_HQ },
+  // peshawar: { lat: 34.008, lng: 71.5789, zoom: 15 },  // Islamabad deployment
   mardan: { lat: 34.198, lng: 72.04, zoom: 13 },
   nowshera: { lat: 34.015, lng: 71.975, zoom: 13 },
   kohat: { lat: 33.5889, lng: 71.4428, zoom: 13 },
@@ -63,8 +64,8 @@ type CityOverviewMapProps = {
 
 export function CityOverviewMap({ cityId, cityName, className }: CityOverviewMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const coords = CITY_COORDINATES[cityId] ?? CITY_COORDINATES.peshawar
-  const isCustoms = cityId === "peshawar"
+  const coords = CITY_COORDINATES[cityId] ?? CITY_COORDINATES.islamabad
+  const isCustoms = cityId === "islamabad"  // was "peshawar"
 
   useEffect(() => {
     const el = containerRef.current
@@ -166,7 +167,7 @@ export function CityOverviewMap({ cityId, cityName, className }: CityOverviewMap
       <div ref={containerRef} className="absolute inset-0 h-full w-full" />
       <div className="pointer-events-none absolute left-2 top-2 z-[500] rounded bg-white/95 px-2 py-1 text-[10px] font-semibold text-[#0875E1] shadow-sm ring-1 ring-[#D9E6F5]">
         <MapPin className="mr-1 inline h-3 w-3" />
-        {isCustoms ? "Peshawar Customs" : "Location pin"}
+        {isCustoms ? "Islamabad Head Office" : "Location pin"}
       </div>
     </div>
   )

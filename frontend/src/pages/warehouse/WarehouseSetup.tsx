@@ -343,7 +343,7 @@ export default function WarehouseSetupPage() {
               <Input
                 value={form.code}
                 onChange={(e) => setForm((f) => ({ ...f, code: e.target.value }))}
-                placeholder="e.g. WH-PSH-01"
+                placeholder="e.g. WH-ISB-01"
               />
             </div>
             <div className="grid gap-2">
@@ -351,7 +351,7 @@ export default function WarehouseSetupPage() {
               <Input
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                placeholder="e.g. Peshawar Customs Warehouse"
+                placeholder="e.g. Islamabad Customs Warehouse"
               />
             </div>
             <div className="grid gap-2">

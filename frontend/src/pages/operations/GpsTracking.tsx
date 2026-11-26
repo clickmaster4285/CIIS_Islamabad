@@ -99,7 +99,7 @@ export default function GpsTrackingPage() {
   const { toast } = useToast()
   const gpsSession = useOfficerGpsTrackingStatus()
   const allStations = canSeeAllLocations(user?.role)
-  const [station, setStation] = useState(allStations ? "PESHAWAR" : user?.location || "PESHAWAR")
+  const [station, setStation] = useState(allStations ? "ISLAMABAD" : user?.location || "ISLAMABAD")
   const [dateRange, setDateRange] = useState<"today" | "24h" | "48h">("today")
   const [reportDate, setReportDate] = useState(localDateInputValue())
   const [reportPeriod, setReportPeriod] = useState<GpsReportPeriod>("day")
@@ -156,7 +156,7 @@ export default function GpsTrackingPage() {
   const fences = useMemo(() => {
     if (station !== "all") return geofencesForStation(station)
     const locs = new Set(officers.map((o) => o.location).filter(Boolean))
-    if (locs.size === 0) return geofencesForStation("PESHAWAR")
+    if (locs.size === 0) return geofencesForStation("ISLAMABAD")  // was PESHAWAR
     return STATION_GEOFENCES.filter((g) => locs.has(g.location))
   }, [station, officers])
 

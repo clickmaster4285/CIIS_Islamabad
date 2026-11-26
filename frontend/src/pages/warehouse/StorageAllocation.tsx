@@ -41,8 +41,8 @@ type AllocationRow = {
 }
 
 const defaultRows: AllocationRow[] = [
-  { id: "1", ref: "ALC-2024-0841", QR_Code: "QR_Code-7821", product: "Electronics - Category A", qty: 120, wh: "Peshawar", priority: "High" },
-  { id: "2", ref: "ALC-2024-0842", QR_Code: "QR_Code-9103", product: "Textiles - Bulk", qty: 500, wh: "Peshawar", priority: "Normal" },
+  { id: "1", ref: "ALC-2024-0841", QR_Code: "QR_Code-7821", product: "Electronics - Category A", qty: 120, wh: "Islamabad", priority: "High" },
+  { id: "2", ref: "ALC-2024-0842", QR_Code: "QR_Code-9103", product: "Textiles - Bulk", qty: 500, wh: "Islamabad", priority: "Normal" },
   { id: "3", ref: "ALC-2024-0843", QR_Code: "QR_Code-4452", product: "Pharma - Temp Control", qty: 80, wh: "DI Khan", priority: "High" },
   { id: "4", ref: "ALC-2024-0844", QR_Code: "QR_Code-2298", product: "General Merchandise", qty: 200, wh: "Yarik", priority: "Normal" },
 ]
@@ -65,14 +65,14 @@ function saveRows(rows: AllocationRow[]) {
 export default function StorageAllocationPage() {
   const [rows, setRows] = useState<AllocationRow[]>(() => loadRows())
   const [open, setOpen] = useState(false)
-  const [form, setForm] = useState({ ref: "", QR_Code: "", product: "", qty: 0, wh: "Peshawar", priority: "Normal" })
+  const [form, setForm] = useState({ ref: "", QR_Code: "", product: "", qty: 0, wh: "Islamabad", priority: "Normal" })
 
   useEffect(() => {
     if (rows.length > 0) saveRows(rows)
   }, [rows])
 
   const openAdd = () => {
-    setForm({ ref: "", QR_Code: "", product: "", qty: 0, wh: "Peshawar", priority: "Normal" })
+    setForm({ ref: "", QR_Code: "", product: "", qty: 0, wh: "Islamabad", priority: "Normal" })
     setOpen(true)
   }
 
@@ -253,7 +253,7 @@ export default function StorageAllocationPage() {
             </div>
             <div className="grid gap-2">
               <Label>Warehouse</Label>
-              <Input value={form.wh} onChange={(e) => setForm((f) => ({ ...f, wh: e.target.value }))} placeholder="Peshawar" />
+              <Input value={form.wh} onChange={(e) => setForm((f) => ({ ...f, wh: e.target.value }))} placeholder="Islamabad" />
             </div>
             <div className="grid gap-2">
               <Label>Priority</Label>

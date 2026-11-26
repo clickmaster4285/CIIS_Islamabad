@@ -27,7 +27,7 @@ type HandoverRow = { ref: string; by: string; date: string; status: string }
 
 const defaultRows: HandoverRow[] = [
   { ref: "HO-2024-0841", by: "Yarik Collectorate", date: "2024-02-04", status: "Pending" },
-  { ref: "HO-2024-0840", by: "Peshawar Collectorate", date: "2024-02-03", status: "Completed" },
+  { ref: "HO-2024-0840", by: "Islamabad Collectorate", date: "2024-02-03", status: "Completed" },
 ]
 
 function loadRows(): HandoverRow[] {
@@ -45,7 +45,8 @@ function saveRows(rows: HandoverRow[]) {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(rows))
 }
 
-const REQUESTERS = ["Yarik Collectorate", "Peshawar Collectorate", "Peshawar Collectorate", "Rawalpindi Collectorate"]
+// Islamabad deployment: Peshawar removed.
+const REQUESTERS = ["Yarik Collectorate", "Islamabad Collectorate", "Rawalpindi Collectorate"]
 const STATUSES = ["Pending", "Completed"]
 
 export default function HandoverRequestsPage() {

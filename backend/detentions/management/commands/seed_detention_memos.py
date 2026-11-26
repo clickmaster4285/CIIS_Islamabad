@@ -188,6 +188,8 @@ class Command(BaseCommand):
         created_stock = 0
 
         for entry in SAMPLE_MEMOS:
+            if entry["location_of_detention"] == "PESHAWAR":
+                continue  # Islamabad deployment: skip the Peshawar sample memo
             case_no = entry["case_no"]
             if not force and DetentionMemo.objects.filter(case_no=case_no).exists():
                 self.stdout.write(f"Skipping {case_no} (already exists).")

@@ -23,7 +23,8 @@ from users.permissions import GLOBAL_ADMIN_ROLE, LOCATION_ADMIN_ROLE, get_locati
 
 # Same location code may appear in its long or short form (city_sync allows both).
 _LOCATION_ALIASES = {
-    "PESHAWAR": {"PEW"},
+    "ISLAMABAD": {"ISB"},
+    # "PESHAWAR": {"PEW"},
     "ABBOTTABAD": {"ABT"},
     "DI_KHAN": {"DIK"},
     "MARDAN": {"MRD"},

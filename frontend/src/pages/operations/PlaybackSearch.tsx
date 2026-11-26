@@ -30,7 +30,8 @@ import { CameraSelectItems } from "@/components/cameras/camera-select-items"
 import { useCameras } from "@/hooks/use-cameras"
 import { ROUTES } from "@/routes/config"
 
-const LOCATIONS = ["Peshawar", "Yarik", "DI Khan", "SWH Ratta Kulachi", "Kohat", "Mardan", "Nowshera","Chamkani"]
+// Islamabad deployment: "Peshawar" replaced by "Islamabad".
+const LOCATIONS = ["Islamabad", "Yarik", "DI Khan", "SWH Ratta Kulachi", "Kohat", "Mardan", "Nowshera","Chamkani"]
 const RECORDING_TYPES = ["Continuous", "Motion", "Event", "Manual"]
 const EVENT_TYPES = ["Alert", "Bookmark", "Incident", "AI event"]
 

@@ -84,7 +84,8 @@ const WAREHOUSES = [
   "State Warehouse, D.I Khan",
 ] as const
 const SELECT_WAREHOUSE_PLACEHOLDER = "__select_warehouse__"
-const DIRECTORATES = ["MCC D.I Khan AFU Import", "MCC Peshawar", "MCC YARIK", "MCC DI Khan"] as const
+// Islamabad deployment: "MCC Peshawar" replaced by "MCC Islamabad".
+const DIRECTORATES = ["MCC D.I Khan AFU Import", "MCC Islamabad", "MCC YARIK", "MCC DI Khan"] as const
 const GOODS_CONDITIONS = ["Seized", "Detained", "Under Examination", "Pending Clearance", "Unclaimed"] as const
 const GOODS_UNITS = ["PCS", "KGS", "LTR", "MTR", "CTN", "BOX", "BAG", "DOZ", "SET", "Other"] as const
 

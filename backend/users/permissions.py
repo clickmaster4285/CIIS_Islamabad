@@ -39,23 +39,12 @@ def is_ops_viewer(user) -> bool:
     }
 
 
-HEAD_OFFICE_LOCATION = "PESHAWAR"
-THIS_SITE_LOCATION = "PESHAWAR"
+# Islamabad is the head office and the only site in this deployment.
+HEAD_OFFICE_LOCATION = "ISLAMABAD"
+THIS_SITE_LOCATION = "ISLAMABAD"
 
 _LOCATION_NAME_ALIASES = {
-    "PESHAWAR": ("Peshawar",),
-    "KOHAT": ("Kohat",),
-    "NOWSHERA": ("Nowshera",),
-    "MARDAN": ("Mardan",),
-    "DI_KHAN": ("DI Khan", "Dera Ismail Khan", "DIKhan"),
-    "SWH_RATTA_KULACHI": ("Ratta Kulachi", "SWH Ratta Kulachi"),
-    "ABBOTTABAD": ("Abbottabad",),
-    "DDK": ("DDK",),
-    "THAKOT": ("Thakot", "ThaKot"),
-    "HAYATABAD": ("Hayatabad", "hayatabad"),
-    "SWAT": ("Swat",),
-    "MANSEHRA": ("Mansehra",),
-    "BANNU": ("Bannu",),
+    "ISLAMABAD": ("Islamabad",),
 }
 
 _ALL_CITIES_VIEWER_ROLES = frozenset(
@@ -75,7 +64,7 @@ def _normalize_location_code(value) -> str:
 
 
 def can_see_all_cities_cameras(user) -> bool:
-    """Peshawar Super Admin, IT Super Admin, Peshawar admin, and Peshawar collectors see every city."""
+    """Head-office (Islamabad) Super Admin, IT Super Admin, admin and collectors see every city."""
     if not user or not getattr(user, "is_authenticated", False):
         return False
     role = getattr(user, "role", None)

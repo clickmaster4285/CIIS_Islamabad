@@ -43,7 +43,9 @@ import {
 
 // Location configurations
 const LOCATIONS = [
-  { id: "peshawar", name: "Peshawar", lat: 34.0151, lng: 71.5249, tolls: ["Ring Road Toll", "GT Road Toll", "University Road Checkpost"] },
+  { id: "islamabad", name: "Islamabad", lat: 33.6844, lng: 73.0479, tolls: ["Islamabad Toll Plaza (M-2)", "Tarnol Toll Plaza", "GT Road Checkpost"] },
+  // Islamabad deployment: Peshawar disabled.
+  // { id: "peshawar", name: "Peshawar", lat: 34.0151, lng: 71.5249, tolls: ["Ring Road Toll", "GT Road Toll", "University Road Checkpost"] },
   { id: "yarik", name: "Yarik", lat: 34.0151, lng: 71.5249, tolls: ["Yarik Plaza", "North Entry", "Yarik Bridge"] },
   { id: "di-khan", name: "DI Khan", lat: 31.8178, lng: 70.9324, tolls: ["DI Khan South", "Main Entry", "Industrial Area Gate"] },
   { id: "swh-ratta-kulachi", name: "SWH Ratta Kulachi", lat: 31.8620, lng: 70.8980, tolls: ["SWH Gate", "Main Entry", "Warehouse Yard"] },
@@ -207,7 +209,7 @@ export default function JcpTollPlazaEntryPage() {
   const [formData, setFormData] = useState({
     time: "",
     plate: "",
-    location: "Peshawar",
+    location: "Islamabad",
     tollPlaza: "Ring Road Toll",
     lane: "Lane 1",
     status: "OK",
@@ -233,7 +235,7 @@ export default function JcpTollPlazaEntryPage() {
         date: "2024-03-15",
         plate: "LEJ-1234",
         detectedPlate: "LEJ-1234",
-        location: "Peshawar",
+        location: "Islamabad",
         tollPlaza: "Ring Road Toll",
         lane: "Lane 2",
         status: "OK",
@@ -399,7 +401,7 @@ export default function JcpTollPlazaEntryPage() {
         date: "2024-03-15",
         plate: "FSD-0123",
         detectedPlate: "FSD-0123",
-        location: "Peshawar",
+        location: "Islamabad",
         tollPlaza: "University Road Checkpost",
         lane: "Lane 3",
         status: "OK",
@@ -724,7 +726,7 @@ export default function JcpTollPlazaEntryPage() {
     setFormData({
       time: "",
       plate: "",
-      location: "Peshawar",
+      location: "Islamabad",
       tollPlaza: "Ring Road Toll",
       lane: "Lane 1",
       status: "OK",
