@@ -17,7 +17,6 @@ export type CameraPurpose =
 /** All selectable AI models — default when creating a camera. */
 export const ALL_CAMERA_PURPOSES: CameraPurpose[] = [
   "general_objects",
-  "custom_objects",
   "smoke_fire",
   "weapon",
   "face_recognition",

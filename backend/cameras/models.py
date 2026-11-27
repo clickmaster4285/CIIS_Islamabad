@@ -33,7 +33,7 @@ PURPOSE_ALIASES: dict[str, str] = {
 # Purposes exposed in the camera UI (hide legacy duplicates)
 CAMERA_PURPOSE_OPTIONS: tuple[CameraPurpose, ...] = (
     CameraPurpose.GENERAL_OBJECTS,
-    CameraPurpose.CUSTOM_OBJECTS,
+    # CUSTOM_OBJECTS hidden: its model (best.pt) was removed on 2026-11-27.
     CameraPurpose.SMOKE_FIRE,
     CameraPurpose.WEAPON,
     CameraPurpose.FACE_RECOGNITION,

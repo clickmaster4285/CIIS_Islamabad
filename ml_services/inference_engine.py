@@ -20,11 +20,10 @@ WEIGHTS_DIR = BASE_DIR / "runs" / "train" / "stage3_finetune3" / "weights"
 
 # Multi-model live stack:
 # 1) yolo26l.pt — COCO pretrained (classes 0–79, allowlisted)
-# 2) best.pt — custom classes only (drop COCO 0–79)
-# 3) best_Smoke_Detection.pt — fire/smoke specialist (replaced with Desktop "fire and smoke"/best.pt)
-# 4) best_weapon_detection.pt — weapon specialist
+# 2) best_Smoke_Detection.pt — fire/smoke specialist
+# 3) best_weapon_detection.pt — weapon specialist
+# The custom best.pt model was removed (2026-11-27): no custom model is loaded.
 YOLO_WEIGHTS_COCO = WEIGHTS_DIR / "yolo26l.pt"
-YOLO_WEIGHTS_CUSTOM = WEIGHTS_DIR / "best.pt"
 YOLO_WEIGHTS_SMOKE = WEIGHTS_DIR / "best_Smoke_Detection.pt"
 YOLO_WEIGHTS_WEAPON = WEIGHTS_DIR / "best_weapon_detection.pt"
 
@@ -50,7 +49,6 @@ ULTRALYTICS_NAMED_WEIGHTS = frozenset(
 )
 
 YOLO_WEIGHTS_ENV = os.getenv("ML_YOLO_WEIGHTS", "").strip()
-YOLO_CUSTOM_WEIGHTS_ENV = os.getenv("ML_YOLO_CUSTOM_WEIGHTS", "").strip()
 YOLO_SMOKE_WEIGHTS_ENV = os.getenv("ML_YOLO_SMOKE_WEIGHTS", "").strip()
 YOLO_WEAPON_WEIGHTS_ENV = os.getenv("ML_YOLO_WEAPON_WEIGHTS", "").strip()
 
@@ -388,9 +386,8 @@ def resolve_coco_weights_path() -> str | None:
 
 
 def resolve_custom_weights_path() -> str | None:
-    if YOLO_CUSTOM_WEIGHTS_ENV:
-        return _resolve_weights(YOLO_CUSTOM_WEIGHTS_ENV)
-    return _resolve_path(YOLO_WEIGHTS_CUSTOM)
+    """Custom best.pt model removed; callers already treat None as "no custom model"."""
+    return None
 
 
 def resolve_smoke_weights_path() -> str | None:
