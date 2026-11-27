@@ -2,9 +2,10 @@ import { Copy, Eye } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 export function getGoodsQrImageUrl(data: string, size = 72) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, size)
 }
 
 type GoodsQrDisplayProps = {

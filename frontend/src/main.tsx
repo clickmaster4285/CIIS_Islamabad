@@ -7,6 +7,12 @@ import { router } from "./routes"
 import { queryClient } from "@/lib/query-client"
 import { AUTH_SESSION_EXPIRED_EVENT, handleSessionExpired } from "@/lib/auth"
 import { stopOfficerGpsTracking } from "@/lib/officer-gps-session"
+// Fonts bundled locally (was Google Fonts) so pages load instantly without internet.
+import "@fontsource/inter/400.css"
+import "@fontsource/inter/500.css"
+import "@fontsource/inter/600.css"
+import "@fontsource/inter/700.css"
+import "@fontsource/outfit/800.css"
 import "./index.css"
 
 // Production SW can linger and break live MJPEG (/ml multipart). Keep SW off in dev

@@ -179,12 +179,12 @@ interface Vehicle {
 
 // Dummy vehicle images
 const dummyImages = {
-  car: "https://miro.medium.com/v2/resize:fit:1400/1*qre-gAVNTuazaUPvNw2w-Q.jpeg",
-  truck: "https://images.unsplash.com/photo-1503736334956-4c8f8e92946d?auto=format&fit=crop&w=400&q=80",
-  motorcycle: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcREr50YLuEgNaPh2bYOxgM7rR11H9pLIWQVaA&s",
-  suv: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRV2EmTviiWkhhw8oDHvlFA_KhszHSJZ_PqDw&s",
-  van: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRgmJMhTFIouAOuPdEcA26uVKPPkw5BFGYPhw&s",
-  bus:"https://cpimg.tistatic.com/5770042/b/4/roadways-bus-body.jpg"
+  car: "/offline/samples/b083efb36eba.jpg",
+  truck: "/offline/samples/ca4d1ae84c7d.jpg",
+  motorcycle: "/offline/samples/387df1a795ca.jpg",
+  suv: "/offline/samples/1de3781d0aff.jpg",
+  van: "/offline/samples/0fbc0e47b79c.jpg",
+  bus:"/offline/samples/aac2c79909a1.jpg"
 }
 
 // Sample vehicle data

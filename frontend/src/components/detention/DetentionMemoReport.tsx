@@ -4,6 +4,7 @@ import { Printer, FileDown } from "lucide-react"
 import html2pdf from "html2pdf.js"
 import { getDetentionMemoDetailPath } from "@/routes/config"
 import { pdfFilenameFromCaseNo } from "@/lib/save-report-pdf"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 type GoodsLineItem = {
   id: string
@@ -58,7 +59,7 @@ interface DetentionMemoReportProps {
 }
 
 function getQrCodeUrl(data: string, size = 180) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, size)
 }
 
 function getGoodsQrPayload(memoId: string, item: GoodsLineItem): string {

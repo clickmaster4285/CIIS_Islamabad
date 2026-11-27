@@ -72,10 +72,11 @@ import {
   type ViewCameraTarget,
 } from "@/components/detention/view-located-camera-dialog"
 import NoteSheetReportPrint from "@/components/seizure/NoteSheetReportPrint"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 function getQrCodeUrl(data: string, size = 120) {
   const responsiveSize = typeof window !== "undefined" && window.innerWidth < 640 ? Math.min(size, 100) : size
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${responsiveSize}x${responsiveSize}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, responsiveSize)
 }
 
 function statusChipClass(status: NoteSheetStatus) {

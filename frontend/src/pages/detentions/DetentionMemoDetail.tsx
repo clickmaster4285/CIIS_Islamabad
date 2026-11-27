@@ -38,6 +38,7 @@ import { GoodsQrDisplay } from "@/components/goods/goods-qr-display"
 import { cn } from "@/lib/utils"
 import { canUserFullyEditSeizureDocs } from "@/lib/seizure-management-api"
 import { getStoredUser } from "@/lib/auth"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 type GoodsLineItem = DetentionMemoGoodsLineApi
 
@@ -298,7 +299,7 @@ function NoteBlock({ children, tone = "blue" }: { children: ReactNode; tone?: "b
 function getQrCodeUrl(data: string, size = 180) {
   // Use responsive sizes based on screen
   const responsiveSize = typeof window !== 'undefined' && window.innerWidth < 640 ? 120 : size
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${responsiveSize}x${responsiveSize}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, responsiveSize)
 }
 
 function getGoodsQrPayload(memoId: string, item: GoodsLineItem): string {

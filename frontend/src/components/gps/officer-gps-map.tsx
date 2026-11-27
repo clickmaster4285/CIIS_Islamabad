@@ -11,8 +11,8 @@ const PIN_DEEP: Record<string, string> = {
   offline: "#b91c1c",
 }
 
-const LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-const LEAFLET_JS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+const LEAFLET_CSS = "/vendor/leaflet/leaflet.css" // local copy of leaflet@1.9.4 (offline)
+const LEAFLET_JS = "/vendor/leaflet/leaflet.js"
 // Islamabad deployment: default centre is Islamabad (approximate; set the exact office pin on Locations & Sync).
 export const GPS_DEFAULT_CENTER: [number, number] = [33.6844, 73.0479] // Islamabad
 // export const GPS_DEFAULT_CENTER: [number, number] = [34.008, 71.5789] // Peshawar Customs Office

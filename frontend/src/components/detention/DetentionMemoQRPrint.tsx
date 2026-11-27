@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button"
 import { Printer } from "lucide-react"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 interface DetentionMemoQRPrintProps {
   caseNo: string
@@ -11,7 +12,7 @@ interface DetentionMemoQRPrintProps {
 }
 
 function getQrCodeUrl(data: string, size = 1200) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, size)
 }
 
 function formatSlipDate(value: string): string {

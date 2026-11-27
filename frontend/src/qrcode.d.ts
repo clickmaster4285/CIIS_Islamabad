@@ -9,8 +9,16 @@ declare module "qrcode" {
     text: string,
     options?: QRCodeToDataURLOptions
   ): Promise<string>
+  export interface QRCodeModel {
+    modules: { size: number; get(col: number, row: number): boolean | number }
+  }
+  export function create(
+    text: string,
+    options?: { errorCorrectionLevel?: "L" | "M" | "Q" | "H" }
+  ): QRCodeModel
   const QRCode: {
     toDataURL: typeof toDataURL
+    create: typeof create
   }
   export default QRCode
 }

@@ -16,6 +16,7 @@ import type { DetentionMemoApiRecord } from "@/lib/detention-memo-api"
 import { GoodsLineText, goodsDetailCellClass, goodsHeadClass } from "@/components/goods/goods-line-text-field"
 import { GoodsQrDisplay } from "@/components/goods/goods-qr-display"
 import { cn } from "@/lib/utils"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 function DetailRow({ label, value }: { label: string; value: string | undefined }) {
   return (
@@ -28,7 +29,7 @@ function DetailRow({ label, value }: { label: string; value: string | undefined 
 
 function getQrCodeUrl(data: string, size = 180) {
   const responsiveSize = typeof window !== "undefined" && window.innerWidth < 640 ? 120 : size
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${responsiveSize}x${responsiveSize}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, responsiveSize)
 }
 
 function getGoodsQrPayload(memoId: string, item: { id: string; qrCodeNumber?: string }): string {

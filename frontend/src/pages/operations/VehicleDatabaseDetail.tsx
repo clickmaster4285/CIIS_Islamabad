@@ -156,11 +156,11 @@ interface Vehicle {
 
 // Dummy vehicle images
 const dummyImages = {
-  car: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRLptOjOJenqt7Bz6qsECtviNs6J1SylWar3w&s",
-  truck: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQYD5UL1GXpvNSYNEcIHC5--qpwVN6MolRg8A&s",
-  motorcycle: "https://images.unsplash.com/photo-1465101046530-73398c7f1a3b?auto=format&fit=crop&w=400&q=80",
-  suv: "https://images.unsplash.com/photo-1502877336882-7c3c71a5d2b5?auto=format&fit=crop&w=400&q=80",
-  van: "https://images.unsplash.com/photo-1519125323398-675f0ddb6308?auto=format&fit=crop&w=400&q=80"
+  car: "/offline/samples/027f052ed8cc.jpg",
+  truck: "/offline/samples/aaa6b2327af2.jpg",
+  motorcycle: "/offline/samples/placeholder.svg",
+  suv: "/offline/samples/placeholder.svg",
+  van: "/offline/samples/58027760a2ef.jpg"
 }
 
 // Sample vehicle data

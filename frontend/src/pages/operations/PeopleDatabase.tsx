@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { initialsAvatarUrl } from "@/lib/offline-avatar"
 import { useNavigate } from "react-router-dom"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Input } from "@/components/ui/input"
@@ -124,8 +125,7 @@ const isRenderableImageUrl = (v: string | undefined | null): v is string => {
 
 const getAvatarUrl = (person: Pick<Person, "id" | "name" | "imageUrl">) => {
   if (isRenderableImageUrl(person.imageUrl)) return person.imageUrl
-  const seed = encodeURIComponent(person.id || person.name || "person")
-  return `https://i.pravatar.cc/150?u=${seed}`
+  return initialsAvatarUrl(person.name, person.id)
 }
 
 const STORAGE_KEY = "customs-people-database"

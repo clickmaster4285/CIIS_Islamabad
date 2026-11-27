@@ -252,35 +252,35 @@ const VEHICLE_PLATES = [
 // AI Incident Images (Customs related)
 const INCIDENT_IMAGES = [
   {
-    url: "https://images.unsplash.com/photo-1566576912323-6e1f0475c3b3?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     caption: "Container scanning at Karachi Port"
   },
   {
-    url: "https://images.unsplash.com/photo-1586528116311-8440c5f0b9f3?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     caption: "X-ray scan showing suspicious items"
   },
   {
-    url: "https://images.unsplash.com/photo-1566576912323-6e1f0475c3b3?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     caption: "Customs inspection at airport cargo"
   },
   {
-    url: "https://images.unsplash.com/photo-1586528116311-8440c5f0b9f3?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     caption: "Detector dog alert at border"
   },
   {
-    url: "https://images.unsplash.com/photo-1544620347-c4fd4a3d5957?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/072a272e2011.jpg",
     caption: "Seized contraband items"
   },
   {
-    url: "https://images.unsplash.com/photo-1605000797499-95a51c5269ae?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/01c8d9758ee1.jpg",
     caption: "Currency smuggling detection"
   },
   {
-    url: "https://images.unsplash.com/photo-1587293852726-70cdb56c2866?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/52913cb7fb4a.jpg",
     caption: "Container examination facility"
   },
   {
-    url: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/b22a9792dfa7.jpg",
     caption: "Border customs checkpoint"
   }
 ]

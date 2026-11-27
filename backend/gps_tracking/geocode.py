@@ -70,7 +70,18 @@ def _cache_set(key: str, name: str) -> None:
         cache.set(f"{CACHE_PREFIX}{key}", _NEGATIVE, NEGATIVE_CACHE_TTL_SECONDS)
 
 
-def _http_get_json(url: str, timeout: float = 8.0) -> dict | list | None:
+# No internet: after one connection failure, skip lookups for a while instead of waiting
+# 8s on Photon + 8s on Nominatim for every point (made GPS pages crawl when offline).
+OFFLINE_BACKOFF_SECONDS = 60.0
+_offline_until = 0.0
+
+
+def _internet_down() -> bool:
+    return time.monotonic() < _offline_until
+
+
+def _http_get_json(url: str, timeout: float = 4.0) -> dict | list | None:
+    global _offline_until
     req = urllib.request.Request(
         url,
         headers={
@@ -84,7 +95,14 @@ def _http_get_json(url: str, timeout: float = 8.0) -> dict | list | None:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             return json.loads(raw)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+    except urllib.error.HTTPError as exc:  # server answered: internet is up
+        logger.debug("Reverse geocode request failed for %s: %s", url, exc)
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:  # DNS / connect / timeout: likely offline
+        _offline_until = time.monotonic() + OFFLINE_BACKOFF_SECONDS
+        logger.info("Reverse geocoding paused for %.0fs (no internet?): %s", OFFLINE_BACKOFF_SECONDS, exc)
+        return None
+    except (json.JSONDecodeError, ValueError) as exc:
         logger.debug("Reverse geocode request failed for %s: %s", url, exc)
         return None
 
@@ -200,10 +218,14 @@ def reverse_geocode_one(lat: float, lng: float) -> str:
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    if not geocoding_enabled():
-        return ""
+    if not geocoding_enabled() or _internet_down():
+        return ""  # not cached: resolve normally once the internet is back
 
-    name = _reverse_photon(lat, lng) or _reverse_nominatim(lat, lng)
+    name = _reverse_photon(lat, lng)
+    if not name and not _internet_down():
+        name = _reverse_nominatim(lat, lng)
+    if not name and _internet_down():
+        return ""  # offline failure, not a real "no address" — don't remember it
     _cache_set(key, name)  # an empty result is cached briefly as a miss
     return name
 

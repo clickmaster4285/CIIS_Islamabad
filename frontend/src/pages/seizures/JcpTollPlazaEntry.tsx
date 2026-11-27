@@ -58,61 +58,61 @@ const LOCATIONS = [
 // Real camera-captured vehicle images with visible number plates
 const VEHICLE_IMAGES = [
   {
-    url: "https://images.unsplash.com/photo-1549317661-bd32c8ce0db2?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/2b7c96292a06.jpg",
     plate: "LEJ-1234",
     detected: "LEJ-1234",
     confidence: 99.2
   },
   {
-    url: "https://images.unsplash.com/photo-1555215695-3004980ad54e?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/92402b6e22f7.jpg",
     plate: "ABC-5678",
     detected: "ABC-5678",
     confidence: 98.7
   },
   {
-    url: "https://images.unsplash.com/photo-1568605117036-5fe5e7fa0ab9?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     plate: "XYZ-9012",
     detected: "XYZ-9012",
     confidence: 99.1
   },
   {
-    url: "https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/4b90069ef519.jpg",
     plate: "KHI-3456",
     detected: "KHI-3456",
     confidence: 97.8
   },
   {
-    url: "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/18418d9981d0.jpg",
     plate: "LHR-7890",
     detected: "LHR-7890",
     confidence: 98.9
   },
   {
-    url: "https://images.unsplash.com/photo-1549317661-bd32c8ce0db2?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/2b7c96292a06.jpg",
     plate: "ISB-2345",
     detected: "ISB-2345",
     confidence: 99.4
   },
   {
-    url: "https://images.unsplash.com/photo-1555215695-3004980ad54e?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/92402b6e22f7.jpg",
     plate: "RWP-6789",
     detected: "RWP-6789",
     confidence: 98.2
   },
   {
-    url: "https://images.unsplash.com/photo-1568605117036-5fe5e7fa0ab9?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/placeholder.svg",
     plate: "FSD-0123",
     detected: "FSD-0123",
     confidence: 97.5
   },
   {
-    url: "https://images.unsplash.com/photo-1580273916550-e323be2ae537?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/4b90069ef519.jpg",
     plate: "MTN-4567",
     detected: "MTN-4567",
     confidence: 96.8
   },
   {
-    url: "https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/18418d9981d0.jpg",
     plate: "SWL-8901",
     detected: "SWL-8901",
     confidence: 98.1
@@ -122,21 +122,21 @@ const VEHICLE_IMAGES = [
 // Oversize vehicle images for customs
 const OVERSIZE_VEHICLES = [
   {
-    url: "https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/24127582faba.jpg",
     plate: "OVS-1234",
     type: "Heavy Truck",
     dimensions: "18.5m x 3.2m x 4.1m",
     weight: "42 tons"
   },
   {
-    url: "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/88ba0ee065e5.jpg",
     plate: "OVS-5678",
     type: "Container Truck",
     dimensions: "16.2m x 2.8m x 3.9m",
     weight: "38 tons"
   },
   {
-    url: "https://images.unsplash.com/photo-1519003722824-194d4455a60c?w=400&h=300&fit=crop&auto=format",
+    url: "/offline/samples/8d36ba20fd95.jpg",
     plate: "OVS-9012",
     type: "Dump Truck",
     dimensions: "14.8m x 3.0m x 3.8m",

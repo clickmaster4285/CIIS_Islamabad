@@ -209,7 +209,7 @@ export default function BlacklistManagementPage() {
       initialRows={[
         {
           id: 1,
-          profile_image: "https://randomuser.me/api/portraits/men/31.jpg",
+          profile_image: "/offline/samples/556dc63fbf11.jpg",
           name: "Imran Yousaf",
           email: "imran.yousaf@example.com",
           phone: "+92-300-1112233",
@@ -224,7 +224,7 @@ export default function BlacklistManagementPage() {
         },
         {
           id: 2,
-          profile_image: "https://randomuser.me/api/portraits/women/45.jpg",
+          profile_image: "/offline/samples/ac97b14356a5.jpg",
           name: "Samina Irfan",
           email: "samina.irfan@example.com",
           phone: "+92-321-4445566",
@@ -239,7 +239,7 @@ export default function BlacklistManagementPage() {
         },
         {
           id: 3,
-          profile_image: "https://randomuser.me/api/portraits/men/50.jpg",
+          profile_image: "/offline/samples/16c233ec621d.jpg",
           name: "Robert Kim",
           email: "robert.kim@example.com",
           phone: "+82-10-9876-5432",
@@ -255,7 +255,7 @@ export default function BlacklistManagementPage() {
         // ✅ New entries
         {
           id: 4,
-          profile_image: "https://randomuser.me/api/portraits/women/60.jpg",
+          profile_image: "/offline/samples/c609ad89c580.jpg",
           name: "Ayesha Khan",
           email: "ayesha.khan@example.com",
           phone: "+92-300-5566778",
@@ -270,7 +270,7 @@ export default function BlacklistManagementPage() {
         },
         {
           id: 5,
-          profile_image: "https://randomuser.me/api/portraits/men/65.jpg",
+          profile_image: "/offline/samples/0f2a6c17ee6c.jpg",
           name: "Ali Raza",
           email: "ali.raza@example.com",
           phone: "+92-321-7788990",
@@ -285,7 +285,7 @@ export default function BlacklistManagementPage() {
         },
         {
           id: 6,
-          profile_image: "https://randomuser.me/api/portraits/women/70.jpg",
+          profile_image: "/offline/samples/c3690aaae160.jpg",
           name: "Sadia Malik",
           email: "sadia.malik@example.com",
           phone: "+92-333-1122334",
@@ -300,7 +300,7 @@ export default function BlacklistManagementPage() {
         },
         {
           id: 7,
-          profile_image: "https://randomuser.me/api/portraits/men/75.jpg",
+          profile_image: "/offline/samples/1c4a8e12161e.jpg",
           name: "Hamza Sheikh",
           email: "hamza.sheikh@example.com",
           phone: "+92-334-2233445",

@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { initialsAvatarUrl } from "@/lib/offline-avatar"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { fetchVisitors } from "@/lib/visitor-api"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
@@ -151,8 +152,7 @@ function isRenderableImageUrl(v: string | undefined | null): v is string {
 
 function getAvatarUrl(person: { id: string; name: string; imageUrl?: string }) {
   if (isRenderableImageUrl(person.imageUrl)) return person.imageUrl
-  const seed = encodeURIComponent(person.id || person.name || "person")
-  return `https://i.pravatar.cc/150?u=${seed}`
+  return initialsAvatarUrl(person.name, person.id)
 }
 
 const RiskLevelBadge = ({ level }: { level: string }) => {

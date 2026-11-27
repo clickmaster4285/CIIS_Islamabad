@@ -12,9 +12,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { CUSTOMS_LOGO_SRC } from "@/lib/brand"
+import { qrImageUrl } from "@/lib/offline-qr"
 
 function getQrCodeUrl(data: string, size = 120) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`
+  return qrImageUrl(data, size)
 }
 
 function formatDate(value?: string): string {

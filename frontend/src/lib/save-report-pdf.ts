@@ -46,12 +46,39 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   })
 }
 
+function svgDataUrlToPng(svgUrl: string, size: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => {
+      const canvas = document.createElement("canvas")
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return reject(new Error("no canvas"))
+      ctx.imageSmoothingEnabled = false
+      ctx.drawImage(image, 0, 0, size, size)
+      resolve(canvas.toDataURL("image/png"))
+    }
+    image.onerror = () => reject(new Error("svg load failed"))
+    image.src = svgUrl
+  })
+}
+
 /** Inline remote QR / same-origin images so html2canvas does not lose them. */
 async function inlineImagesForPdf(root: HTMLElement): Promise<void> {
   const images = Array.from(root.querySelectorAll("img"))
   await Promise.all(
     images.map(async (img) => {
       const src = img.getAttribute("src") || img.src || ""
+      if (src.startsWith("data:image/svg+xml")) {
+        // Local QR codes are SVG; rasterise so html2canvas renders them reliably in the PDF.
+        try {
+          img.src = await svgDataUrlToPng(src, 480)
+        } catch {
+          /* keep the SVG */
+        }
+        return
+      }
       if (!src || src.startsWith("data:")) return
 
       const qrMatch = src.match(/api\.qrserver\.com\/[^'"]*[?&]data=([^&]+)/i)
