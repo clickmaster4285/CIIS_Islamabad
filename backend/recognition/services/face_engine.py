@@ -159,7 +159,12 @@ def _create_face_analysis(model_name: str, providers: list[str], ctx_id: int):
 
     last_exc: Exception | None = None
     for attempt_providers, attempt_ctx, label in attempts:
-        fa_kwargs: dict = {"providers": attempt_providers}
+        # Only what attendance uses: SCRFD boxes, ArcFace embedding, 3D landmarks (head pose).
+        # genderage + 2d106det would otherwise run on every face for nothing.
+        fa_kwargs: dict = {
+            "providers": attempt_providers,
+            "allowed_modules": ["detection", "recognition", "landmark_3d_68"],
+        }
         try:
             fa_kwargs["session_options"] = _onnx_session_options()
             app = FaceAnalysis(name=model_name, **fa_kwargs)

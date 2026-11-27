@@ -1065,6 +1065,8 @@ def filter_enrolled_staff_detections(detections: list[dict[str, Any]]) -> list[d
 _ANPR_VEHICLE_CLASS_IDS: frozenset[int] = frozenset({2, 3, 5, 7})
 _ANPR_VEHICLE_NAMES: frozenset[str] = frozenset({"car", "motorcycle", "bus", "truck", "vehicle"})
 _FACE_PURPOSE_CLASS_IDS: frozenset[int] = frozenset({0})  # person
+# Set ML_FACE_RECOGNITION_ON_ATTENDANCE=1 to run YuNet/SFace on attendance cameras again.
+_SKIP_FACES_ON_ATTENDANCE = os.getenv("ML_FACE_RECOGNITION_ON_ATTENDANCE", "0").strip().lower() not in ("1", "true", "yes")
 # General objects = COCO allowlist WITHOUT vehicles (vehicles only when ANPR is selected)
 _GENERAL_OBJECT_CLASS_IDS: frozenset[int] = frozenset(
     cid for cid in ALLOWED_COCO_CLASS_IDS if cid not in _ANPR_VEHICLE_CLASS_IDS
@@ -2318,8 +2320,10 @@ class LiveStreamManager:
         # Face / Attendance — person + face recognition only
         if purposes & {"face_recognition", "attendance"}:
             coco = True
-            recognize_faces = True
             coco_ids |= set(_FACE_PURPOSE_CLASS_IDS)
+            # Attendance cameras are already face-matched by the backend CCTV worker (InsightFace);
+            # running YuNet/SFace here too is duplicate work with a second, older gallery.
+            recognize_faces = not ("attendance" in purposes and _SKIP_FACES_ON_ATTENDANCE)
 
         # ANPR — vehicles + plate OCR only
         if "anpr" in purposes:
