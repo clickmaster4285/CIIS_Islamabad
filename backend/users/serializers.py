@@ -417,6 +417,8 @@ class StaffCreateSerializer(AssignedLocationMixin, serializers.ModelSerializer):
     class Meta:
         model = Staff
         fields = [
+            # "id" is returned so the frontend can call /api/staff/<id>/create_user/ right after create.
+            "id",
             "user", "full_name", "father_name", "first_name", "last_name", "cnic", "national_id",
             "date_of_birth", "gender", "marital_status", "blood_group", "profile_image",
             "email", "phone_primary", "phone_alternate", "address", "street_address",

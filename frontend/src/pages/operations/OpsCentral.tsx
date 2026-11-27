@@ -133,7 +133,7 @@ export default function OpsCentralPage() {
   const [error, setError] = useState<string | null>(null)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
 
-  const [qcName, setQcName] = useState("DI Khan")
+  const [qcName, setQcName] = useState("Islamabad")
   const [qcMode, setQcMode] = useState<"django" | "ml">("django")
   const [qcDjango, setQcDjango] = useState("192.168.199.12:8000")
   const [qcMl, setQcMl] = useState("192.168.199.12:8100")
@@ -414,7 +414,7 @@ export default function OpsCentralPage() {
                 <Input
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
-                  placeholder="DI Khan"
+                  placeholder="Islamabad"
                 />
               </div>
               <div className="space-y-2">
@@ -504,7 +504,7 @@ export default function OpsCentralPage() {
                   <Input
                     value={qcName}
                     onChange={(e) => setQcName(e.target.value)}
-                    placeholder="DI Khan"
+                    placeholder="Islamabad"
                   />
                 </div>
                 <div className="space-y-1.5">

@@ -14,12 +14,12 @@ const ISLAMABAD_HQ = {
 export const CITY_COORDINATES: Record<string, { lat: number; lng: number; zoom?: number }> = {
   islamabad: { ...ISLAMABAD_HQ },
   // peshawar: { lat: 34.008, lng: 71.5789, zoom: 15 },  // Islamabad deployment
-  mardan: { lat: 34.198, lng: 72.04, zoom: 13 },
-  nowshera: { lat: 34.015, lng: 71.975, zoom: 13 },
-  kohat: { lat: 33.5889, lng: 71.4428, zoom: 13 },
-  "di-khan": { lat: 31.831, lng: 70.901, zoom: 12 },
-  abbottabad: { lat: 34.1463, lng: 73.2117, zoom: 13 },
-  swat: { lat: 34.775, lng: 72.36, zoom: 12 },
+  // mardan: { lat: 34.198, lng: 72.04, zoom: 13 },  // Islamabad deployment
+  // nowshera: { lat: 34.015, lng: 71.975, zoom: 13 },  // Islamabad deployment
+  // kohat: { lat: 33.5889, lng: 71.4428, zoom: 13 },  // Islamabad deployment
+  // "di-khan": { lat: 31.831, lng: 70.901, zoom: 12 },  // Islamabad deployment
+  // abbottabad: { lat: 34.1463, lng: 73.2117, zoom: 13 },  // Islamabad deployment
+  // swat: { lat: 34.775, lng: 72.36, zoom: 12 },  // Islamabad deployment
 }
 
 function escapeHtml(value: string): string {

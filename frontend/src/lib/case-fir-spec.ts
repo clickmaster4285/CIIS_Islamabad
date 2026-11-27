@@ -140,20 +140,20 @@ export const CASE_TABLE_COLUMNS = [
 ] as const
 
 export const CUSTOMS_STATIONS = [
-  "Kohat",
-  "Mardan",
+  // "Kohat",  // Islamabad deployment
+  // "Mardan",  // Islamabad deployment
   // "Custom Peshawar",
   // "Nowshera",
   // "Customs Faisalabad",
-  "Yarik",
-  "DI Khan",
-  "SWH Ratta Kulachi",
+  // "Yarik",  // Islamabad deployment
+  // "DI Khan",  // Islamabad deployment
+  // "SWH Ratta Kulachi",  // Islamabad deployment
   "Islamabad",
   // "Peshawar",  // Islamabad deployment
   // "Customs Quetta",
-  "Nowshera",
-  "Abbottabad",
-  "DDK",
-  "Thakot",
-  "Hayatabad",
+  // "Nowshera",  // Islamabad deployment
+  // "Abbottabad",  // Islamabad deployment
+  // "DDK",  // Islamabad deployment
+  // "Thakot",  // Islamabad deployment
+  // "Hayatabad",  // Islamabad deployment
 ] as const

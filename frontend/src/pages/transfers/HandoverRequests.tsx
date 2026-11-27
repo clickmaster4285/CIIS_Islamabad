@@ -46,7 +46,8 @@ function saveRows(rows: HandoverRow[]) {
 }
 
 // Islamabad deployment: Peshawar removed.
-const REQUESTERS = ["Yarik Collectorate", "Islamabad Collectorate", "Rawalpindi Collectorate"]
+// Islamabad deployment: other collectorates removed (were Yarik Collectorate, Rawalpindi Collectorate).
+const REQUESTERS = ["Islamabad Collectorate"]
 const STATUSES = ["Pending", "Completed"]
 
 export default function HandoverRequestsPage() {

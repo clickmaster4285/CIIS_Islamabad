@@ -364,15 +364,15 @@ def _resolve_location_code(memo: DetentionMemo, cameras: list[Camera]) -> str:
         for choice in (
             "ISLAMABAD",
             # "PESHAWAR",  # Islamabad deployment
-            "KOHAT",
-            "NOWSHERA",
-            "MARDAN",
-            "DI_KHAN",
-            "SWH_RATTA_KULACHI",
-            "ABBOTTABAD",
-            "DDK",
-            "THAKOT",
-            "HAYATABAD",
+            # "KOHAT",  # Islamabad deployment
+            # "NOWSHERA",  # Islamabad deployment
+            # "MARDAN",  # Islamabad deployment
+            # "DI_KHAN",  # Islamabad deployment
+            # "SWH_RATTA_KULACHI",  # Islamabad deployment
+            # "ABBOTTABAD",  # Islamabad deployment
+            # "DDK",  # Islamabad deployment
+            # "THAKOT",  # Islamabad deployment
+            # "HAYATABAD",  # Islamabad deployment
         ):
             if choice in text or choice.replace("_", " ") in (field or "").upper():
                 return choice

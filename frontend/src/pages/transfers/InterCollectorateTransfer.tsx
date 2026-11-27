@@ -45,7 +45,8 @@ function saveRows(rows: TransferRow[]) {
 }
 
 // Islamabad deployment: Peshawar removed.
-const LOCATIONS = ["Yarik", "Islamabad", "Rawalpindi", "Faisalabad", "Multan"]
+// Islamabad deployment: other locations removed (were Yarik, Rawalpindi, Faisalabad, Multan).
+const LOCATIONS = ["Islamabad"]
 const STATUSES = ["Pending", "In Transit", "Completed"]
 
 export default function InterCollectorateTransferPage() {

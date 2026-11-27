@@ -42,16 +42,17 @@ function isDepositTerminal(row: DepositRow): boolean {
 }
 
 const WAREHOUSE_OPTIONS = [
-  "State Warehouse, Kohat Tunnel",
-  "State Warehouse, Bannu",
-  "State Warehouse, Salt House, Kohat",
-  "State Warehouse, D.I Khan",
+  "State Warehouse, Islamabad",
+  // "State Warehouse, Kohat Tunnel",  // Islamabad deployment
+  // "State Warehouse, Bannu",  // Islamabad deployment
+  // "State Warehouse, Salt House, Kohat",  // Islamabad deployment
+  // "State Warehouse, D.I Khan",  // Islamabad deployment
   "Bonded Godown A",
   "Bonded Godown B",
   "Transit Shed",
   "Customs House Islamabad",
   // "Customs House Peshawar",  // Islamabad deployment
-  "Customs House Yarik",
+  // "Customs House Yarik",  // Islamabad deployment
 ]
 
 type DepositRow = DepositAccountRow

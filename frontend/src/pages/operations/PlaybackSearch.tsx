@@ -31,7 +31,8 @@ import { useCameras } from "@/hooks/use-cameras"
 import { ROUTES } from "@/routes/config"
 
 // Islamabad deployment: "Peshawar" replaced by "Islamabad".
-const LOCATIONS = ["Islamabad", "Yarik", "DI Khan", "SWH Ratta Kulachi", "Kohat", "Mardan", "Nowshera","Chamkani"]
+// Islamabad deployment: other locations removed (were Yarik, DI Khan, SWH Ratta Kulachi, Kohat, Mardan, Nowshera, Chamkani).
+const LOCATIONS = ["Islamabad"]
 const RECORDING_TYPES = ["Continuous", "Motion", "Event", "Manual"]
 const EVENT_TYPES = ["Alert", "Bookmark", "Incident", "AI event"]
 

@@ -78,14 +78,16 @@ const REASONS = [
   "Others",
 ] as const
 const WAREHOUSES = [
-  "State Warehouse, Kohat Tunnel",
-  "State Warehouse, Bannu",
-  "State Warehouse, Salt House, Kohat",
-  "State Warehouse, D.I Khan",
+  "State Warehouse, Islamabad",
+  // "State Warehouse, Kohat Tunnel",  // Islamabad deployment
+  // "State Warehouse, Bannu",  // Islamabad deployment
+  // "State Warehouse, Salt House, Kohat",  // Islamabad deployment
+  // "State Warehouse, D.I Khan",  // Islamabad deployment
 ] as const
 const SELECT_WAREHOUSE_PLACEHOLDER = "__select_warehouse__"
 // Islamabad deployment: "MCC Peshawar" replaced by "MCC Islamabad".
-const DIRECTORATES = ["MCC D.I Khan AFU Import", "MCC Islamabad", "MCC YARIK", "MCC DI Khan"] as const
+// Islamabad deployment: other directorates removed (were "MCC D.I Khan AFU Import", "MCC YARIK", "MCC DI Khan").
+const DIRECTORATES = ["MCC Islamabad"] as const
 const GOODS_CONDITIONS = ["Seized", "Detained", "Under Examination", "Pending Clearance", "Unclaimed"] as const
 const GOODS_UNITS = ["PCS", "KGS", "LTR", "MTR", "CTN", "BOX", "BAG", "DOZ", "SET", "Other"] as const
 
@@ -245,7 +247,7 @@ export default function DetentionMemoCreatePage() {
   const [placeOfDetention, setPlaceOfDetention] = useState("")
   const [detentionType, setDetentionType] = useState("")
   const [referenceNumber, setReferenceNumber] = useState("")
-  const [directorate, setDirectorate] = useState("MCC D.I Khan AFU Import")
+  const [directorate, setDirectorate] = useState("MCC Islamabad")
   const [reasonForDetention, setReasonForDetention] = useState("")
   const [locationOfDetention, setLocationOfDetention] = useState("")
   const [gdNumber, setGdNumber] = useState("")
@@ -339,7 +341,7 @@ export default function DetentionMemoCreatePage() {
         setDateTimeDetention(memo.dateTimeDetention || "")
         setPlaceOfDetention(memo.placeOfDetention || "")
         setDetentionType(memo.detentionType || "")
-        setDirectorate(memo.directorate || "MCC D.I Khan AFU Import")
+        setDirectorate(memo.directorate || "MCC Islamabad")
         setReasonForDetention(memo.reasonForDetention || "")
         setLocationOfDetention(memo.locationOfDetention || "")
         setGdNumber(memo.gdNumber || "")

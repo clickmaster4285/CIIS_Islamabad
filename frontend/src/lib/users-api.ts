@@ -172,18 +172,18 @@ export const ROLE_OPTIONS = [
 export const COLLECTORATE_OPTIONS = [
   { value: "Islamabad", label: "Islamabad" },
   // { value: "Peshawar", label: "Peshawar" },  // Islamabad deployment
-  { value: "Kohat", label: "Kohat" },
-  { value: "Nowshera", label: "Nowshera" },
-  { value: "Mardan", label: "Mardan" },
-  { value: "Bannu", label: "Bannu" },
-  { value: "Dera Ismail Khan", label: "Dera Ismail Khan" },
-  { value: "SWH Ratta Kulachi", label: "SWH Ratta Kulachi" },
-  { value: "Swat", label: "Swat" },
-  { value: "Abbottabad", label: "Abbottabad" },
-  { value: "DDK", label: "DDK" },
-  { value: "Thakot", label: "Thakot" },
-  { value: "Hayatabad", label: "Hayatabad" },
-  { value: "Mansehra", label: "Mansehra" },
+  // { value: "Kohat", label: "Kohat" },  // Islamabad deployment
+  // { value: "Nowshera", label: "Nowshera" },  // Islamabad deployment
+  // { value: "Mardan", label: "Mardan" },  // Islamabad deployment
+  // { value: "Bannu", label: "Bannu" },  // Islamabad deployment
+  // { value: "Dera Ismail Khan", label: "Dera Ismail Khan" },  // Islamabad deployment
+  // { value: "SWH Ratta Kulachi", label: "SWH Ratta Kulachi" },  // Islamabad deployment
+  // { value: "Swat", label: "Swat" },  // Islamabad deployment
+  // { value: "Abbottabad", label: "Abbottabad" },  // Islamabad deployment
+  // { value: "DDK", label: "DDK" },  // Islamabad deployment
+  // { value: "Thakot", label: "Thakot" },  // Islamabad deployment
+  // { value: "Hayatabad", label: "Hayatabad" },  // Islamabad deployment
+  // { value: "Mansehra", label: "Mansehra" },  // Islamabad deployment
   { value: "Other", label: "Other" },
 ] as const;
 

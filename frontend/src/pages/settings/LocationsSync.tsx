@@ -258,7 +258,7 @@ function AddSiteDialog({
               <Label htmlFor="site-code">Location code</Label>
               <Input
                 id="site-code"
-                placeholder="e.g. BANNU"
+                placeholder="e.g. ISLAMABAD"
                 value={newCode}
                 onChange={(e) => setNewCode(e.target.value)}
               />
@@ -269,7 +269,7 @@ function AddSiteDialog({
           )}
           <div className="space-y-2">
             <Label htmlFor="site-name">Display name</Label>
-            <Input id="site-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Bannu" />
+            <Input id="site-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Islamabad" />
           </div>
           <div className="space-y-2">
             <Label htmlFor="site-url">Server address</Label>

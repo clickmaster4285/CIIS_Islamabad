@@ -20,30 +20,30 @@ from .models import ConnectionMode, RemoteServer
 KNOWN_LOCATION_CODES = (
     "ISLAMABAD",
     # "PESHAWAR",  # Islamabad deployment: Peshawar is not a site here
-    "KOHAT",
-    "NOWSHERA",
-    "MARDAN",
-    "DI_KHAN",
-    "SWH_RATTA_KULACHI",
-    "ABBOTTABAD",
-    "DDK",
-    "THAKOT",
-    "HAYATABAD",
+    # "KOHAT",  # Islamabad deployment
+    # "NOWSHERA",  # Islamabad deployment
+    # "MARDAN",  # Islamabad deployment
+    # "DI_KHAN",  # Islamabad deployment
+    # "SWH_RATTA_KULACHI",  # Islamabad deployment
+    # "ABBOTTABAD",  # Islamabad deployment
+    # "DDK",  # Islamabad deployment
+    # "THAKOT",  # Islamabad deployment
+    # "HAYATABAD",  # Islamabad deployment
     "LOCAL",
 )
 
 DISPLAY_NAMES = {
     "ISLAMABAD": "Islamabad",
     # "PESHAWAR": "Peshawar",
-    "KOHAT": "Kohat",
-    "NOWSHERA": "Nowshera",
-    "MARDAN": "Mardan",
-    "DI_KHAN": "DI Khan",
-    "SWH_RATTA_KULACHI": "SWH Ratta Kulachi",
-    "ABBOTTABAD": "Abbottabad",
-    "DDK": "DDK",
-    "THAKOT": "Thakot",
-    "HAYATABAD": "Hayatabad",
+    # "KOHAT": "Kohat",  # Islamabad deployment
+    # "NOWSHERA": "Nowshera",  # Islamabad deployment
+    # "MARDAN": "Mardan",  # Islamabad deployment
+    # "DI_KHAN": "DI Khan",  # Islamabad deployment
+    # "SWH_RATTA_KULACHI": "SWH Ratta Kulachi",  # Islamabad deployment
+    # "ABBOTTABAD": "Abbottabad",  # Islamabad deployment
+    # "DDK": "DDK",  # Islamabad deployment
+    # "THAKOT": "Thakot",  # Islamabad deployment
+    # "HAYATABAD": "Hayatabad",  # Islamabad deployment
     "LOCAL": "Local ML",
 }
 

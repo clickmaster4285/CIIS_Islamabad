@@ -25,11 +25,11 @@ from users.permissions import GLOBAL_ADMIN_ROLE, LOCATION_ADMIN_ROLE, get_locati
 _LOCATION_ALIASES = {
     "ISLAMABAD": {"ISB"},
     # "PESHAWAR": {"PEW"},
-    "ABBOTTABAD": {"ABT"},
-    "DI_KHAN": {"DIK"},
-    "MARDAN": {"MRD"},
-    "NOWSHERA": {"NOW"},
-    "KOHAT": {"KHT"},
+    # "ABBOTTABAD": {"ABT"},  # Islamabad deployment
+    # "DI_KHAN": {"DIK"},  # Islamabad deployment
+    # "MARDAN": {"MRD"},  # Islamabad deployment
+    # "NOWSHERA": {"NOW"},  # Islamabad deployment
+    # "KOHAT": {"KHT"},  # Islamabad deployment
 }
 
 # Super Admin + Location Admin may edit documents in any status (matches the

@@ -113,46 +113,46 @@ const STATUS_TYPES = [
 
 // Pakistan Customs Locations
 const LOCATIONS = [
-  "Karachi Port - Terminal 1",
-  "Karachi Port - Terminal 2",
-  "Port Qasim - Container Terminal",
-  "Jinnah International Airport - Cargo",
-  "Allama Iqbal International Airport - Cargo",
+  // "Karachi Port - Terminal 1",  // Islamabad deployment
+  // "Karachi Port - Terminal 2",  // Islamabad deployment
+  // "Port Qasim - Container Terminal",  // Islamabad deployment
+  // "Jinnah International Airport - Cargo",  // Islamabad deployment
+  // "Allama Iqbal International Airport - Cargo",  // Islamabad deployment
   "Islamabad International Airport - Cargo",
-  "Torkham Border - Customs Station",
-  "Wagah Border - Customs Station",
-  "Chaman Border - Customs Station",
-  "Wahga Customs Station",
-  "Sust Dry Port - Customs Station",
-  "Sialkot International Airport - Cargo",
-  "Faisalabad Dry Port",
-  "Lahore Dry Port",
-  "Multan Dry Port",
-  "Quetta Dry Port",
+  // "Torkham Border - Customs Station",  // Islamabad deployment
+  // "Wagah Border - Customs Station",  // Islamabad deployment
+  // "Chaman Border - Customs Station",  // Islamabad deployment
+  // "Wahga Customs Station",  // Islamabad deployment
+  // "Sust Dry Port - Customs Station",  // Islamabad deployment
+  // "Sialkot International Airport - Cargo",  // Islamabad deployment
+  // "Faisalabad Dry Port",  // Islamabad deployment
+  // "Lahore Dry Port",  // Islamabad deployment
+  // "Multan Dry Port",  // Islamabad deployment
+  // "Quetta Dry Port",  // Islamabad deployment
   // "Peshawar Dry Port",  // Islamabad deployment
-  "Gwadar Port - Container Terminal",
-  "KPT - East Wharf",
-  "KPT - West Wharf",
-  "Export Processing Zone - Karachi",
-  "Container Scanning Facility - Karachi",
-  "Container Scanning Facility - Lahore",
-  "Container Scanning Facility - Torkham"
+  // "Gwadar Port - Container Terminal",  // Islamabad deployment
+  // "KPT - East Wharf",  // Islamabad deployment
+  // "KPT - West Wharf",  // Islamabad deployment
+  // "Export Processing Zone - Karachi",  // Islamabad deployment
+  // "Container Scanning Facility - Karachi",  // Islamabad deployment
+  // "Container Scanning Facility - Lahore",  // Islamabad deployment
+  // "Container Scanning Facility - Torkham"  // Islamabad deployment
 ]
 
 // Customs Ports of Entry
 const PORTS_OF_ENTRY = [
-  "Karachi Sea Port",
-  "Port Qasim",
-  "Gwadar Port",
-  "Jinnah International Airport",
-  "Allama Iqbal International Airport",
+  // "Karachi Sea Port",  // Islamabad deployment
+  // "Port Qasim",  // Islamabad deployment
+  // "Gwadar Port",  // Islamabad deployment
+  // "Jinnah International Airport",  // Islamabad deployment
+  // "Allama Iqbal International Airport",  // Islamabad deployment
   "Islamabad International Airport",
-  "Torkham Land Port",
-  "Wagah Land Port",
-  "Chaman Land Port",
-  "Wahga Land Port",
-  "Sust Dry Port",
-  "Sialkot International Airport"
+  // "Torkham Land Port",  // Islamabad deployment
+  // "Wagah Land Port",  // Islamabad deployment
+  // "Chaman Land Port",  // Islamabad deployment
+  // "Wahga Land Port",  // Islamabad deployment
+  // "Sust Dry Port",  // Islamabad deployment
+  // "Sialkot International Airport"  // Islamabad deployment
 ]
 
 // Commodity Types

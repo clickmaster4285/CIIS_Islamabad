@@ -623,7 +623,7 @@ const ALL_NAV_ITEMS: (NavItem | NavGroup)[] = [
     children: [
       { label: "Employees", href: ROUTES.EMPLOYEES },
       { label: "Mobile Alerts", href: ROUTES.MOBILE_ALERTS },
-      { label: "Phone Activity", href: ROUTES.PHONE_ACTIVITY },
+      // { label: "Phone Activity", href: ROUTES.PHONE_ACTIVITY },
       { label: "Face Enrollment", href: ROUTES.FACE_ENROLLMENT },
       { label: "Attendance Monitor", href: ROUTES.ATTENDANCE_MONITOR },
       { label: "Attendance Dashboard", href: ROUTES.ATTENDANCE_DASHBOARD },
