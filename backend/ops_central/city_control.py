@@ -30,6 +30,7 @@ KNOWN_LOCATION_CODES = (
     # "THAKOT",  # Islamabad deployment
     # "HAYATABAD",  # Islamabad deployment
     "LOCAL",
+    
 )
 
 DISPLAY_NAMES = {

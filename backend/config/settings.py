@@ -522,6 +522,8 @@ ATTENDANCE_INSIGHTFACE_MODEL = os.getenv("ATTENDANCE_INSIGHTFACE_MODEL", "buffal
 ATTENDANCE_CCTV_SCAN_INTERVAL = float(os.getenv("ATTENDANCE_CCTV_SCAN_INTERVAL", "0.5"))
 ATTENDANCE_CCTV_DET_SIZE = int(os.getenv("ATTENDANCE_CCTV_DET_SIZE", "1280"))
 ATTENDANCE_CCTV_MIN_RECOG_FACE_PX = int(os.getenv("ATTENDANCE_CCTV_MIN_RECOG_FACE_PX", "80"))
+# Smallest face box the CCTV tracker keeps at all (0 = any size the detector finds).
+ATTENDANCE_CCTV_MIN_FACE_PX = int(os.getenv("ATTENDANCE_CCTV_MIN_FACE_PX", "40"))
 ATTENDANCE_CCTV_MIN_BLUR = float(os.getenv("ATTENDANCE_CCTV_MIN_BLUR", "20"))
 # Comma-separated ONNX providers override, e.g. "CUDAExecutionProvider,TensorrtExecutionProvider,CPUExecutionProvider"
 ATTENDANCE_ONNX_PROVIDERS = os.getenv("ATTENDANCE_ONNX_PROVIDERS", "")

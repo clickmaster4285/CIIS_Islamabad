@@ -216,7 +216,8 @@ export default function FaceEnrollmentPage() {
       toast({ title: "Select a staff member first", variant: "destructive" })
       return
     }
-    const image = captureBase64()
+    // Enrollment photos are the gallery every later match is compared against: keep them sharp.
+    const image = captureBase64(0.92, 1280)
     if (!image) {
       toast({ title: "No frame captured", description: "Start the camera and try again.", variant: "destructive" })
       return

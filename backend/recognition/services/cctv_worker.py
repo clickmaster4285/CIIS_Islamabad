@@ -22,7 +22,8 @@ from recognition.services.snapshot_saver import save_detection_snapshot, snapsho
 
 logger = logging.getLogger(__name__)
 
-MIN_FACE_PX = 40
+# Smallest face box the tracker keeps. 0 accepts every size the detector finds (higher false-match risk).
+MIN_FACE_PX = max(0, int(getattr(settings, "ATTENDANCE_CCTV_MIN_FACE_PX", 40)))
 MIN_DET_SCORE = 0.55
 UPSCALE_BELOW_PX = 110
 UPSCALE_FACTOR = 2.5

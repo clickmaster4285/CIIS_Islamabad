@@ -50,8 +50,10 @@ def _max_code_seq() -> int:
     from django.db.models import BigIntegerField, Max
     from django.db.models.functions import Cast, Substr
 
-    # This server's own people; HQ copies of city people carry "<CITY>:" codes.
-    own = JourneyPerson.all_objects.filter(local_rows_q())
+    # ``code`` is unique across ALL rows, so scan every row: a bare "PJ-" code tagged with another
+    # location (e.g. legacy PESHAWAR rows) still blocks that number. City copies carry "<CITY>:PJ-…"
+    # codes, which the regexes below already skip.
+    own = JourneyPerson.all_objects.all()
     pj = (
         own.filter(code__regex=r"^[Pp][Jj]-[0-9]{1,18}$")
         .annotate(seq=Cast(Substr("code", 4), BigIntegerField()))
@@ -68,7 +70,9 @@ def _max_code_seq() -> int:
 def _max_code_seq_full_scan() -> int:
     """Slow fallback for odd legacy codes (only used after a collision)."""
     max_seq = 0
-    for code in JourneyPerson.all_objects.filter(local_rows_q()).values_list("code", flat=True).iterator():
+    for code in JourneyPerson.all_objects.values_list("code", flat=True).iterator():
+        if ":" in (code or ""):
+            continue  # city copy ("ABBOTTABAD:PJ-00042") — numbered by that city
         n = parse_person_code_seq(code)
         if n is not None:
             max_seq = max(max_seq, n)

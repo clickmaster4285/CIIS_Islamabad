@@ -12,7 +12,8 @@ export function useCamera() {
     try {
       setError(null)
       const stream = await requestUserMedia({
-        video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
+        // 720p preview: 640x480 looked blurry when stretched over the 16:9 preview box.
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       })
       streamRef.current = stream

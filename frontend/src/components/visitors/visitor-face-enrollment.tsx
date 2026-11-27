@@ -73,7 +73,7 @@ export function VisitorFaceEnrollment({ visitorId }: { visitorId: number }) {
   }
 
   const handleCapture = async () => {
-    const image = captureBase64()
+    const image = captureBase64(0.92, 1280)
     if (!image) {
       toast({ title: "No frame captured", description: "Start the camera and try again.", variant: "destructive" })
       return
