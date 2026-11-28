@@ -7,15 +7,38 @@ import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/hooks/use-toast"
 import { resolveMediaUrl } from "@/lib/cameras-api"
 import { recognitionApi, type FaceSample } from "@/lib/recognition-api"
-import type { StaffOption } from "./FaceEnrollment"
+import { fetchStaff, type StaffRecord } from "@/lib/staff-api"
+
+export type StaffOption = {
+  value: string
+  label: string
+  staff: StaffRecord
+}
 
 /**
  * CCTV faces held for HR review. Approving adds the crop to that person's gallery
  * (better matching on real camera angles); every decision is also labelled data for
  * `manage.py calibrate_attendance_threshold`.
  */
-export function FaceSampleReview({ staffOptions }: { staffOptions: StaffOption[] }) {
+export function FaceSampleReview({ staffOptions: given }: { staffOptions?: StaffOption[] }) {
   const { toast } = useToast()
+  const [loadedStaff, setLoadedStaff] = useState<StaffRecord[]>([])
+  useEffect(() => {
+    if (given) return
+    fetchStaff()
+      .then(setLoadedStaff)
+      .catch(() => setLoadedStaff([]))
+  }, [given])
+  const staffOptions = useMemo<StaffOption[]>(
+    () =>
+      given ??
+      loadedStaff.map((s) => ({
+        value: String(s.id),
+        label: s.employee_id ? `${s.full_name} (${s.employee_id})` : s.full_name,
+        staff: s,
+      })),
+    [given, loadedStaff]
+  )
   const [samples, setSamples] = useState<FaceSample[]>([])
   const [pendingCount, setPendingCount] = useState(0)
   const [loading, setLoading] = useState(false)

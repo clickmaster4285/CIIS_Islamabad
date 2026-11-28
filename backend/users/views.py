@@ -273,9 +273,21 @@ class StaffViewSet(viewsets.ModelViewSet):
             user_id=OuterRef("user_id"),
             status=MobileAccessSession.STATUS_ACTIVE,
         )
+        from django.db.models import Prefetch
+
+        from recognition.models import FaceEnrollment
+
         return qs.annotate(
             mobile_app_installed=Exists(installed),
             mobile_logged_in=Exists(logged_in),
+        ).prefetch_related(
+            # Attendance face status on every row without loading the (large) embedding arrays.
+            Prefetch(
+                "face_enrollment",
+                queryset=FaceEnrollment.objects.only(
+                    "id", "staff_id", "is_trained", "is_enrolled", "total_images", "model_version", "updated_at"
+                ),
+            )
         )
 
     def get_serializer_class(self):

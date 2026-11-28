@@ -381,10 +381,6 @@ const ROLE_PATH_RULES: Record<RestrictedRole, PathRule> = {
       ROUTES.ACTIVITY_LOGS,
       // Attendance APIs use IsAdminOrHR (IT_ADMIN + collectorate officers + HR module grants)
       ROUTES.ATTENDANCE,
-      ROUTES.FACE_ENROLLMENT,
-      ROUTES.ATTENDANCE_MONITOR,
-      ROUTES.ATTENDANCE_DASHBOARD,
-      ROUTES.ATTENDANCE_REPORTS,
       ROUTES.SUPPORT_DASHBOARD,
       ROUTES.SUPPORT_ALL,
       ROUTES.SUPPORT_CREATE,
@@ -468,13 +464,10 @@ const ROLE_PATH_RULES: Record<RestrictedRole, PathRule> = {
   },
   HR: {
     exact: [
+      ROUTES.HR_DASHBOARD,
       ROUTES.EMPLOYEES,
       ROUTES.ADD_STAFF,
       ROUTES.ATTENDANCE,
-      ROUTES.FACE_ENROLLMENT,
-      ROUTES.ATTENDANCE_MONITOR,
-      ROUTES.ATTENDANCE_DASHBOARD,
-      ROUTES.ATTENDANCE_REPORTS,
       ROUTES.LEAVE_MANAGEMENT,
       ROUTES.PAYROLL,
       ROUTES.RECRUITMENT,
@@ -606,7 +599,7 @@ const MODULE_HOME_BY_LABEL: Record<string, string> = {
   "Visitor Management": ROUTES.VISITOR_MANAGEMENT_OVERVIEW,
   "Warehouse Management": ROUTES.OPERATIONS_DASHBOARD,
   "Seizure Management": ROUTES.SEIZURE_MANAGEMENT,
-  "Human Resource": ROUTES.EMPLOYEES,
+  "Human Resource": ROUTES.HR_DASHBOARD,
   "Armory": ROUTES.ARMORY,
   "Litigation Management": ROUTES.FIR_REGISTRATION,
   "Auction Management": ROUTES.ASO_PORTAL_SYNC,
@@ -638,7 +631,7 @@ export function getHomeRouteForRole(
   // Role defaults when Super Admin has not assigned custom modules.
   if (normalized === "GUARD") return ROUTES.GUARD_RECEPTION_PANEL
   if (normalized === "RECEPTIONIST") return ROUTES.VISITOR_MANAGEMENT_OVERVIEW
-  if (normalized === "HR") return ROUTES.EMPLOYEES
+  if (normalized === "HR") return ROUTES.HR_DASHBOARD
   if (
     normalized === "WAREHOUSE_OFFICER" ||
     normalized === "WAREHOUSE_SUPERINTENDENT" ||

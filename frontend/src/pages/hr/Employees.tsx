@@ -20,6 +20,7 @@ import {
   type StaffRecord,
 } from "@/lib/staff-api"
 import { StaffAvatar } from "@/components/hr/staff-avatar"
+import { AttendanceFaceBadge } from "@/components/hr/attendance-face-badge"
 import {
   Select,
   SelectContent,
@@ -231,6 +232,7 @@ export default function EmployeesPage() {
                     <TableHead>CNIC</TableHead>
                     <TableHead>Mobile No.</TableHead>
                     <TableHead>Current place of Posting</TableHead>
+                    <TableHead className="text-center">Face (attendance)</TableHead>
                     <TableHead className="text-center">Mobile app</TableHead>
                     <TableHead className="text-center">Mobile login</TableHead>
                     <TableHead>Transferred From</TableHead>
@@ -241,7 +243,7 @@ export default function EmployeesPage() {
                 <TableBody>
                   {filtered.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={15} className="text-center text-muted-foreground py-8">
+                      <TableCell colSpan={16} className="text-center text-muted-foreground py-8">
                         No staff found. Click "Add Staff" to create a new record.
                       </TableCell>
                     </TableRow>
@@ -278,6 +280,9 @@ export default function EmployeesPage() {
                         <TableCell className="whitespace-nowrap">{row.cnic || "—"}</TableCell>
                         <TableCell className="whitespace-nowrap">{row.phone || row.phone_primary || "—"}</TableCell>
                         <TableCell className="max-w-[200px] truncate">{row.current_posting || row.branch_location || "—"}</TableCell>
+                        <TableCell className="text-center">
+                          <AttendanceFaceBadge face={row.attendance_face} />
+                        </TableCell>
                         <TableCell className="text-center">
                           <span className={row.mobile_app_installed ? "font-semibold text-emerald-700" : "text-muted-foreground"}>
                             {row.mobile_app_installed ? "Installed" : "Not installed"}

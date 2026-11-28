@@ -203,10 +203,7 @@ export const ROUTES = {
   /** Path for employee detail; use getEmployeeDetailPath(id) for links */
   EMPLOYEE_DETAIL: "/employees/:id",
   ATTENDANCE: "/attendance",
-  FACE_ENROLLMENT: "/attendance/enrollment",
-  ATTENDANCE_MONITOR: "/attendance/monitor",
-  ATTENDANCE_DASHBOARD: "/attendance/dashboard",
-  ATTENDANCE_REPORTS: "/attendance/reports",
+  HR_DASHBOARD: "/hr/dashboard",
   LEAVE_MANAGEMENT: "/leave-management",
   PAYROLL: "/payroll",
 
@@ -620,15 +617,13 @@ const ALL_NAV_ITEMS: (NavItem | NavGroup)[] = [
   // },
   {
     label: "Human Resource",
+    overviewHref: ROUTES.HR_DASHBOARD,
     children: [
+      { label: "HR Dashboard", href: ROUTES.HR_DASHBOARD },
       { label: "Employees", href: ROUTES.EMPLOYEES },
-      { label: "Mobile Alerts", href: ROUTES.MOBILE_ALERTS },
+      // { label: "Mobile Alerts", href: ROUTES.MOBILE_ALERTS },
       // { label: "Phone Activity", href: ROUTES.PHONE_ACTIVITY },
-      { label: "Face Enrollment", href: ROUTES.FACE_ENROLLMENT },
-      { label: "Attendance Monitor", href: ROUTES.ATTENDANCE_MONITOR },
-      { label: "Attendance Dashboard", href: ROUTES.ATTENDANCE_DASHBOARD },
       { label: "Attendance", href: ROUTES.ATTENDANCE },
-      { label: "Attendance Reports", href: ROUTES.ATTENDANCE_REPORTS },
       { label: "Leave", href: ROUTES.LEAVE_MANAGEMENT },
       { label: "Payroll", href: ROUTES.PAYROLL },
       { label: "Recruitment", href: ROUTES.RECRUITMENT },
@@ -1038,11 +1033,7 @@ export const IT_ADMIN_NAV_SECTIONS: NavSection[] = [
   {
     title: "Attendance",
     items: [
-      { label: "Face Enrollment", href: ROUTES.FACE_ENROLLMENT },
-      { label: "Attendance Monitor", href: ROUTES.ATTENDANCE_MONITOR },
-      { label: "Attendance Dashboard", href: ROUTES.ATTENDANCE_DASHBOARD },
       { label: "Attendance", href: ROUTES.ATTENDANCE },
-      { label: "Attendance Reports", href: ROUTES.ATTENDANCE_REPORTS },
     ],
   },
 ]
@@ -1215,6 +1206,7 @@ export function getModuleLabelForPath(
     ["/visitors", "Visitor Management"],
     ["/settings/users", "System Configuration"],
     ["/settings/logs", "System Configuration"],
+    ["/hr", "Human Resource"],
     ["/employees", "Human Resource"],
     ["/recruitment", "Human Resource"],
     ["/requests-support", "Requests & Support"],

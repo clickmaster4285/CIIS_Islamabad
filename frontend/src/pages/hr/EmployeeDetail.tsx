@@ -13,6 +13,7 @@ import { ROUTES } from "@/routes/config"
 import { useToast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
 import { StaffAvatar } from "@/components/hr/staff-avatar"
+import { AttendanceFaceBadge } from "@/components/hr/attendance-face-badge"
 import { Badge } from "@/components/ui/badge"
 import {
   AlertDialog,
@@ -44,6 +45,7 @@ import {
   BarChart3,
   Pencil,
   Trash2,
+  ScanFace,
 } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
@@ -392,6 +394,37 @@ export default function EmployeeDetailPage() {
       </AlertDialog>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <DetailSection
+          title="Attendance face"
+          icon={ScanFace}
+          description="Built automatically from the staff photos when they are saved."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <AttendanceFaceBadge face={s.attendance_face} className="text-sm" />
+            {s.attendance_face?.status !== "enrolled" && (
+              <span className="text-sm text-muted-foreground">
+                Edit the employee and add clear, front-facing photos (one face per photo).
+              </span>
+            )}
+          </div>
+          <DetailGrid
+            items={[
+              [
+                "Usable face photos",
+                s.attendance_face
+                  ? `${s.attendance_face.photos} of ${s.attendance_face.required} required`
+                  : "—",
+              ],
+              ["Embeddings saved", s.attendance_face?.status === "enrolled" ? "Yes" : "No"],
+              ["Face model", val(s.attendance_face?.model)],
+              [
+                "Last updated",
+                s.attendance_face?.updated_at ? new Date(s.attendance_face.updated_at).toLocaleString() : "—",
+              ],
+            ]}
+          />
+        </DetailSection>
+
         <DetailSection title="Personal information" icon={User}>
           <DetailGrid
             items={[

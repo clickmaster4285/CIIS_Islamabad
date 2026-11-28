@@ -336,7 +336,38 @@ def _apply_staff_photo_urls(data: dict, instance) -> dict:
 # -----------------------------
 # Staff Serializer (Full) – all template fields
 # -----------------------------
+def attendance_face_status(staff) -> dict:
+    """Attendance (InsightFace ArcFace 512-d) enrollment status shown on the staff pages."""
+    from recognition.services.training import min_enrollment_images
+
+    required = min_enrollment_images()
+    try:
+        enrollment = staff.face_enrollment
+    except Exception:
+        enrollment = None
+    if enrollment is None:
+        return {"status": "not_enrolled", "label": "Not enrolled", "photos": 0, "required": required,
+                "model": None, "updated_at": None}
+    trained = bool(enrollment.is_trained)
+    photos = int(enrollment.total_images or 0)
+    if trained:
+        status, label = "enrolled", "Enrolled"
+    elif photos < required:
+        status, label = "needs_photos", f"Needs {required - photos} more good photo{'s' if required - photos != 1 else ''}"
+    else:
+        status, label = "not_trained", "Photos saved, not trained"
+    return {
+        "status": status,
+        "label": label,
+        "photos": photos,
+        "required": required,
+        "model": "InsightFace ArcFace (512-d)" if trained else None,
+        "updated_at": enrollment.updated_at,
+    }
+
+
 class StaffSerializer(serializers.ModelSerializer):
+    attendance_face = serializers.SerializerMethodField(read_only=True)
     user_details = serializers.SerializerMethodField(read_only=True)
     national_id = serializers.SerializerMethodField(read_only=True)
     staff_photo_urls = serializers.SerializerMethodField(read_only=True)
@@ -348,6 +379,9 @@ class StaffSerializer(serializers.ModelSerializer):
 
     def get_mobile_logged_in(self, obj):
         return _staff_mobile_flag(obj, "mobile_logged_in", logged_in=True)
+
+    def get_attendance_face(self, obj):
+        return attendance_face_status(obj)
 
     class Meta:
         model = Staff
@@ -588,6 +622,7 @@ def _staff_mobile_flag(obj, attr: str, *, logged_in: bool = False) -> bool:
 class StaffListSerializer(serializers.ModelSerializer):
     national_id = serializers.SerializerMethodField(read_only=True)
     face_enrolled = serializers.SerializerMethodField(read_only=True)
+    attendance_face = serializers.SerializerMethodField(read_only=True)
     staff_photo_urls = serializers.SerializerMethodField(read_only=True)
     mobile_app_installed = serializers.SerializerMethodField(read_only=True)
     mobile_logged_in = serializers.SerializerMethodField(read_only=True)
@@ -607,6 +642,7 @@ class StaffListSerializer(serializers.ModelSerializer):
             "staff_photos",
             "staff_photo_urls",
             "face_enrolled",
+            "attendance_face",
             "user",
             "employee_id",
             "personal_number",
@@ -642,6 +678,9 @@ class StaffListSerializer(serializers.ModelSerializer):
 
     def get_staff_photo_urls(self, obj):
         return staff_photo_urls_for(obj)
+
+    def get_attendance_face(self, obj):
+        return attendance_face_status(obj)
 
     def get_face_enrolled(self, obj):
         embeddings = getattr(obj, "face_embeddings", None)

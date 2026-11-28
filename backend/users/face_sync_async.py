@@ -1,14 +1,15 @@
-"""Run staff face enrollment after the DB commit; from HR views, off the request thread.
+"""Run attendance face enrollment after the DB commit; from HR views, off the request thread.
 
-Enrollment decodes every staff photo with InsightFace and pushes embeddings to the
-ML node, which takes seconds. Running it inside the save held the HTTP request open
-and could read photos that the transaction then rolled back.
+When staff photos change, InsightFace buffalo_l (SCRFD + ArcFace 512-d + 3D landmarks)
+builds the same FaceEnrollment gallery used for CCTV / webcam / selfie attendance.
+Running this inside the save held the HTTP request open and could read photos that
+the transaction then rolled back.
 
 - Every Staff save that changes photos calls schedule_staff_face_sync() (signals.py).
 - The job runs in transaction.on_commit, so a rolled-back save enrolls nothing.
 - Inside ``with background_face_sync():`` (the HR staff views) the job runs on a
-  daemon thread; elsewhere (management commands, sync workers) it runs inline after
-  commit so a short-lived process does not exit before enrollment finishes.
+    daemon thread; elsewhere (management commands, sync workers) it runs inline after
+    commit so a short-lived process does not exit before enrollment finishes.
 - Several saves of one staff member collapse: while a job for that staff runs,
   further requests only mark it pending and the running job goes round once more.
 """
@@ -43,13 +44,19 @@ def _in_background_mode() -> bool:
     return getattr(_local, "depth", 0) > 0
 
 
-def _sync_one(staff_pk: int, force: bool) -> None:
-    from ml.face_sync import sync_staff_faces_after_save
+def _sync_one(staff_pk: int, _force: bool) -> None:
     from users.models import Staff
 
-    staff = Staff.objects.filter(pk=staff_pk).first()
-    if staff is not None:
-        sync_staff_faces_after_save(staff, force=force)
+    if not Staff.objects.filter(pk=staff_pk).exists():
+        return
+    try:
+        # Single embedding path: buffalo_l ArcFace (512-d) from Add/Edit Staff photos.
+        # Same FaceEnrollment vectors are matched for attendance — no separate SFace pass.
+        from recognition.services.training import enroll_from_staff_photos
+
+        enroll_from_staff_photos(Staff.objects.get(pk=staff_pk))
+    except Exception:
+        logger.exception("Attendance (InsightFace) enrollment from staff photos failed for staff %s", staff_pk)
 
 
 def _drain(staff_pk: int) -> None:

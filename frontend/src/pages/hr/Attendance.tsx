@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Link } from "react-router-dom"
 import { Clock, LogIn, UserCheck, Calendar, Camera, Eye, Edit, Trash2, FileDown } from "lucide-react"
 import { ModulePageLayout } from "@/components/dashboard/module-page-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -68,6 +67,7 @@ import {
 import { fetchMLHealth, type MLHealthResponse } from "@/lib/ml-api"
 import { REALTIME_INVALIDATE_EVENT } from "@/lib/realtime-socket"
 import { ROUTES } from "@/routes/config"
+import { FaceSampleReview } from "./FaceSampleReview"
 import { SourceLocationSelect } from "@/components/sync/source-location-select"
 import { ALL_SOURCE_LOCATIONS, useSourceLocations } from "@/lib/source-location"
 
@@ -428,24 +428,8 @@ export default function AttendancePage() {
   return (
     <ModulePageLayout
       title="Attendance"
-      description="InsightFace check-in/out records, face enrollment, CCTV monitor, and reports."
-      breadcrumbs={[{ label: "HR" }, { label: "Attendance" }]}
-      actions={
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link to={ROUTES.FACE_ENROLLMENT}>Face Enrollment</Link>
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to={ROUTES.ATTENDANCE_MONITOR}>Monitor</Link>
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to={ROUTES.ATTENDANCE_DASHBOARD}>Dashboard</Link>
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <Link to={ROUTES.ATTENDANCE_REPORTS}>Reports</Link>
-          </Button>
-        </div>
-      }
+      description="InsightFace check-in/out records and reports. Faces are enrolled from the staff photos; CCTV cameras mark attendance automatically."
+      breadcrumbs={[{ label: "HR", href: ROUTES.HR_DASHBOARD }, { label: "Attendance" }]}
     >
       <div className="grid gap-6">
         <div className="grid gap-4 md:grid-cols-4">
@@ -966,6 +950,9 @@ export default function AttendancePage() {
             reportRef={pdfReportRef}
           />
         )}
+      </div>
+      <div className="mt-6">
+        <FaceSampleReview />
       </div>
     </ModulePageLayout>
   )

@@ -124,7 +124,7 @@ const EXPLICIT_SUBMENU_ICONS: Record<string, SidebarIconComponent> = {
   Attendance: UserCheck,
   "Face Enrollment": ScanFace,
   "Attendance Monitor": Monitor,
-  "Attendance Dashboard": LayoutDashboard,
+  "HR Dashboard": LayoutDashboard,
   "Attendance Reports": BarChart3,
   Notifications: Bell,
   "Locations & Sync": Network,

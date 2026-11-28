@@ -1,5 +1,14 @@
 import { API_BASE_URL, getAuthHeaders, getAuthHeadersFormData, getStoredToken } from "@/lib/api";
 
+export type AttendanceFaceStatus = {
+  status: "enrolled" | "needs_photos" | "not_trained" | "not_enrolled";
+  label: string;
+  photos: number;
+  required: number;
+  model: string | null;
+  updated_at: string | null;
+};
+
 /** Staff record as returned by the backend (list/detail). */
 export type StaffRecord = {
   id: number;
@@ -18,6 +27,8 @@ export type StaffRecord = {
   profile_image: string | null;
   staff_photos?: string[] | null;
   staff_photo_urls?: string[] | null;
+  /** Attendance face (InsightFace ArcFace 512-d) enrollment, built from the staff photos. */
+  attendance_face?: AttendanceFaceStatus | null;
   email?: string | null;
   phone_primary?: string | null;
   phone_alternate?: string | null;
