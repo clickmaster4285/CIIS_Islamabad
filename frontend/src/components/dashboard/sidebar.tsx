@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils"
 import { AUTH_USER_UPDATED_EVENT, getStoredUser } from "@/lib/auth"
 import { getNavSectionsForRole, getAncestorMenusForPath, type NavGroup } from "@/routes/config"
 import { prefetchRoute } from "@/routes/prefetch"
-import { getNodeKey, hasActiveDescendant, isNavGroup, type SidebarNode } from "@/components/dashboard/sidebar.helpers"
+import { getNodeKey, isNavGroup, type SidebarNode } from "@/components/dashboard/sidebar.helpers"
 import { renderMenuIcon } from "@/components/dashboard/sidebar.icons"
 import { CUSTOMS_LOGO_SRC } from "@/lib/brand"
 
@@ -37,7 +37,7 @@ type SidebarChildrenProps = {
   nodes: SidebarNode[]
   pathname: string
   expandedItems: string[]
-  onToggle: (label: string) => void
+  onToggle: (label: string, siblingLabels?: string[]) => void
   childLinkClass: (href: string) => string
   depth: number
   isFavorite: (href: string) => boolean
@@ -54,17 +54,20 @@ function SidebarChildren({
   isFavorite,
   onToggleFavorite,
 }: SidebarChildrenProps) {
+  const siblingGroupLabels = nodes.filter(isNavGroup).map((n) => n.label)
+
   return (
     <>
       {nodes.map((node) => {
         if (!isNavGroup(node)) {
           const fav = isFavorite(node.href)
+          const linkActive = pathname === node.href
           return (
             <div
               key={getNodeKey(node)}
               className={cn(
                 "group/link flex items-center gap-1 rounded-none",
-                pathname === node.href && "bg-[#EBF2FF]",
+                linkActive && "bg-[#EBF2FF]",
                 "hover:bg-[#F3F7FF]"
               )}
             >
@@ -98,32 +101,33 @@ function SidebarChildren({
         }
 
         const label = node.label
-        const isExpanded = expandedItems.includes(label)
-        const isActive = hasActiveDescendant(node, pathname)
+        const isOpen = expandedItems.includes(label)
+        // Blush follows the opened nested module (accordion among siblings).
+        const showBlush = isOpen
 
         return (
           <div key={getNodeKey(node)}>
-            <div className={cn(isActive && "bg-[#F3F7FF] rounded-none")}>
+            <div className={cn(showBlush && "bg-[#F3F7FF] rounded-none")}>
               <button
                 type="button"
-                onClick={() => onToggle(label)}
-                aria-expanded={isExpanded}
+                onClick={() => onToggle(label, siblingGroupLabels)}
+                aria-expanded={isOpen}
                 className={cn(
                   "w-full flex items-center justify-between px-2 py-1.5 rounded-none transition-all duration-200 border border-transparent border-l-0",
-                  isActive
+                  showBlush
                     ? "sidebar-nested-module-selected"
                     : "text-[14px] text-muted-foreground hover:text-[#155DFC] hover:bg-[#F5F8FF]"
                 )}
               >
                 <span className="flex items-center whitespace-nowrap text-left pl-1">{label}</span>
-                {isExpanded ? (
-                  <ChevronDown size={16} aria-hidden className={cn("shrink-0", isActive && "text-[#155DFC]")} />
+                {isOpen ? (
+                  <ChevronDown size={16} aria-hidden className={cn("shrink-0", showBlush && "text-[#155DFC]")} />
                 ) : (
-                  <ChevronRight size={16} aria-hidden className={cn("shrink-0", isActive && "text-[#155DFC]")} />
+                  <ChevronRight size={16} aria-hidden className={cn("shrink-0", showBlush && "text-[#155DFC]")} />
                 )}
               </button>
             </div>
-            {isExpanded && (
+            {isOpen && (
               <div className="ml-5 mt-0.5 space-y-0.5 border-l-2 border-[#C1D9F8] pl-2 overflow-hidden">
                 <SidebarChildren
                   nodes={node.children}
@@ -172,15 +176,21 @@ export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenC
   )
   const [favorites, setFavorites] = useState<FavoriteItem[]>(loadFavorites)
 
-  // Expand the active route's parent menus when the route or menu changes (adjusted during render).
+  const topLevelLabels = useMemo(() => {
+    const labels = new Set<string>()
+    for (const section of navSections) {
+      for (const item of section.items) {
+        if (isNavGroup(item)) labels.add(item.label)
+      }
+    }
+    return labels
+  }, [navSections])
+
+  // Expand only the active route's menus when the route or menu changes (one main menu at a time).
   const [prevNav, setPrevNav] = useState({ pathname, navSections })
   if (prevNav.pathname !== pathname || prevNav.navSections !== navSections) {
     setPrevNav({ pathname, navSections })
-    const ancestors = getAncestorMenusForPath(pathname, navSections)
-    setExpandedItems((prev) => {
-      const missing = ancestors.filter((label) => !prev.includes(label))
-      return missing.length === 0 ? prev : [...prev, ...missing]
-    })
+    setExpandedItems(getAncestorMenusForPath(pathname, navSections))
   }
 
   useEffect(() => {
@@ -191,10 +201,20 @@ export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenC
     saveFavorites(favorites)
   }, [favorites])
 
-  const toggleExpand = (label: string) => {
-    setExpandedItems((prev) =>
-      prev.includes(label) ? prev.filter((item) => item !== label) : [...prev, label]
-    )
+  const toggleExpand = (label: string, siblingLabels?: string[]) => {
+    setExpandedItems((prev) => {
+      const isOpen = prev.includes(label)
+      if (topLevelLabels.has(label)) {
+        // Accordion: only one top-level main menu open at a time.
+        return isOpen ? [] : [label]
+      }
+      // Nested accordion among siblings so blush moves to the newly opened submodule.
+      if (siblingLabels?.length) {
+        const withoutSiblings = prev.filter((item) => !siblingLabels.includes(item))
+        return isOpen ? withoutSiblings : [...withoutSiblings, label]
+      }
+      return isOpen ? prev.filter((item) => item !== label) : [...prev, label]
+    })
   }
 
   const isExpanded = (label: string) => expandedItems.includes(label)
@@ -380,7 +400,9 @@ export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenC
 
               const group = item as NavGroup
               const label = group.label
-              const isActive = hasActiveDescendant(group, pathname)
+              const open = isExpanded(label)
+              // Blush follows the opened main module (accordion), not a stale route under a closed menu.
+              const showBlush = open
 
               return (
                 <div key={getNodeKey(group)}>
@@ -396,27 +418,27 @@ export const Sidebar = memo(function Sidebar({ mobileOpen = false, onMobileOpenC
                       if (group.overviewHref) navigate(group.overviewHref)
                       toggleExpand(label)
                     }}
-                    aria-expanded={isExpanded(label)}
+                    aria-expanded={open}
                     className={cn(
                       "w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all duration-200",
-                      isActive
+                      showBlush
                         ? "sidebar-active-gradient sidebar-main-module-selected"
                         : "text-sm text-[#4B5563] hover:text-[#2860C8] hover:bg-[#D2DCF5]/80"
                     )}
                   >
                     <div className="flex items-center gap-3">
                       <span className="w-6 shrink-0 flex items-center justify-start" aria-hidden>
-                        {renderMenuIcon(label, 16, isActive ? "shrink-0 text-[#155DFC]" : "shrink-0 text-[#6B7280]")}
+                        {renderMenuIcon(label, 16, showBlush ? "shrink-0 text-[#155DFC]" : "shrink-0 text-[#6B7280]")}
                       </span>
                       <span className="whitespace-nowrap text-left">{label}</span>
                     </div>
-                    {isExpanded(label) ? (
-                      <ChevronDown size={16} aria-hidden className={cn("shrink-0", isActive ? "text-[#155DFC]" : "text-[#6B7280]")} />
+                    {open ? (
+                      <ChevronDown size={16} aria-hidden className={cn("shrink-0", showBlush ? "text-[#155DFC]" : "text-[#6B7280]")} />
                     ) : (
-                      <ChevronRight size={16} aria-hidden className={cn("shrink-0", isActive ? "text-[#155DFC]" : "text-[#6B7280]")} />
+                      <ChevronRight size={16} aria-hidden className={cn("shrink-0", showBlush ? "text-[#155DFC]" : "text-[#6B7280]")} />
                     )}
                   </button>
-                  {isExpanded(label) && (
+                  {open && (
                     <div className="ml-6 mt-1.5 space-y-1 border-l-2 border-[#C1D9F8] pl-2 overflow-hidden">
                       <SidebarChildren
                         nodes={group.children}

@@ -619,7 +619,6 @@ const ALL_NAV_ITEMS: (NavItem | NavGroup)[] = [
     label: "Human Resource",
     overviewHref: ROUTES.HR_DASHBOARD,
     children: [
-      { label: "HR Dashboard", href: ROUTES.HR_DASHBOARD },
       { label: "Employees", href: ROUTES.EMPLOYEES },
       // { label: "Mobile Alerts", href: ROUTES.MOBILE_ALERTS },
       // { label: "Phone Activity", href: ROUTES.PHONE_ACTIVITY },
