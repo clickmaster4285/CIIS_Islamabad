@@ -127,22 +127,14 @@ def resolve_user_for_face_identity(identity: str) -> User | None:
 
 
 def staff_is_enrolled_for_attendance(staff: Staff | None) -> bool:
-    """True when InsightFace enrollment is trained (preferred) or legacy photos exist."""
+    """True when buffalo_l ArcFace FaceEnrollment is trained (same vectors used for punches)."""
     if staff is None:
         return False
     try:
         enrollment = getattr(staff, "face_enrollment", None)
-        if enrollment is not None and enrollment.is_trained and enrollment.embedding:
-            return True
+        return bool(enrollment is not None and enrollment.is_trained and enrollment.embedding)
     except Exception:
-        pass
-    # Legacy fallback during migration — prefer InsightFace going forward
-    from ml.face_sync import staff_has_face_embedding
-    from users.staff_photos import staff_photo_paths
-
-    if staff_has_face_embedding(staff):
-        return True
-    return bool(staff_photo_paths(staff))
+        return False
 
 
 def _touch_camera_cooldown(key: str) -> None:
